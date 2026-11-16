@@ -1,0 +1,5 @@
+This module contains source code from the Termux app (https://github.com/termux/termux-app),
+terminal-emulator and terminal-view libraries, tag v0.118.3, which are released under the
+Apache License 2.0 (they derive from https://github.com/jackpal/Android-Terminal-Emulator).
+TerminalSession.java was modified to drive a remote terminal over a network transport
+instead of a local pseudo-terminal; JNI.java and the native code were removed.

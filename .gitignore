@@ -1,0 +1,22 @@
+# Android / Gradle
+android/.gradle/
+android/.kotlin/
+android/build/
+android/app/build/
+android/terminal/build/
+android/local.properties
+android/captures/
+*.iml
+.idea/
+*.apk
+*.aab
+
+# Daemon build outputs
+daemon/agentc
+daemon/agentctl
+
+# Secrets: never commit these
+**/firebase-service-account.json
+*-firebase-adminsdk-*.json
+*.keystore
+*.jks

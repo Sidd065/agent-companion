@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "496493786722",
+    "project_id": "go-agentcompanion",
+    "storage_bucket": "go-agentcompanion.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:496493786722:android:4608f943025e5950a6433b",
+        "android_client_info": {
+          "package_name": "io.github.sidd065.agentcompanion"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyBGOMWLuQCrQGuVzCuhuHI_AQ__uv9027w"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}

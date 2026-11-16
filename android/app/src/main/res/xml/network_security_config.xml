@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Hosts are normally reached over HTTPS (Cloudflare quick tunnels). A plain
+     ws:// URL (for example a LAN address advertised by agentc pair) is still safe:
+     every message is end-to-end encrypted and authenticated with Noise (see SecureSocket). -->
+<network-security-config>
+    <base-config cleartextTrafficPermitted="true" />
+</network-security-config>
