@@ -53,14 +53,36 @@ var (
 	noResponseRe = regexp.MustCompile(`^\(?no (content|response)( requested)?\.?\)?$`)
 )
 
+type rtool struct {
+	name   string
+	input  map[string]any
+	hidden bool
+}
+
+// Replayer converts transcript entries into ACP session updates. It keeps the
+// tool calls it has seen, so a transcript can be fed in pieces as it grows
+// (following a conversation that runs in a terminal).
+type Replayer struct {
+	cwd    string
+	emit   func(map[string]any)
+	notice func(level, text string)
+	tools  map[string]*rtool
+}
+
+// NewReplayer returns a replayer for one conversation.
+func NewReplayer(cwd string, emit func(map[string]any), notice func(level, text string)) *Replayer {
+	return &Replayer{cwd: cwd, emit: emit, notice: notice, tools: map[string]*rtool{}}
+}
+
 // ReplayUpdates converts transcript entries into ACP session updates.
 func ReplayUpdates(chain []*Entry, cwd string, emit func(map[string]any), notice func(level, text string)) {
-	type tool struct {
-		name   string
-		input  map[string]any
-		hidden bool
-	}
-	tools := map[string]*tool{}
+	NewReplayer(cwd, emit, notice).Feed(chain)
+}
+
+// Feed replays more entries.
+func (r *Replayer) Feed(chain []*Entry) {
+	type tool = rtool
+	tools, cwd, emit, notice := r.tools, r.cwd, r.emit, r.notice
 	userText := func(e *Entry, text string) {
 		emit(map[string]any{"sessionUpdate": "user_message_chunk", "content": map[string]any{"type": "text", "text": text},
 			"_meta": map[string]any{"agentc": map[string]any{"uuid": e.UUID, "ts": e.ts()}}})

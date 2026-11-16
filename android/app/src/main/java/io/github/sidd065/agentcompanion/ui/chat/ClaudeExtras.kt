@@ -83,15 +83,19 @@ private fun JsonObject.arr(k: String): List<JsonObject> = (this[k] as? JsonArray
 
 /** Shown when a Claude Code terminal on the computer has this conversation open. */
 @Composable
-fun LiveElsewhereBanner(s: SessionSummary?, onFork: () -> Unit) {
+fun LiveElsewhereBanner(s: SessionSummary?, onOpenTerminal: (() -> Unit)? = null, onFork: () -> Unit) {
     val st = s?.liveElsewhere ?: return
     val ex = LocalExtra.current
     Surface(color = ex.warning.copy(alpha = 0.12f), modifier = Modifier.fillMaxWidth()) {
         Row(Modifier.padding(start = 16.dp, end = 8.dp, top = 6.dp, bottom = 6.dp), verticalAlignment = Alignment.CenterVertically) {
             Icon(Icons.Outlined.Terminal, null, Modifier.size(16.dp), tint = ex.warning)
             Spacer(Modifier.width(8.dp))
-            Text("Open in Claude Code on the computer ($st). Close it there to continue here, or fork it.",
-                style = MaterialTheme.typography.bodySmall, modifier = Modifier.weight(1f))
+            Text(
+                if (onOpenTerminal != null) "Running in a terminal ($st). It updates here live; type in the terminal, or fork it."
+                else "Open in Claude Code on the computer ($st). It updates here live; close it there to continue here, or fork it.",
+                style = MaterialTheme.typography.bodySmall, modifier = Modifier.weight(1f),
+            )
+            if (onOpenTerminal != null) TextButton(onClick = onOpenTerminal) { Text("Terminal") }
             TextButton(onClick = onFork) { Text("Fork") }
         }
     }

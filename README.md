@@ -1,14 +1,14 @@
 # Agent Companion
 
-Run and follow coding agents on your computers from an Android phone. It works like the Claude app's
-remote control for Claude Code. **agy** (Google's Antigravity CLI) is supported today; Claude Code and Codex
-are next, on the same design.
+Run and follow coding agents on your computers from an Android phone, like the Claude app's remote control
+for Claude Code. It supports **Claude Code** and **agy** (Google's Antigravity CLI); Codex is next.
 
 ```
- Android app ──── wss:// (Cloudflare quick tunnel) ────▶ cloudflared ─▶ agentc ──┬─ agy acp      (one per chat session)
-  (Kotlin/Compose)   end-to-end encrypted (Noise IK)                   (Go)     ├─ agy language server (tasks, artifacts…)
-        ▲                                                                       ├─ tmux         (terminals, agyr)
-        └────────────── Firebase Cloud Messaging (notifications) ◀──────────────┘
+ Android app ──── wss:// (Cloudflare quick tunnel) ────▶ cloudflared ─▶ agentc ──┬─ claude -p     (one per Claude session, stream-json)
+  (Kotlin/Compose)   end-to-end encrypted (Noise IK)                   (Go)     ├─ agy acp       (one per agy session)
+        ▲                                                                       ├─ agy language server (tasks, artifacts…)
+        │                                                                       ├─ ~/.claude      (history, checkpoints, subagents)
+        └────────────── Firebase Cloud Messaging (notifications) ◀──────────────┴─ tmux          (terminals: claude, agy, shells)
 ```
 
 One app talks to any number of computers at once. Each runs the `agentc` daemon. Sessions and terminals
@@ -16,27 +16,50 @@ from every host show up together.
 
 ## What you can do from the phone
 
-- **Chat sessions:** start an agent in any folder on any of your computers, send messages with photos and
-  files, and stop a turn. Queue follow-ups or send them right away. Switch the model, effort and mode, and
-  run slash commands.
-- **Live transcript:** streaming answers and thoughts; tool calls with diffs; plans and to-dos; usage.
+For both agents:
+
+- **Chat sessions:** start an agent in any folder on any of your computers. Send messages with photos and
+  files, and stop a turn. Queue follow-ups, or send them while the agent works. Switch the model, effort
+  and mode, and run slash commands.
+- **Live transcript:** streaming answers and thinking, tool calls with diffs, plans and to-dos, usage.
 - **Approvals:** allow or deny tool calls (or *deny with a comment*), answer questions, approve plans. All
   of these also work from notifications.
 - **Ongoing work:** background shell commands with **live output** and a Stop button. **Subagents**, with
-  their transcript as they work and a Stop button. Messages from agents and finished tasks. Running hooks.
-- **Artifacts:** plans, walkthroughs and screenshots, rendered. **Comment** on any paragraph, step or code
-  block, the way you comment on artifacts in the Claude app. When agy asks for a review, reply with
-  comments or *Proceed*. You can also comment on single lines in the diff viewer. Comments reach agy in the
-  same format as comments from Antigravity's own UI.
-- **History:** every agy conversation on each computer. Fork, rewind (with a preview of what it undoes),
+  their transcript as they work and a Stop button. Messages from agents and finished tasks.
+- **Artifacts and plans:** rendered, with **comments** on any paragraph, step or code block, the way you
+  comment in the Claude app. You can also comment on single lines in the diff viewer.
+- **History:** every conversation on each computer. Fork, rewind (with a preview of what it undoes),
   rename, pin, archive, delete, export, and per-file diffs.
 - **Files:** browse, create, rename, move, copy, delete, upload, download and edit files on any host.
-- **Terminals:** a full terminal emulator for shells, commands and the agy TUI, with "agent needs you"
-  status. Terminals keep running when you leave, and the laptop can attach to the same session (`agyr`).
-- **agy flags:** a modal to set every agy flag (`--dangerously-skip-permissions`, `--sandbox`, `--model`,
-  `--effort`, `--mode`, …). The choice is saved on the phone and reused for new sessions and terminals.
-- **Hosts:** usage and quota, models, MCP servers, plugins, settings.json and the changelog. You can also
-  see and unpair the phones paired with each computer.
+- **Terminals:** a full terminal emulator for shells, commands and the agents' own TUIs, with "agent needs
+  you" status. Terminals keep running when you leave, and the laptop can attach to the same session
+  (`claudr`, `agyr`).
+- **Launch flags per agent:** every flag (`--dangerously-skip-permissions`, model, effort, permission mode,
+  agent, extra folders, …) in a modal. The choice is saved on the phone and reused for new sessions and
+  terminals.
+
+Claude Code specifics:
+
+- **Permissions the way Claude asks:** Claude's own options, including *always allow* rules
+  (e.g. `Bash(npm test:*)` for this project), and the reason Claude gives for asking. A comment on a denial
+  goes back to Claude as your instruction.
+- **Questions** (AskUserQuestion) on a card with options, multi-select and *Other*. **Plans**
+  (ExitPlanMode) on a card: approve with auto-accepted or manual edits, send back with feedback, or open
+  the plan file and comment on it.
+- **Steering:** messages sent while Claude works are delivered mid-turn, as in Claude Code's terminal.
+- **Modes:** ask before edits, accept edits, plan, auto, don't ask, bypass permissions. Effort from low to
+  max, every model Claude Code lists, cost per turn, a context meter and the full **context breakdown**
+  (`/context`).
+- **Side questions** (`/btw`): ask about the conversation without adding to it. **MCP servers:** status,
+  enable/disable, reconnect.
+- **Rewind** restores files from Claude's checkpoints as well as the conversation. **Fork** branches at any
+  message. Background agents that report back after the turn ended show up as new turns.
+- **Your terminal sessions too:** conversations you started in `claude` on the laptop are in the history.
+  While one is open in a terminal it shows as *open in terminal* and is read-only on the phone (fork it to
+  continue), so two processes never write the same conversation. Sessions started from the phone appear
+  in `claude --resume` on the laptop.
+- **Host screen:** Claude Code version and plan, **plan usage limits** (5-hour and weekly), running Claude
+  terminals, the default model, agents, MCP servers, settings.json and `claude update`.
 
 ## Security
 
@@ -65,11 +88,12 @@ The daemon only listens on `127.0.0.1`. `cloudflared` publishes it at a random
 
 ### 1. On each computer (Linux, systemd user services)
 
-You need `agy`, `tmux` and [`cloudflared`](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/downloads/).
+You need [`cloudflared`](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/downloads/), `tmux`
+and at least one agent: [Claude Code](https://claude.com/claude-code) (`claude`, signed in) and/or `agy`.
 
 ```sh
 # from a release (linux-amd64 or linux-arm64), or build: cd daemon && go build -o agentc .
-chmod +x agentc && ./agentc install   # installs ~/.local/bin/agentc + agyr, starts the systemd user service
+chmod +x agentc && ./agentc install   # installs ~/.local/bin/agentc + claudr/agyr, starts the systemd user service
 agentc status                         # shows the tunnel URL once cloudflared is up
 loginctl enable-linger "$USER"        # optional: keep running while logged out
 ```
@@ -117,6 +141,7 @@ agentc status                  daemon, tunnel URL, sessions, push, paired device
 agentc devices [revoke ID]     list or unpair devices
 agentc tunnel stop             stop the tunnel (a new one, with a new URL, starts within ~15 s)
 agentc term ls|attach|kill     shared terminals
+claudr [claude args…]          run Claude Code in a shared terminal the phone can see (adds "claudrArgs"; --safe drops skip-permissions)
 agyr [agy args…]               run agy in a shared terminal the phone can see (adds "agyrArgs"; --safe drops skip-permissions)
 ```
 
@@ -129,10 +154,12 @@ agyr [agy args…]               run agy in a shared terminal the phone can see 
 | `tunnel` | `"quick"` | `"quick"` runs a Cloudflare quick tunnel; `"none"` uses `publicUrl` instead |
 | `publicUrl` | — | Advertised URL when you bring your own tunnel or proxy |
 | `cloudflared` | `cloudflared` | Path to the cloudflared binary |
-| `idleHibernateMinutes` | `30` | Stop an idle session's `agy acp` process (~220 MB); it resumes on the next message |
-| `maxLive` | `8` | Maximum number of running `agy acp` processes |
+| `idleHibernateMinutes` | `30` | Stop an idle session's agent process (`claude -p` or `agy acp`); it resumes on the next message |
+| `maxLive` | `8` | Maximum number of running agent processes |
 | `defaultSkipPermissions` | `true` | Used only when a client doesn't send its own flags |
 | `agyrArgs` | `["--dangerously-skip-permissions"]` | Default flags for `agyr` |
+| `claudePath` | `~/.local/bin/claude` or `claude` on PATH | The Claude Code executable |
+| `claudrArgs` | `["--dangerously-skip-permissions"]` | Default flags for `claudr` |
 | `pushContent` | `"full"` | `"minimal"` keeps conversation text out of push messages |
 | `firebaseServiceAccount` | `~/.config/agentc/firebase-service-account.json` | FCM service account key |
 
@@ -140,7 +167,8 @@ State lives in `~/.local/state/agentc/`:
 - `identity.json`: the host key
 - `devices.json`: paired devices
 - `agentc.log` and `cloudflared.log`
-- per-session agy logs
+- per-session agent logs
+- `claude-annotations.json`: which Claude conversations are pinned (archive and titles live in `~/.claude`)
 
 ## Development
 
@@ -149,6 +177,8 @@ cd daemon
 go vet ./... && go test ./...                    # includes Noise interop vectors and pairing/auth tests
 go run ./cmd/agentctl pair --local               # pair a CLI client through the local socket
 go run ./cmd/agentctl itest                      # end-to-end scenarios against a running daemon (real agy turns)
+go run ./cmd/agentctl itest claude               # the Claude Code scenarios (real turns on haiku)
+CLAUDE_ITEST=1 go test ./internal/claude -run Live  # the Claude adapter against a real claude
 GEN_NOISE_VECTORS=../android/app/src/test/resources/noise-vectors.json go test ./internal/secure -run Vectors
 
 cd android
@@ -161,8 +191,9 @@ under your own key, set a release `signingConfig`.
 Layout:
 - `daemon/`: `internal/secure` (Noise transport, pairing, device registry), `tunnel` (cloudflared), `server`
   (RPC and terminals over the secure channel, pairing page), `core` (sessions, transcripts, live
-  tasks/subagents/artifacts, comments), `acp`, `agyproc`, `lsapi` (agy's language server), `term` (tmux),
-  `fsops`, `push` (FCM), `qrterm`.
+  tasks/subagents/artifacts, comments), `claude` (Claude Code: the stream-json driver behind an in-process
+  ACP adapter, history, replay, checkpoints, subagents), `acp`, `agyproc`, `lsapi` (agy's language server),
+  `term` (tmux), `fsops`, `push` (FCM), `qrterm`.
 - `android/app`: `net/` (`Noise.kt`, `SecureSocket.kt`, RPC, image fetcher), `core/` (models, pairing,
   Keystore-wrapped keys), `ui/` (Compose screens).
 - `android/terminal`: Termux `terminal-emulator` + `terminal-view` (Apache License 2.0), adapted to a

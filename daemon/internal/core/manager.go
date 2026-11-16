@@ -97,6 +97,7 @@ func NewManager(cfg Config, hub *Hub) *Manager {
 	m.loadSessions()
 	go m.janitor()
 	go m.liveLoop()
+	go m.claudeFollowLoop()
 	return m
 }
 

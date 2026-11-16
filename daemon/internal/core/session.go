@@ -164,6 +164,12 @@ type Session struct {
 	status     string
 	suggestion string
 	replaying  bool // replaying stored history: not new activity
+	autoTurn   bool // Claude is working on a turn it started itself
+	// Following a Claude transcript that another process (a terminal) writes:
+	// the replayer, the last entry shown and the file's last seen stamp.
+	follow      *claude.Replayer
+	followLeaf  string
+	followStamp int64
 }
 
 func newSession(m *Manager, meta SessionMeta) *Session {
@@ -816,6 +822,9 @@ func (s *Session) start(ctx context.Context, mode string) error {
 		if live := s.m.claudeLiveElsewhere(id); live != nil {
 			return fmt.Errorf("this conversation is open in another Claude Code process (pid %d, %s); close it there or fork it to continue here", live.Pid, firstNonEmpty(live.Status, "running"))
 		}
+		s.mu.Lock()
+		s.follow = nil // our own process writes it from now on
+		s.mu.Unlock()
 		p = claude.Start(claude.Options{Bin: s.m.claudeBin(), Env: s.m.claudeEnv(), HomeDir: s.m.cfg.HomeDir,
 			LogDir: filepath.Join(s.m.cfg.StateDir, "logs"), SkipPermissions: skip, AddDirs: addDirs,
 			Model: wantModel, Effort: wantThought, Mode: wantMode, AgentName: agentName, ExtraArgs: extra,
@@ -993,6 +1002,13 @@ func (s *Session) watchProc(p agentProc) {
 	}
 	s.proc = nil
 	perms := s.cancelPermsLocked()
+	if s.autoTurn {
+		// No prompt call will return for a turn Claude started itself.
+		s.autoTurn = false
+		if s.inflight > 0 {
+			s.inflight--
+		}
+	}
 	if !s.closing {
 		msg := s.agentLabelLocked() + " process exited"
 		if err := p.ExitErr(); err != nil {

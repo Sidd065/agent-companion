@@ -165,6 +165,7 @@ fun ChatScreen(sessionId: String, prefill: String) {
 
     val s = summary
     val label = s?.agentLabel ?: "agy"
+    val terms by conn.terms.collectAsState()
     val isClaude = s?.isClaude == true
     // Live state: background shells, subagents, artifacts, agent messages.
     var live by remember { mutableStateOf<io.github.sidd065.agentcompanion.core.LiveState?>(null) }
@@ -318,7 +319,10 @@ fun ChatScreen(sessionId: String, prefill: String) {
         Column(Modifier.padding(pad).fillMaxSize().imePadding()) {
             ConnectionBanner(conn)
             StateBanner(s)
-            LiveElsewhereBanner(s) { fork(conn, sessionId, null, { nav.navigate(it) }, ::rpc, null) }
+            val termHere = terms.firstOrNull { it.conversationId == sessionId && !it.dead }
+            LiveElsewhereBanner(s, onOpenTerminal = termHere?.let { t -> { nav.navigate(Routes.term(t.id)) } }) {
+                fork(conn, sessionId, null, { nav.navigate(it) }, ::rpc, null)
+            }
             Box(Modifier.weight(1f)) {
                 if (!loaded && items.isEmpty()) {
                     LoadingBox(text = if (s?.state == "history" || s?.state == "starting") "Loading conversation…" else "Loading…")

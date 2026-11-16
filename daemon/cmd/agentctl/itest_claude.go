@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
@@ -409,4 +410,44 @@ func (t *tester) approveUntilDone(id string, tr *transcript, n float64, timeout 
 		s := t.sums[id]
 		return s != nil && s["turns"].(float64) >= n && s["state"] == "idle" && s["queued"].(float64) == 0
 	})
+}
+
+// scClaudeFollow: a conversation continued by another Claude Code process (as
+// in a terminal on the laptop) shows up live for a subscribed client.
+func (t *tester) scClaudeFollow() {
+	id, tr, dir := t.claudeSession("claude-follow", map[string]any{"skipPermissions": true})
+	if id == "" {
+		return
+	}
+	t.call("session.prompt", map[string]any{"id": id, "text": "Reply with exactly: ONE"})
+	t.check(t.waitTurns(id, 1, 3*time.Minute), "turn through agentc")
+	t.call("session.stop", map[string]any{"id": id})
+	t.pump(5*time.Second, func() bool { return t.sums[id]["live"] == false })
+	var env []string
+	for _, kv := range os.Environ() {
+		if !strings.HasPrefix(kv, "CLAUDE") && !strings.HasPrefix(kv, "SSH_") {
+			env = append(env, kv)
+		}
+	}
+	cmd := exec.Command("claude", "-p", "--resume", id, "--model", claudeModel, "Reply with exactly: TWO")
+	cmd.Dir, cmd.Env = dir, env
+	out, err := cmd.CombinedOutput()
+	t.check(err == nil && strings.Contains(string(out), "TWO"), "another claude process continued it (%q)", strings.TrimSpace(string(out)))
+	ok := t.pump(30*time.Second, func() bool {
+		return tr.find(func(m map[string]any) bool {
+			s, _ := m["text"].(string)
+			return m["kind"] == "agent" && strings.Contains(s, "TWO")
+		}) != nil
+	})
+	t.check(ok, "the phone sees the reply written by the other process")
+	ones, users := 0, 0
+	for _, it := range tr.items {
+		if s, _ := it["text"].(string); it["kind"] == "agent" && strings.Contains(s, "ONE") {
+			ones++
+		}
+		if it["kind"] == "user" {
+			users++
+		}
+	}
+	t.check(ones == 1 && users == 2, "nothing duplicated (%d ONE replies, %d user messages)", ones, users)
 }

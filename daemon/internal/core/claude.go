@@ -15,6 +15,7 @@ import (
 	"sync"
 	"time"
 
+	"agentc/internal/acp"
 	"agentc/internal/claude"
 )
 
@@ -204,6 +205,8 @@ func (s *Session) onExtension(method string, params json.RawMessage) {
 		s.mu.Unlock()
 		replyCancelled(gone)
 		s.emit()
+	case claude.ExtTurn:
+		s.onAutoTurn(params)
 	case claude.ExtInfo:
 		var info map[string]any
 		if json.Unmarshal(params, &info) != nil {
@@ -260,7 +263,28 @@ func (s *Session) replayClaude() error {
 	}
 	s.replaying = true
 	s.mu.Unlock()
-	claude.ReplayUpdates(chain, cwd, func(u map[string]any) {
+	rp := s.newReplayer(cwd)
+	rp.Feed(chain)
+	s.mu.Lock()
+	s.replaying = false
+	for _, it := range keep {
+		s.queueOpsLocked(s.tr.add(it))
+	}
+	s.meta.NeedsReload = false
+	s.follow, s.followLeaf, s.followStamp = rp, "", fileStamp(path)
+	if len(chain) > 0 {
+		s.followLeaf = chain[len(chain)-1].UUID
+	}
+	if st, err := os.Stat(path); err == nil && st.ModTime().UnixMilli() > s.meta.UpdatedAt {
+		s.meta.UpdatedAt = st.ModTime().UnixMilli()
+	}
+	s.mu.Unlock()
+	s.emit()
+	return nil
+}
+
+func (s *Session) newReplayer(cwd string) *claude.Replayer {
+	return claude.NewReplayer(cwd, func(u map[string]any) {
 		raw, err := json.Marshal(u)
 		if err == nil {
 			s.onUpdate(raw)
@@ -270,18 +294,122 @@ func (s *Session) replayClaude() error {
 		s.queueOpsLocked(s.tr.AddNotice(level, text))
 		s.mu.Unlock()
 	})
+}
+
+func fileStamp(path string) int64 {
+	st, err := os.Stat(path)
+	if err != nil {
+		return 0
+	}
+	return st.ModTime().UnixNano() ^ st.Size()
+}
+
+// followClaude shows what another process (a Claude Code terminal on the
+// computer) added to the conversation since the last look.
+func (s *Session) followClaude() {
+	s.mu.Lock()
+	if s.proc != nil || s.startWait != nil {
+		s.mu.Unlock()
+		return
+	}
+	if s.follow == nil || s.followLeaf == "" {
+		// Not shown from disk yet (agentc ran it so far): look once per change
+		// of the file whether another process has continued it.
+		id, cwd, stamp := s.meta.ID, s.meta.Cwd, s.followStamp
+		s.mu.Unlock()
+		path, err := s.m.claudeTranscript(id, cwd)
+		if err != nil {
+			return
+		}
+		now := fileStamp(path)
+		if now == stamp {
+			return
+		}
+		s.mu.Lock()
+		s.followStamp = now
+		s.mu.Unlock()
+		if s.claudeStale() {
+			if err := s.replayClaude(); err != nil {
+				log.Printf("session %s: follow: %v", id, err)
+			}
+		}
+		return
+	}
+	id, cwd, leaf, rp, stamp := s.meta.ID, s.meta.Cwd, s.followLeaf, s.follow, s.followStamp
+	s.mu.Unlock()
+	path, err := s.m.claudeTranscript(id, cwd)
+	if err != nil {
+		return
+	}
+	now := fileStamp(path)
+	if now == stamp {
+		return
+	}
+	chain, _, err := claude.ReadChain(path, 600, 32<<20)
+	if err != nil {
+		return
+	}
+	idx := -1
+	for i, e := range chain {
+		if e.UUID == leaf {
+			idx = i
+		}
+	}
+	if idx < 0 {
+		// Rewound or compacted elsewhere: show it afresh.
+		if err := s.replayClaude(); err != nil {
+			log.Printf("session %s: follow: %v", id, err)
+		}
+		return
+	}
+	news := chain[idx+1:]
+	s.mu.Lock()
+	if s.follow != rp || s.proc != nil { // our own process took over meanwhile
+		s.mu.Unlock()
+		return
+	}
+	s.followStamp = now
+	s.replaying = true
+	s.mu.Unlock()
+	if len(news) > 0 {
+		rp.Feed(news)
+	}
 	s.mu.Lock()
 	s.replaying = false
-	for _, it := range keep {
-		s.queueOpsLocked(s.tr.add(it))
-	}
 	s.meta.NeedsReload = false
-	if st, err := os.Stat(path); err == nil && st.ModTime().UnixMilli() > s.meta.UpdatedAt {
-		s.meta.UpdatedAt = st.ModTime().UnixMilli()
+	if len(news) > 0 {
+		s.followLeaf = news[len(news)-1].UUID
+		if st, err := os.Stat(path); err == nil {
+			s.meta.UpdatedAt = st.ModTime().UnixMilli()
+		}
 	}
 	s.mu.Unlock()
-	s.emit()
-	return nil
+	if len(news) > 0 {
+		s.emit()
+	}
+}
+
+// claudeFollowLoop keeps open Claude conversations that agentc isn't running
+// (e.g. running in a terminal on the computer) up to date on the phone.
+func (m *Manager) claudeFollowLoop() {
+	t := time.NewTicker(2 * time.Second)
+	defer t.Stop()
+	for {
+		select {
+		case <-m.stopCh:
+			return
+		case <-t.C:
+		}
+		for _, s := range m.all() {
+			if !s.isClaudeSafe() {
+				continue
+			}
+			if id := s.ID(); id == "" || !m.hub.HasSubscribers(id) {
+				continue
+			}
+			s.followClaude()
+		}
+	}
 }
 
 // ---- history ----
@@ -1226,13 +1354,18 @@ func (s *Session) claudeStale() bool {
 		}
 	}
 	empty := len(s.tr.Items) == 0
+	updated := s.meta.UpdatedAt
 	s.mu.Unlock()
-	if !need {
-		return false
-	}
 	path, err := s.m.claudeTranscript(id, cwd)
 	if err != nil {
 		return false
+	}
+	if !need {
+		// Written since agentc last touched it (e.g. continued in a terminal)?
+		st, err := os.Stat(path)
+		if err != nil || st.ModTime().UnixMilli() <= updated+2000 {
+			return false
+		}
 	}
 	if empty || lastRef == "" {
 		return true
@@ -1273,4 +1406,44 @@ func (m *Manager) claudeLiveCached() map[string]claude.LiveSession {
 	}
 	liveCache, liveCacheAt = all, time.Now()
 	return all
+}
+
+// onAutoTurn tracks turns Claude starts without a prompt (a background task
+// or subagent reported back): they show as working and end with a turn
+// marker and a "done" notification like any other turn.
+func (s *Session) onAutoTurn(params json.RawMessage) {
+	var ev struct {
+		State      string     `json:"state"`
+		StopReason string     `json:"stopReason"`
+		Usage      *acp.Usage `json:"usage"`
+		Error      string     `json:"error"`
+	}
+	if json.Unmarshal(params, &ev) != nil {
+		return
+	}
+	switch ev.State {
+	case "started":
+		s.mu.Lock()
+		if s.autoTurn {
+			s.mu.Unlock()
+			return
+		}
+		s.autoTurn = true
+		s.beginTurnLocked()
+		s.mu.Unlock()
+		s.emit()
+	case "ended":
+		s.mu.Lock()
+		if !s.autoTurn {
+			s.mu.Unlock()
+			return
+		}
+		s.autoTurn = false
+		s.mu.Unlock()
+		var err error
+		if ev.Error != "" {
+			err = errors.New(ev.Error)
+		}
+		s.finishPrompt("", &acp.PromptResult{StopReason: firstNonEmpty(ev.StopReason, "end_turn"), Usage: ev.Usage}, err)
+	}
 }

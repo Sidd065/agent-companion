@@ -282,6 +282,8 @@ func itest(c *Client, cr *Creds, scenarios []string) int {
 			t.scClaudeLive()
 		case "claude-control":
 			t.scClaudeControl()
+		case "claude-follow":
+			t.scClaudeFollow()
 		case "claude":
 			t.scClaudeBasic()
 			t.scClaudeQuestion()
@@ -292,6 +294,7 @@ func itest(c *Client, cr *Creds, scenarios []string) int {
 			t.scClaudeHistory()
 			t.scClaudeLive()
 			t.scClaudeControl()
+			t.scClaudeFollow()
 		default:
 			fmt.Println("unknown scenario", sc)
 			t.fails++

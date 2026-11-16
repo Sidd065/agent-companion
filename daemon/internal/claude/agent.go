@@ -49,6 +49,9 @@ const (
 	ExtStatus      = "_agentc/status"      // {status}
 	ExtPermGone    = "_agentc/permWithdrawn"
 	ExtInfo        = "_agentc/info" // {account, outputStyle, agents, version}
+	// ExtTurn reports turns Claude starts on its own (a background task or
+	// subagent finished, a scheduled wake-up): {state: started|ended, result}.
+	ExtTurn = "_agentc/turn"
 )
 
 // Task is a background task or subagent reported by Claude.
@@ -127,6 +130,7 @@ type Agent struct {
 	order    []string
 	cancel   bool
 	lastCtx  int64
+	autoTurn bool // a turn no prompt of ours started
 }
 
 type modelInfo struct {
@@ -718,7 +722,7 @@ func (a *Agent) dropPrompt(ps *promptState) {
 func (a *Agent) interrupt() {
 	a.mu.Lock()
 	p := a.proc
-	busy := len(a.prompts) > 0
+	busy := len(a.prompts) > 0 || a.autoTurn
 	if busy {
 		a.cancel = true
 	}
@@ -875,6 +879,7 @@ func (a *Agent) onStream(raw json.RawMessage) {
 		a.curMsg = e.Event.Message.ID
 		a.streamed[e.Event.Message.ID] = true
 		a.mu.Unlock()
+		a.noteActivity()
 	case "content_block_start":
 		if b := e.Event.ContentBlock; b.Type == "tool_use" && b.ID != "" {
 			a.mu.Lock()
@@ -908,6 +913,9 @@ func (a *Agent) onAssistant(raw json.RawMessage) {
 	var m assistantMsg
 	if json.Unmarshal(raw, &m) != nil {
 		return
+	}
+	if m.ParentToolUseID == nil {
+		a.noteActivity()
 	}
 	if m.ParentToolUseID != nil {
 		// A subagent's step: mark its tool uses so their results stay out of the
@@ -1183,6 +1191,35 @@ func (a *Agent) onResult(raw json.RawMessage) {
 		}
 		close(p.done)
 	}
+	a.mu.Lock()
+	auto := a.autoTurn
+	a.autoTurn = false
+	a.mu.Unlock()
+	if auto {
+		ev := map[string]any{"state": "ended", "stopReason": stop}
+		if len(done) == 0 && u != nil {
+			ev["usage"] = u
+		}
+		if err != nil {
+			ev["error"] = err.Error()
+		}
+		a.notify(ExtTurn, ev)
+	}
+}
+
+// noteActivity starts an autonomous turn when Claude works without a prompt
+// of ours pending (e.g. a background subagent finished and Claude picks up
+// its report).
+func (a *Agent) noteActivity() {
+	a.mu.Lock()
+	start := len(a.prompts) == 0 && !a.autoTurn && a.initResp != nil
+	if start {
+		a.autoTurn = true
+	}
+	a.mu.Unlock()
+	if start {
+		a.notify(ExtTurn, map[string]any{"state": "started"})
+	}
 }
 
 func (a *Agent) onSystem(subtype string, raw json.RawMessage) {
@@ -1195,6 +1232,7 @@ func (a *Agent) onSystem(subtype string, raw json.RawMessage) {
 		if json.Unmarshal(raw, &m) != nil {
 			return
 		}
+		a.noteActivity()
 		a.mu.Lock()
 		if m.Model != "" {
 			a.resolved = m.Model
