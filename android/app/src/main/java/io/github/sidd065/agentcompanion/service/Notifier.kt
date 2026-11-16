@@ -34,6 +34,7 @@ class Notifier(private val ctx: Context) {
         const val EXTRA_OPTION = "option"
         const val EXTRA_NOTIF_ID = "notif_id"
         const val EXTRA_ACTION = "action"
+        const val EXTRA_KIND = "kind"
     }
 
     private val nm = NotificationManagerCompat.from(ctx)
@@ -56,7 +57,7 @@ class Notifier(private val ctx: Context) {
                     description = "An agent asked a question or wants a plan reviewed"
                 },
                 NotificationChannel(CH_TERMINALS, "Terminal sessions", NotificationManager.IMPORTANCE_DEFAULT).apply {
-                    description = "agy running in a shared terminal finished or is waiting"
+                    description = "An agent running in a shared terminal finished or is waiting"
                 },
                 NotificationChannel(CH_CONNECTION, "Background connection", NotificationManager.IMPORTANCE_MIN).apply {
                     description = "Keeps an encrypted connection to your computers open"
@@ -99,6 +100,7 @@ class Notifier(private val ctx: Context) {
             putExtra(EXTRA_HOST, hostId)
             putExtra(EXTRA_SESSION, n.sessionId)
             putExtra(EXTRA_REQ, n.reqId)
+            putExtra(EXTRA_KIND, n.kind)
             putExtra(EXTRA_OPTION, option)
             putExtra(EXTRA_NOTIF_ID, notifId)
         }
@@ -119,15 +121,15 @@ class Notifier(private val ctx: Context) {
         // "minimal" push content: fill in what we know locally.
         val known = n0.sessionId?.let { conn.session(it) }
         val n = n0.copy(
-            title = n0.title.ifBlank { known?.displayTitle ?: if (n0.termId != null) "Terminal" else "agy" },
+            title = n0.title.ifBlank { known?.displayTitle ?: if (n0.termId != null) "Terminal" else "Agent" },
             body = n0.body.ifBlank {
                 when (n0.kind) {
                     "permission" -> "A tool call is waiting for your approval"
                     "question" -> "The agent has a question for you"
                     "plan" -> "A plan is ready for review"
                     "error" -> "The session hit an error"
-                    "term_done" -> "agy finished"
-                    "term_blocked" -> "agy is waiting for you"
+                    "term_done" -> "The agent finished"
+                    "term_blocked" -> "The agent is waiting for you"
                     "test" -> "Push notifications are working"
                     else -> known?.lastText ?: "Turn finished"
                 }
@@ -178,7 +180,9 @@ class Notifier(private val ctx: Context) {
                 .build()
             b.addAction(replyAction)
             if (n.kind == "plan") {
-                b.addAction(0, "Approve plan", actionIntent(hostId, n, "approve_plan", id))
+                // Claude plans are a pending request: approve it with the first "yes" option.
+                val opt = n.options.firstOrNull { it.optionId.startsWith("plan_") }?.optionId
+                b.addAction(0, "Approve plan", actionIntent(hostId, n, "approve_plan", id, opt))
             }
         }
         runCatching { nm.notify(id, b.build()) }

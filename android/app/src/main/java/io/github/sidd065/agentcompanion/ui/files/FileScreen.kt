@@ -194,7 +194,7 @@ fun FileScreen(path: String, startEditing: Boolean) {
                             DropdownMenuItem(text = { Text("Open with…") }, leadingIcon = { Icon(Icons.AutoMirrored.Outlined.OpenInNew, null) }, onClick = {
                                 menu = false; scope.launch { runCatching { FileTransfer.openWith(ctx, conn, path) }.onFailure { snack.showSnackbar("${it.message}") } }
                             })
-                            DropdownMenuItem(text = { Text("Ask agy about this file") }, leadingIcon = { Icon(Icons.AutoMirrored.Outlined.Chat, null) }, onClick = {
+                            DropdownMenuItem(text = { Text("Ask an agent about this file") }, leadingIcon = { Icon(Icons.AutoMirrored.Outlined.Chat, null) }, onClick = {
                                 menu = false; nav.navigate(Routes.newSession(path.substringBeforeLast('/'), "@$name "))
                             })
                             DropdownMenuItem(text = { Text("Open folder") }, leadingIcon = { Icon(Icons.Outlined.FolderOpen, null) }, onClick = {

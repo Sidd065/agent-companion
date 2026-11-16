@@ -24,6 +24,9 @@ type Item struct {
 	Level  string          `json:"level,omitempty"`
 	Turn   *Turn           `json:"turn,omitempty"`
 	Trunc  bool            `json:"trunc,omitempty"`
+	// Ref is the agent's own id for a user message (Claude message uuid),
+	// used to fork and rewind at that message.
+	Ref string `json:"ref,omitempty"`
 }
 
 // Block is a non-text part of a user message.
@@ -58,6 +61,15 @@ type Perm struct {
 	ToolKind string                 `json:"toolKind,omitempty"`
 	Options  []acp.PermissionOption `json:"options"`
 	Chosen   string                 `json:"chosen,omitempty"`
+	// Claude Code extras: the tool, the kind of request (tool|question|plan),
+	// its input for questions and plans, why it was asked, and the answer.
+	Tool        string          `json:"tool,omitempty"`
+	Kind        string          `json:"kind,omitempty"`
+	Input       json.RawMessage `json:"input,omitempty"`
+	Reason      string          `json:"reason,omitempty"`
+	BlockedPath string          `json:"blockedPath,omitempty"`
+	Subagent    bool            `json:"subagent,omitempty"`
+	Answer      json.RawMessage `json:"answer,omitempty"`
 }
 
 // Turn marks the end of a prompt turn.
@@ -281,6 +293,47 @@ func (t *Transcript) Remove(id string) (Op, bool) {
 
 func normText(s string) string {
 	return strings.Join(strings.Fields(s), " ")
+}
+
+// UserChunkRef is UserChunk for agents that identify messages (ref) and
+// replay their original time (ts, ms).
+func (t *Transcript) UserChunkRef(b acp.ContentBlock, blockFor func(acp.ContentBlock) *Block, ref string, ts int64) []Op {
+	if ref == "" {
+		return t.UserChunk(b, blockFor)
+	}
+	if t.userOpen != nil && t.userOpen.Ref != ref {
+		t.userOpen = nil
+	}
+	if t.userOpen == nil {
+		for _, it := range t.Items {
+			if it.Kind == "user" && it.Ref == ref {
+				t.open, t.planID = nil, ""
+				it.State = ""
+				t.userOpen = it
+				if b.Type == "text" && it.Text == "" {
+					it.Text = b.Text
+				} else if b.Type != "text" {
+					if nb := blockFor(b); nb != nil && !hasBlock(it.Blocks, *nb) {
+						it.Blocks = append(it.Blocks, *nb)
+					}
+				}
+				return []Op{t.set(it)}
+			}
+		}
+		t.open, t.planID = nil, ""
+		it := &Item{ID: t.newID("u"), Kind: "user", Ts: now(), Ref: ref}
+		if ts > 0 {
+			it.Ts = ts
+		}
+		if b.Type == "text" {
+			it.Text = b.Text
+		} else if nb := blockFor(b); nb != nil {
+			it.Blocks = []Block{*nb}
+		}
+		t.userOpen = it
+		return []Op{t.add(it)}
+	}
+	return t.UserChunk(b, blockFor)
 }
 
 // UserChunk handles a user_message_chunk (echo of a sent prompt or history replay).

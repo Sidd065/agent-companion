@@ -148,6 +148,9 @@ func (p *Proc) stderrTail() string {
 	return " (stderr: " + s + ")"
 }
 
+// ACP returns the process's ACP connection.
+func (p *Proc) ACP() *acp.Conn { return p.Conn }
+
 // Pid returns the OS process id.
 func (p *Proc) Pid() int {
 	if p.cmd.Process == nil {

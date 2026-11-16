@@ -15,6 +15,7 @@ import (
 	"sync"
 	"time"
 
+	"agentc/internal/agyproc"
 	"agentc/internal/lsapi"
 )
 
@@ -316,7 +317,7 @@ func (m *Manager) liveLS(ctx context.Context, id string) *lsapi.Client {
 		return nil
 	}
 	s.mu.Lock()
-	p := s.proc
+	p, _ := s.proc.(*agyproc.Proc)
 	s.mu.Unlock()
 	if p == nil || !p.Alive() {
 		return nil
@@ -330,6 +331,9 @@ func (m *Manager) liveLS(ctx context.Context, id string) *lsapi.Client {
 
 // LiveState returns the current live state of a conversation.
 func (m *Manager) LiveState(ctx context.Context, id string) (*Live, error) {
+	if s := m.Get(id); s != nil && s.isClaudeSafe() {
+		return m.claudeLive(s), nil
+	}
 	live, err := m.ComputeLive(ctx, id, m.liveLS(ctx, id))
 	if err == nil {
 		live.Hook = m.hookFor(id)
@@ -339,6 +343,9 @@ func (m *Manager) LiveState(ctx context.Context, id string) (*Live, error) {
 
 // TaskOutput returns a background task's log from offset (up to 256 KiB).
 func (m *Manager) TaskOutput(ctx context.Context, id, taskID string, offset int64) (map[string]any, error) {
+	if s := m.Get(id); s != nil && s.isClaudeSafe() {
+		return m.claudeTaskOutput(s, taskID, offset)
+	}
 	dir, err := m.brainDir(id)
 	if err != nil {
 		return nil, err
@@ -376,6 +383,18 @@ func (m *Manager) TaskOutput(ctx context.Context, id, taskID string, offset int6
 	return map[string]any{"data": string(b), "offset": offset, "next": offset + int64(len(b)), "size": st.Size(), "running": running}, nil
 }
 
+// StopTaskID stops a background task by id (Claude), else by step (agy).
+func (m *Manager) StopTaskID(ctx context.Context, id, taskID string, step int) error {
+	if s := m.Get(id); s != nil && s.isClaudeSafe() {
+		if taskID == "" {
+			return errors.New("missing task id")
+		}
+		_, err := m.ClaudeControl(ctx, id, "stop_task", map[string]any{"task_id": taskID})
+		return err
+	}
+	return m.StopTask(ctx, id, step)
+}
+
 // StopTask cancels a background task (by its step) in a running session.
 func (m *Manager) StopTask(ctx context.Context, id string, step int) error {
 	ls := m.liveLS(ctx, id)
@@ -385,8 +404,20 @@ func (m *Manager) StopTask(ctx context.Context, id string, step int) error {
 	return ls.Call(ctx, "CancelCascadeSteps", map[string]any{"cascadeId": id, "stepIndices": []int{step}}, nil)
 }
 
+// SubagentSteps returns a subagent's transcript for a session.
+func (m *Manager) SubagentSteps(ctx context.Context, id, subID string, max int) ([]SubStep, error) {
+	if s := m.Get(id); s != nil && s.isClaudeSafe() {
+		return m.claudeSubagent(s, subID, max)
+	}
+	return m.SubagentTranscript(subID, max)
+}
+
 // StopSubagent force-stops a subagent's conversation tree.
 func (m *Manager) StopSubagent(ctx context.Context, id, subID string) error {
+	if s := m.Get(id); s != nil && s.isClaudeSafe() {
+		_, err := m.ClaudeControl(ctx, id, "stop_task", map[string]any{"task_id": subID})
+		return err
+	}
 	ls := m.liveLS(ctx, id)
 	if ls == nil {
 		return errors.New("the session isn't running")
@@ -599,8 +630,11 @@ func (m *Manager) watchLive(ctx context.Context, id string, w *liveWatch) {
 // ReadArtifact returns an artifact's text (it must live in the conversation's
 // brain directory).
 func (m *Manager) ReadArtifact(id, path string) (map[string]any, error) {
-	dir, err := m.brainDir(id)
-	if err != nil {
+	var dir string
+	var err error
+	if s := m.Get(id); s != nil && s.isClaudeSafe() {
+		dir = filepath.Join(m.claudeDir(), "plans") // Claude's plan files
+	} else if dir, err = m.brainDir(id); err != nil {
 		return nil, err
 	}
 	p := filepath.Clean(strings.TrimPrefix(path, "file://"))

@@ -81,6 +81,8 @@ type Usage struct {
 	CachedWriteTokens int64 `json:"cachedWriteTokens"`
 	ThoughtTokens     int64 `json:"thoughtTokens"`
 	TotalTokens       int64 `json:"totalTokens"`
+	// CostUSD is set by agents that report spend (Claude Code).
+	CostUSD float64 `json:"costUsd,omitempty"`
 }
 
 // PromptResult is the result of session/prompt.

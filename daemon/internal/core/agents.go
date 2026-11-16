@@ -7,10 +7,10 @@ import (
 	"time"
 )
 
-// AgentProfile describes a coding agent the daemon can drive over ACP.
-// agy speaks ACP natively; Claude Code and Codex are planned via their ACP
-// adapters, so the session engine is shared and only spawn details and the
-// history/fork/rewind backends differ per agent.
+// AgentProfile describes a coding agent the daemon can drive. agy speaks ACP
+// natively; Claude Code runs headless (stream-json) behind an in-process ACP
+// adapter, so the session engine is shared and only spawn details and the
+// history/fork/rewind backends differ per agent. Codex is planned.
 type AgentProfile struct {
 	ID        string   `json:"id"`
 	Name      string   `json:"name"`
@@ -54,11 +54,14 @@ func (m *Manager) Agents() []AgentProfile {
 	} else {
 		agy.Reason = "agy not found at " + m.cfg.AgyPath
 	}
-	claude := AgentProfile{ID: "claude", Name: "Claude Code", Command: "claude", Planned: true, Reason: "coming soon (via ACP adapter)", Features: []string{"terminal"}}
-	codex := AgentProfile{ID: "codex", Name: "Codex", Command: "codex", Planned: true, Reason: "coming soon (via ACP adapter)", Features: []string{"terminal"}}
-	if p, err := exec.LookPath("claude"); err == nil {
-		claude.Command = p
-		claude.Version = versionOf(p, "--version")
+	claude := AgentProfile{ID: "claude", Name: "Claude Code", Command: m.claudeBin(),
+		Features: []string{"history", "fork", "rewind", "rename", "archive", "pin", "delete", "export", "changes", "artifacts", "terminal",
+			"usage", "context", "sideQuestion", "mcp", "tasks", "subagents", "plans", "questions", "effort", "modes", "steer"}}
+	codex := AgentProfile{ID: "codex", Name: "Codex", Command: "codex", Planned: true, Reason: "coming soon", Features: []string{"terminal"}}
+	if v := versionOf(claude.Command, "--version"); v != "" {
+		claude.Available, claude.Version = true, strings.TrimSuffix(v, " (Claude Code)")
+	} else {
+		claude.Reason = "claude not found (install Claude Code: https://claude.com/claude-code)"
 	}
 	if p, err := exec.LookPath("codex"); err == nil {
 		codex.Command = p

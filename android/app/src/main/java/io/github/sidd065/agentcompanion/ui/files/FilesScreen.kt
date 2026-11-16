@@ -216,7 +216,7 @@ fun FilesScreen(initialPath: String, standalone: Boolean = false) {
                                 DropdownMenuItem(text = { Text("Copy path") }, leadingIcon = { Icon(Icons.Outlined.Link, null) }, onClick = {
                                     menu = false; ctx.copyText(selected.joinToString("\n")); selected.clear()
                                 })
-                                DropdownMenuItem(text = { Text("Ask agy about these") }, leadingIcon = { Icon(Icons.AutoMirrored.Outlined.Chat, null) }, onClick = {
+                                DropdownMenuItem(text = { Text("Ask an agent about these") }, leadingIcon = { Icon(Icons.AutoMirrored.Outlined.Chat, null) }, onClick = {
                                     menu = false
                                     val mention = selected.joinToString(" ") { "@" + it.removePrefix("$cur/") }
                                     selected.clear()
@@ -269,7 +269,7 @@ fun FilesScreen(initialPath: String, standalone: Boolean = false) {
                         Box {
                             IconButton(onClick = { menu = true }) { Icon(Icons.Outlined.MoreVert, null) }
                             DropdownMenu(menu, { menu = false }) {
-                                DropdownMenuItem(text = { Text("Start agy session here") }, leadingIcon = { Icon(Icons.AutoMirrored.Outlined.Chat, null) },
+                                DropdownMenuItem(text = { Text("Start a session here") }, leadingIcon = { Icon(Icons.AutoMirrored.Outlined.Chat, null) },
                                     onClick = { menu = false; nav.navigate(Routes.newSession(cur)) })
                                 DropdownMenuItem(text = { Text("Open terminal here") }, leadingIcon = { Icon(Icons.Outlined.Terminal, null) }, onClick = {
                                     menu = false
@@ -289,6 +289,19 @@ fun FilesScreen(initialPath: String, standalone: Boolean = false) {
                                         nav.navigate(Routes.term(t.id))
                                     }
                                 })
+                                if (conn.agents.value.any { it.id == "claude" && it.available }) {
+                                    DropdownMenuItem(text = { Text("Run Claude Code here") }, leadingIcon = { Icon(Icons.Outlined.Terminal, null) }, onClick = {
+                                        menu = false
+                                        rpc("Terminal") {
+                                            val fl = io.github.sidd065.agentcompanion.App.instance.graph.prefs.value.claudeFlags
+                                            val t = conn.rpc.call("term.create", params {
+                                                put("kind", "claude"); put("cwd", cur); put("skipPermissions", fl.skipPermissions)
+                                                put("args", JsonArray(fl.tuiArgs().map { JsonPrimitive(it) }))
+                                            }).decode(Term.serializer())
+                                            nav.navigate(Routes.term(t.id))
+                                        }
+                                    })
+                                }
                                 if (listing?.gitBranch?.isNotBlank() == true) {
                                     DropdownMenuItem(text = { Text("Git changes") }, leadingIcon = { Icon(Icons.Outlined.Difference, null) }, onClick = { menu = false; nav.navigate(Routes.diff(path = cur)) })
                                 }

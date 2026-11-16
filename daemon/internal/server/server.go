@@ -535,10 +535,16 @@ func (s *Server) onTermState(id, state, msg string) {
 	if prev == state {
 		return
 	}
-	name := id
+	name, agent := id, "agy"
 	for _, t := range terms {
 		if t.ID == id {
 			name = t.Name
+			switch t.Kind {
+			case "claude":
+				agent = "Claude"
+			case "shell", "cmd":
+				agent = "The command"
+			}
 		}
 	}
 	kind := ""
@@ -558,11 +564,11 @@ func (s *Server) onTermState(id, state, msg string) {
 	if body == "" {
 		switch kind {
 		case "term_done":
-			body = "agy finished"
+			body = agent + " finished"
 		case "term_blocked":
-			body = "agy is waiting for you"
+			body = agent + " is waiting for you"
 		default:
-			body = "agy failed"
+			body = agent + " failed"
 		}
 	}
 	s.Mgr.Notify(core.Notification{TermID: id, Kind: kind, Title: title, Body: body})

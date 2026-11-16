@@ -65,6 +65,7 @@ fun SettingsScreen() {
     val pushErr by g.push.lastError.collectAsState()
     var testMsg by remember { mutableStateOf<String?>(null) }
     var flagsOpen by remember { mutableStateOf(false) }
+    var claudeFlagsOpen by remember { mutableStateOf(false) }
     fun upd(f: (AppSettings) -> AppSettings) = scope.launch { g.prefs.update(f) }
 
     Scaffold(
@@ -133,13 +134,14 @@ fun SettingsScreen() {
             SwitchRow("Enter sends", "Otherwise Enter inserts a new line", s.enterSends) { v -> upd { it.copy(enterSends = v) } }
             Text("Messages sent while the agent is working", style = MaterialTheme.typography.bodyMedium, modifier = Modifier.padding(top = 6.dp))
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                listOf("" to "agy setting", "queue" to "Queue", "steer" to "Send now").forEach { (k, l) ->
+                listOf("" to "Agent default", "queue" to "Queue", "steer" to "Send now").forEach { (k, l) ->
                     FilterChip(selected = s.delivery == k, onClick = { upd { it.copy(delivery = k) } }, label = { Text(l) })
                 }
             }
 
             Section("New sessions")
             io.github.sidd065.agentcompanion.ui.components.AgyFlagsCard(kind = "tui", onEdit = { flagsOpen = true })
+            io.github.sidd065.agentcompanion.ui.components.AgentFlagsCard("claude", kind = "tui", onEdit = { claudeFlagsOpen = true })
 
             Section("Terminal")
             Text("Font size · ${s.terminalFontSize}", style = MaterialTheme.typography.bodyMedium)
@@ -157,6 +159,7 @@ fun SettingsScreen() {
         }
     }
     if (flagsOpen) io.github.sidd065.agentcompanion.ui.components.AgyFlagsSheet(conn, onDismiss = { flagsOpen = false })
+    if (claudeFlagsOpen) io.github.sidd065.agentcompanion.ui.components.ClaudeFlagsSheet(conn, onDismiss = { claudeFlagsOpen = false })
 }
 
 @Composable

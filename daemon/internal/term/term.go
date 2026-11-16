@@ -35,6 +35,8 @@ type Manager struct {
 	SelfExe   string // agentc binary (for pipe-pane osc-watch)
 	LocalSock string // daemon's local unix socket (osc-watch reports here)
 	AgyPath   string
+	// ClaudePath is the claude executable for Claude Code terminals.
+	ClaudePath string
 	// DefaultSkip is used for agy terminals when the client doesn't say
 	// (the app always sends its saved flag).
 	DefaultSkip bool
@@ -46,7 +48,7 @@ type Manager struct {
 type Term struct {
 	ID       string `json:"id"`
 	Name     string `json:"name"`
-	Kind     string `json:"kind"` // shell|agy|cmd
+	Kind     string `json:"kind"` // shell|agy|claude|cmd
 	Cwd      string `json:"cwd"`
 	Command  string `json:"command"`
 	Created  int64  `json:"created"`
@@ -237,8 +239,41 @@ func (m *Manager) Create(ctx context.Context, o CreateOpts) (*Term, error) {
 	if shell == "" {
 		shell = "/bin/bash"
 	}
+	id := newID()
 	var command string
 	switch o.Kind {
+	case "claude":
+		bin := m.ClaudePath
+		if bin == "" {
+			bin = "claude"
+		}
+		parts := []string{shq(bin)}
+		skip := m.DefaultSkip
+		if o.Skip != nil {
+			skip = *o.Skip
+		}
+		hasMode := false
+		for _, a := range o.Args {
+			if a == "--dangerously-skip-permissions" || a == "--permission-mode" || strings.HasPrefix(a, "--permission-mode=") {
+				hasMode = true
+			}
+		}
+		if skip && !hasMode {
+			parts = append(parts, "--dangerously-skip-permissions")
+		}
+		if o.ConvID != "" {
+			parts = append(parts, "--resume", shq(o.ConvID))
+		}
+		if m.SelfExe != "" {
+			parts = append(parts, "--settings", shq(ClaudeHookSettings(m.SelfExe, id, m.Sock, m.Conf, m.LocalSock)))
+		}
+		for _, a := range o.Args {
+			parts = append(parts, shq(a))
+		}
+		command = strings.Join(parts, " ")
+		if o.Name == "" {
+			o.Name = "claude · " + filepath.Base(o.Cwd)
+		}
 	case "agy":
 		agy := m.AgyPath
 		if agy == "" {
@@ -286,7 +321,6 @@ func (m *Manager) Create(ctx context.Context, o CreateOpts) (*Term, error) {
 			o.Name = filepath.Base(shell) + " · " + filepath.Base(o.Cwd)
 		}
 	}
-	id := newID()
 	args := []string{"new-session", "-d", "-s", id, "-x", strconv.Itoa(o.Cols), "-y", strconv.Itoa(o.Rows), "-c", o.Cwd,
 		"-e", "AGY_CLI_OSC7501=on", "-e", "AGENTC_TERM_ID=" + id, "-e", "COLORTERM=truecolor", command}
 	if _, err := m.tmux(ctx, args...); err != nil {
@@ -517,6 +551,28 @@ func WatchOSC(r io.Reader, sock, conf, id, report string) error {
 			return err
 		}
 	}
+}
+
+// Publish records a terminal state (tmux options) and reports it to the daemon.
+func Publish(sock, conf, id, report, state, msg string) {
+	publish(sock, conf, id, report, OSCState{State: state, Msg: msg})
+}
+
+// SetConversation links a terminal to the agent conversation it runs.
+func SetConversation(sock, conf, id, conv string) {
+	_ = exec.Command("tmux", "-S", sock, "-f", conf, "set-option", "-t", id, "@agentc_conv", conv).Run()
+}
+
+// ClaudeHookSettings returns a --settings value whose hooks report a Claude
+// Code terminal's state (working, waiting for you, done) to the daemon.
+func ClaudeHookSettings(self, id, sock, conf, report string) string {
+	cmd := fmt.Sprintf("%s claude-hook --id %s --sock %s --conf %s --report %s", shq(self), shq(id), shq(sock), shq(conf), shq(report))
+	h := []map[string]any{{"hooks": []map[string]any{{"type": "command", "command": cmd, "timeout": 10}}}}
+	hm := []map[string]any{{"matcher": "*", "hooks": []map[string]any{{"type": "command", "command": cmd, "timeout": 10}}}}
+	b, _ := json.Marshal(map[string]any{"hooks": map[string]any{
+		"SessionStart": h, "UserPromptSubmit": h, "Notification": h, "Stop": h, "SessionEnd": h, "PostToolUse": hm,
+	}})
+	return string(b)
 }
 
 func publish(sock, conf, id, report string, st OSCState) {

@@ -139,7 +139,35 @@ fun Tool.diffs(): List<FileDiff> = content.arr()?.mapNotNull { c ->
     FileDiff(o.str("path") ?: "", o.str("oldText"), o.str("newText"))
 } ?: emptyList()
 
-fun Tool.path(): String? = locations.arr()?.firstOrNull().str("path") ?: input.str("Path") ?: input.str("path") ?: input.str("AbsolutePath")
+fun Tool.path(): String? = locations.arr()?.firstOrNull().str("path") ?: input.str("Path") ?: input.str("path") ?: input.str("AbsolutePath") ?: input.str("file_path")
+
+/** Claude's structured patch for a finished edit, as diff lines with real line numbers. */
+fun Tool.patchLines(): List<io.github.sidd065.agentcompanion.ui.components.DiffLine>? {
+    val hunks = output.obj()?.get("structuredPatch").arr()?.takeIf { it.isNotEmpty() } ?: return null
+    val out = ArrayList<io.github.sidd065.agentcompanion.ui.components.DiffLine>()
+    hunks.forEachIndexed { hi, h ->
+        val o = h.obj() ?: return@forEachIndexed
+        var oldNo = (o["oldStart"] as? JsonPrimitive)?.intOrNull ?: 1
+        var newNo = (o["newStart"] as? JsonPrimitive)?.intOrNull ?: 1
+        if (hi > 0) out.add(io.github.sidd065.agentcompanion.ui.components.DiffLine(' ', "⋯", 0, 0))
+        o["lines"].arr()?.forEach { l ->
+            val s = (l as? JsonPrimitive)?.contentOrNull ?: return@forEach
+            when (s.firstOrNull()) {
+                '+' -> { out.add(io.github.sidd065.agentcompanion.ui.components.DiffLine('+', s.drop(1), 0, newNo)); newNo++ }
+                '-' -> { out.add(io.github.sidd065.agentcompanion.ui.components.DiffLine('-', s.drop(1), oldNo, 0)); oldNo++ }
+                '\\' -> {}
+                else -> { out.add(io.github.sidd065.agentcompanion.ui.components.DiffLine(' ', s.drop(1), oldNo, newNo)); oldNo++; newNo++ }
+            }
+        }
+    }
+    return out
+}
+
+private val claudeToolIcons = mapOf(
+    "AskUserQuestion" to Icons.Outlined.HelpOutline, "ExitPlanMode" to Icons.Outlined.TaskAlt, "EnterPlanMode" to Icons.Outlined.TaskAlt,
+    "Agent" to Icons.Outlined.Psychology, "Task" to Icons.Outlined.Psychology, "Skill" to Icons.Outlined.Lightbulb,
+    "WebSearch" to Icons.Outlined.Search, "CronCreate" to Icons.Outlined.Schedule, "ScheduleWakeup" to Icons.Outlined.Schedule,
+)
 
 private val kindIcon = mapOf(
     "execute" to Icons.Outlined.Terminal, "edit" to Icons.Outlined.Edit, "read" to Icons.Outlined.Description,
@@ -150,13 +178,34 @@ private val kindIcon = mapOf(
 fun toolIcon(t: Tool): ImageVector = when (t.name) {
     "ask_question" -> Icons.Outlined.HelpOutline
     "schedule", "manage_task" -> Icons.Outlined.Schedule
-    else -> kindIcon[t.kind] ?: Icons.Outlined.Build
+    else -> claudeToolIcons[t.name] ?: kindIcon[t.kind] ?: Icons.Outlined.Build
+}
+
+/** Pretty name for an agent tool without a dedicated verb (MCP tools: "server · tool"). */
+fun toolDisplayName(name: String?): String {
+    val n = name ?: return "Tool"
+    if (n.startsWith("mcp__")) {
+        val rest = n.removePrefix("mcp__")
+        val i = rest.indexOf("__")
+        return if (i < 0) rest else rest.substring(0, i).removePrefix("claude_ai_").replace('_', ' ') + " · " + rest.substring(i + 2).replace('_', ' ')
+    }
+    if (n.any { it == '_' }) return n.replace('_', ' ').replaceFirstChar { it.uppercase() }
+    // CamelCase → words
+    return n.replace(Regex("(?<=[a-z])(?=[A-Z])"), " ")
 }
 
 fun toolVerb(t: Tool): String {
     val running = t.isRunning()
     return when {
-        t.name == "write_file" || t.name == "write_to_file" -> if (running) "Writing" else "Wrote"
+        t.name == "write_file" || t.name == "write_to_file" || t.name == "Write" -> if (running) "Writing" else "Wrote"
+        t.name == "Agent" || t.name == "Task" -> if (running) "Agent working" else "Agent"
+        t.name == "AskUserQuestion" -> "Asked"
+        t.name == "ExitPlanMode" -> when (t.status) { "completed" -> "Plan approved"; "failed" -> "Plan sent back"; else -> "Plan" }
+        t.name == "EnterPlanMode" -> "Entered plan mode"
+        t.name == "WebSearch" -> if (running) "Searching the web" else "Searched the web"
+        t.name == "Skill" -> if (running) "Using skill" else "Used skill"
+        t.name == "ToolSearch" -> "Loaded tools"
+        t.name?.startsWith("mcp__") == true -> toolDisplayName(t.name)
         t.kind == "execute" -> if (running) "Running" else "Ran"
         t.kind == "edit" -> if (running) "Editing" else "Edited"
         t.kind == "read" -> if (running) "Reading" else "Read"
@@ -165,13 +214,15 @@ fun toolVerb(t: Tool): String {
         t.kind == "delete" -> if (running) "Deleting" else "Deleted"
         t.kind == "move" -> if (running) "Moving" else "Moved"
         t.kind == "think" -> "Thought"
-        else -> (t.name ?: "tool").replace('_', ' ').replaceFirstChar { it.uppercase() }
+        else -> toolDisplayName(t.name)
     }
 }
 
 fun toolTitle(t: Tool): String {
     val title = t.title.orEmpty()
     return when {
+        t.name?.startsWith("mcp__") == true -> title.substringAfter(" · ").substringAfter(" ", "").ifBlank { "" }
+        t.name == "ExitPlanMode" -> t.input.str("plan")?.lineSequence()?.firstOrNull { it.isNotBlank() }?.trim()?.trimStart('#', ' ') ?: title
         t.kind == "execute" -> t.command() ?: title
         (t.kind == "edit" || t.kind == "read") && t.path() != null -> baseName(t.path()!!)
         title.startsWith("File ") -> title.removePrefix("File ")
@@ -205,13 +256,18 @@ sealed interface Row {
 fun buildRows(items: List<Item>, showThoughts: Boolean): List<Row> {
     val out = ArrayList<Row>()
     val run = ArrayList<Item>()
+    // Claude's question/plan requests are answered on their own cards: the
+    // tool rows they come from would only repeat them.
+    val carded = items.filter { it.kind == "perm" && (it.perm?.kind == "question" || it.perm?.kind == "plan") }.mapNotNull { it.perm?.callId }.toSet()
     fun flush() {
         if (run.size >= 3) out.add(Row.Tools(run.toList())) else run.forEach { out.add(Row.Single(it)) }
         run.clear()
     }
     for (it in items) {
         if (it.kind == "thought" && !showThoughts) continue
-        val groupable = it.kind == "tool" && it.tool != null && it.tool.name != "ask_question" && !it.tool.isPlanArtifact()
+        if (it.kind == "tool" && it.tool?.callId in carded) continue
+        val groupable = it.kind == "tool" && it.tool != null && it.tool.name != "ask_question" && !it.tool.isPlanArtifact() &&
+            it.tool.name != "AskUserQuestion" && it.tool.name != "ExitPlanMode" && it.tool.name != "Agent" && it.tool.name != "Task"
         if (groupable) run.add(it) else {
             flush()
             out.add(Row.Single(it))
@@ -235,7 +291,12 @@ class TranscriptActions(
     val onApprovePlan: (switchMode: Boolean) -> Unit,
     /** Opens the live log of a running shell command (by its command line). */
     val onLiveOutput: ((String) -> Unit)? = null,
-)
+    /** The session's agent (agy|claude): wording and answer formats differ. */
+    val agent: String = "agy",
+) {
+    val label: String get() = io.github.sidd065.agentcompanion.core.agentLabel(agent)
+    val isClaude: Boolean get() = agent == "claude"
+}
 
 @Composable
 fun TranscriptRow(row: Row, actions: TranscriptActions, isLast: Boolean, activeId: String?, wrap: Boolean, cwd: String) {
@@ -255,7 +316,11 @@ fun TranscriptRow(row: Row, actions: TranscriptActions, isLast: Boolean, activeI
                         else -> ToolRow(it, actions, wrap, cwd, indent = false)
                     }
                 }
-                "perm" -> PermCard(it, actions)
+                "perm" -> when (it.perm?.kind) {
+                    "question" -> ClaudeQuestionCard(it, actions)
+                    "plan" -> ClaudePlanCard(it, actions)
+                    else -> PermCard(it, actions)
+                }
                 "plan" -> TodoCard(it)
                 "notice" -> NoticeRow(it)
                 "turn" -> TurnRow(it)
@@ -494,6 +559,47 @@ fun ToolDetails(t: Tool, actions: TranscriptActions, wrap: Boolean) {
             }
             if (body.isNotBlank()) CodeBox(body, wrap = wrap)
         }
+        t.name == "ExitPlanMode" -> {
+            t.input.str("plan")?.let { plan ->
+                Box(Modifier.fillMaxWidth().heightIn(max = 480.dp).clip(RoundedCornerShape(8.dp)).border(1.dp, ex.cardBorder, RoundedCornerShape(8.dp)).padding(10.dp)) {
+                    MarkdownText(plan)
+                }
+            }
+            t.input.str("planFilePath")?.let { p -> TextButton(onClick = { actions.onOpenFile(p) }) { Text("Open plan") } }
+        }
+        t.name == "AskUserQuestion" -> {
+            val answers = t.output.obj()?.get("answers").obj()
+            t.input.obj()?.get("questions").arr()?.forEach { q ->
+                val qt = q.str("question") ?: return@forEach
+                Text(qt, style = MaterialTheme.typography.bodySmall)
+                val a = answers?.get(qt)?.let { (it as? JsonPrimitive)?.contentOrNull }
+                Text(if (a != null) "→ $a" else "(not answered)", style = MaterialTheme.typography.bodySmall, color = if (a != null) MaterialTheme.colorScheme.primary else ex.muted)
+            }
+        }
+        (t.name == "Edit" || t.name == "Write" || t.name == "MultiEdit") && t.patchLines() != null -> {
+            val p = t.path() ?: t.diffs().firstOrNull()?.path.orEmpty()
+            Text(baseName(p), style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.primary, modifier = Modifier.clickable { actions.onOpenFile(p) })
+            DiffView(t.patchLines()!!, Modifier.fillMaxWidth().clip(RoundedCornerShape(8.dp)), wrap = wrap, maxLines = 400)
+        }
+        t.name == "Agent" || t.name == "Task" -> {
+            t.input.str("prompt")?.let { pr ->
+                Text("Task", style = MaterialTheme.typography.labelSmall, color = ex.muted)
+                CodeBox(pr, wrap = true, maxChars = 6_000)
+            }
+            val report = t.content.arr()?.mapNotNull { c -> c.obj()?.get("content").str("text") }?.joinToString("\n")
+            if (!report.isNullOrBlank()) {
+                Text("Report", style = MaterialTheme.typography.labelSmall, color = ex.muted)
+                MarkdownText(report)
+            }
+            t.output.obj()?.let { o ->
+                val parts = listOfNotNull(
+                    (o["totalToolUseCount"] as? JsonPrimitive)?.intOrNull?.let { "$it tool calls" },
+                    (o["totalTokens"] as? JsonPrimitive)?.contentOrNull?.toLongOrNull()?.let { "${fmtTokens(it)} tokens" },
+                    (o["totalDurationMs"] as? JsonPrimitive)?.contentOrNull?.toLongOrNull()?.let { fmtDuration(it) },
+                )
+                if (parts.isNotEmpty()) Text(parts.joinToString(" · "), style = MaterialTheme.typography.labelSmall, color = ex.muted)
+            }
+        }
         t.diffs().isNotEmpty() -> {
             t.diffs().forEach { d ->
                 Text(
@@ -530,12 +636,15 @@ fun PermCard(item: Item, actions: TranscriptActions) {
     var busy by remember { mutableStateOf(false) }
     var denyNote by remember { mutableStateOf<String?>(null) }
     val pending = item.state == "pending"
+    val who = if (p.subagent) "A subagent" else actions.label
     val verb = when (p.toolKind) {
-        "execute" -> "agy wants to run:"
-        "edit" -> "agy wants to edit:"
-        "fetch" -> "agy wants to fetch:"
-        "delete" -> "agy wants to delete:"
-        else -> "agy wants to use a tool:"
+        "execute" -> "$who wants to run:"
+        "edit" -> "$who wants to edit:"
+        "fetch" -> "$who wants to fetch:"
+        "delete" -> "$who wants to delete:"
+        "read" -> "$who wants to read:"
+        "search" -> "$who wants to search:"
+        else -> if (p.tool != null) "$who wants to use ${toolDisplayName(p.tool)}:" else "$who wants to use a tool:"
     }
     Surface(
         Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 6.dp),
@@ -550,6 +659,8 @@ fun PermCard(item: Item, actions: TranscriptActions) {
                 Text(if (pending) verb else "Permission request", style = MaterialTheme.typography.titleSmall)
             }
             CodeBox(p.title ?: "tool call", wrap = true)
+            p.reason?.takeIf { pending }?.let { Text(it, style = MaterialTheme.typography.bodySmall, color = ex.muted) }
+            p.blockedPath?.takeIf { pending }?.let { Text("Outside the workspace: $it", style = MaterialTheme.typography.bodySmall, color = ex.warning) }
             if (pending) {
                 FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     p.options.forEach { o ->
@@ -561,14 +672,18 @@ fun PermCard(item: Item, actions: TranscriptActions) {
                                 busy = false
                             }
                         }
-                        val label = when (o.kind) {
+                        val label = if (actions.isClaude && o.name.isNotBlank()) o.name else when (o.kind) {
                             "allow_once" -> "Allow once"
                             "allow_always" -> "Always allow"
                             "reject_once" -> "Deny"
                             "reject_always" -> "Always deny"
                             else -> o.name
                         }
-                        if (allow) Button(onClick = onClick, enabled = !busy) { Text(label) } else OutlinedButton(onClick = onClick, enabled = !busy) { Text(label) }
+                        when {
+                            o.kind == "allow_always" -> androidx.compose.material3.FilledTonalButton(onClick = onClick, enabled = !busy) { Text(label) }
+                            allow -> Button(onClick = onClick, enabled = !busy) { Text(label) }
+                            else -> OutlinedButton(onClick = onClick, enabled = !busy) { Text(label) }
+                        }
                     }
                     p.options.firstOrNull { it.kind == "reject_once" }?.let {
                         androidx.compose.material3.TextButton(onClick = { denyNote = "" }, enabled = !busy) { Text("Deny with comment") }
@@ -587,6 +702,9 @@ fun PermCard(item: Item, actions: TranscriptActions) {
                     style = MaterialTheme.typography.labelMedium,
                     color = if (chosen?.kind?.startsWith("allow") == true) ex.success else ex.muted,
                 )
+                p.answer.obj()?.get("message")?.let { (it as? JsonPrimitive)?.contentOrNull }?.takeIf { it.isNotBlank() }?.let { m ->
+                    Text("“$m”", style = MaterialTheme.typography.bodySmall, color = ex.muted, fontStyle = FontStyle.Italic)
+                }
             }
         }
     }
@@ -596,7 +714,7 @@ fun PermCard(item: Item, actions: TranscriptActions) {
             title = { Text("Deny with comment") },
             text = {
                 androidx.compose.material3.OutlinedTextField(note, { denyNote = it }, Modifier.fillMaxWidth(),
-                    placeholder = { Text("Tell agy what to do instead") }, minLines = 2)
+                    placeholder = { Text("Tell ${actions.label} what to do instead") }, minLines = 2)
             },
             confirmButton = {
                 androidx.compose.material3.TextButton(enabled = note.isNotBlank(), onClick = {
@@ -604,10 +722,19 @@ fun PermCard(item: Item, actions: TranscriptActions) {
                     denyNote = null
                     busy = true
                     scope.launch {
-                        runCatching {
-                            actions.conn.rpc.call("session.permission", params { put("id", actions.sessionId); put("reqId", p.reqId); put("optionId", reject.optionId) })
+                        if (actions.isClaude) {
+                            // Claude takes the comment with the denial and carries on with it.
+                            runCatching {
+                                actions.conn.rpc.call("session.permission", params {
+                                    put("id", actions.sessionId); put("reqId", p.reqId); put("optionId", reject.optionId); put("message", note.trim())
+                                })
+                            }
+                        } else {
+                            runCatching {
+                                actions.conn.rpc.call("session.permission", params { put("id", actions.sessionId); put("reqId", p.reqId); put("optionId", reject.optionId) })
+                            }
+                            actions.onSendText(note.trim())
                         }
-                        actions.onSendText(note.trim())
                         busy = false
                     }
                 }) { Text("Deny and send") }
@@ -649,7 +776,7 @@ fun QuestionCard(item: Item, active: Boolean, actions: TranscriptActions) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Icon(Icons.Outlined.HelpOutline, null, Modifier.size(18.dp), tint = MaterialTheme.colorScheme.secondary)
                 Spacer(Modifier.width(8.dp))
-                Text(if (active) "agy has ${if (qs.size == 1) "a question" else "questions"} for you" else "Questions", style = MaterialTheme.typography.titleSmall, modifier = Modifier.weight(1f))
+                Text(if (active) "${actions.label} has ${if (qs.size == 1) "a question" else "questions"} for you" else "Questions", style = MaterialTheme.typography.titleSmall, modifier = Modifier.weight(1f))
                 if (qs.size > 1) Text("${idx + 1} of ${qs.size}", style = MaterialTheme.typography.labelSmall, color = ex.muted)
             }
             if (!active) {
@@ -788,14 +915,15 @@ fun TurnRow(item: Item) {
         "refusal" -> "Refused"
         else -> t.stopReason.ifBlank { "Done" }
     }
-    val parts = listOfNotNull(label, fmtDuration(t.durationMs).takeIf { t.durationMs > 0 }, t.usage?.totalTokens?.takeIf { it > 0 }?.let { "${fmtTokens(it)} tokens" })
+    val parts = listOfNotNull(label, fmtDuration(t.durationMs).takeIf { t.durationMs > 0 }, t.usage?.totalTokens?.takeIf { it > 0 }?.let { "${fmtTokens(it)} tokens" },
+        t.usage?.costUsd?.takeIf { it > 0 }?.let { fmtUsd(it) })
     Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 2.dp), horizontalArrangement = Arrangement.End) {
         Text(parts.joinToString(" · "), style = MaterialTheme.typography.labelSmall, color = if (t.stopReason == "cancelled") ex.warning else ex.muted)
     }
 }
 
 @Composable
-fun WorkingIndicator(since: Long) {
+fun WorkingIndicator(since: Long, status: String? = null) {
     val ex = LocalExtra.current
     val tr = rememberInfiniteTransition(label = "dots")
     val a by tr.animateFloat(0.3f, 1f, infiniteRepeatable(tween(700), RepeatMode.Reverse), label = "a")
@@ -806,7 +934,12 @@ fun WorkingIndicator(since: Long) {
     Row(Modifier.padding(horizontal = 16.dp, vertical = 10.dp), verticalAlignment = Alignment.CenterVertically) {
         Box(Modifier.size(8.dp).alpha(a).clip(RoundedCornerShape(50)).background(ex.running))
         Spacer(Modifier.width(8.dp))
-        Text("Working" + if (since > 0) " · ${fmtDuration(now - since)}" else "…", style = MaterialTheme.typography.bodySmall, color = ex.muted)
+        val what = when (status) {
+            "compacting" -> "Compacting conversation"
+            null, "" -> "Working"
+            else -> status.replaceFirstChar { it.uppercase() }
+        }
+        Text(what + if (since > 0) " · ${fmtDuration(now - since)}" else "…", style = MaterialTheme.typography.bodySmall, color = ex.muted)
     }
 }
 

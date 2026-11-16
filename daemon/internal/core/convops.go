@@ -112,6 +112,9 @@ func (m *Manager) Fork(ctx context.Context, id, itemID string) (*Session, string
 			return nil, "", err
 		}
 	}
+	if src.isClaudeSafe() {
+		return m.forkClaude(ctx, src, itemID)
+	}
 	ls, err := m.LS(ctx, id)
 	if err != nil {
 		return nil, "", err
@@ -169,6 +172,9 @@ func (m *Manager) RevertPreview(ctx context.Context, id, itemID string) (json.Ra
 	if s == nil {
 		return nil, 0, fmt.Errorf("unknown session %s", id)
 	}
+	if s.isClaudeSafe() {
+		return m.revertPreviewClaude(ctx, s, itemID)
+	}
 	ls, err := m.LS(ctx, id)
 	if err != nil {
 		return nil, 0, err
@@ -197,6 +203,9 @@ func (m *Manager) Rewind(ctx context.Context, id, itemID string, conversationOnl
 	s.mu.Unlock()
 	if busy {
 		return "", errors.New("stop the current turn before rewinding")
+	}
+	if s.isClaudeSafe() {
+		return m.rewindClaude(ctx, s, itemID, conversationOnly)
 	}
 	if err := s.ensureLive(ctx, ""); err != nil {
 		return "", err
@@ -255,7 +264,7 @@ func (s *Session) reloadLive(ctx context.Context) error {
 	var setup acp.SessionSetup
 	cctx, cancel := context.WithTimeout(ctx, 3*time.Minute)
 	defer cancel()
-	err := p.Conn.Call(cctx, "session/load", map[string]any{"sessionId": id, "cwd": cwd, "mcpServers": []any{}}, &setup)
+	err := p.ACP().Call(cctx, "session/load", map[string]any{"sessionId": id, "cwd": cwd, "mcpServers": []any{}}, &setup)
 	s.mu.Lock()
 	for _, it := range keep {
 		s.queueOpsLocked(s.tr.add(it))
@@ -312,7 +321,19 @@ func (m *Manager) Rename(ctx context.Context, id, title string) error {
 	if title == "" {
 		return errors.New("title is empty")
 	}
-	if err := m.annotate(ctx, id, map[string]any{"title": title}); err != nil {
+	if m.isClaudeID(id) {
+		s := m.Get(id)
+		if s == nil {
+			var err error
+			if s, err = m.Open(ctx, id); err != nil {
+				return err
+			}
+		}
+		if err := m.renameClaude(ctx, s, title); err != nil {
+			return err
+		}
+		m.invalidateHistory()
+	} else if err := m.annotate(ctx, id, map[string]any{"title": title}); err != nil {
 		return err
 	}
 	if s := m.Get(id); s != nil {
@@ -335,7 +356,12 @@ func (m *Manager) SetFlag(ctx context.Context, id, flag string, on bool) error {
 	if flag == "archived" && on {
 		ann["archivalStatusTimestamp"] = time.Now().UTC().Format(time.RFC3339Nano)
 	}
-	if err := m.annotate(ctx, id, ann); err != nil {
+	if m.isClaudeID(id) {
+		if err := m.setFlagClaude(id, flag, on); err != nil {
+			return err
+		}
+		m.invalidateHistory()
+	} else if err := m.annotate(ctx, id, ann); err != nil {
 		return err
 	}
 	if s := m.Get(id); s != nil {
@@ -358,6 +384,9 @@ func (m *Manager) SetFlag(ctx context.Context, id, flag string, on bool) error {
 
 // Delete permanently deletes a conversation from agy.
 func (m *Manager) Delete(ctx context.Context, id string) error {
+	if m.isClaudeID(id) {
+		return m.deleteClaude(id)
+	}
 	if s := m.Get(id); s != nil {
 		s.Hibernate()
 		s.mu.Lock()
@@ -383,6 +412,16 @@ func (m *Manager) Delete(ctx context.Context, id string) error {
 
 // Export renders a conversation as Markdown.
 func (m *Manager) Export(ctx context.Context, id string) (string, error) {
+	if m.isClaudeID(id) {
+		s, err := m.Open(ctx, id)
+		if err != nil {
+			return "", err
+		}
+		s.mu.Lock()
+		md := exportMarkdown(s.meta.Title, s.tr.Items)
+		s.mu.Unlock()
+		return md, nil
+	}
 	ls, err := m.LS(ctx, id)
 	if err != nil {
 		return "", err
@@ -398,6 +437,13 @@ func (m *Manager) Export(ctx context.Context, id string) (string, error) {
 
 // AgentChanges returns files the agent touched with original/modified content.
 func (m *Manager) AgentChanges(ctx context.Context, id string) (json.RawMessage, error) {
+	if m.isClaudeID(id) {
+		s, err := m.Open(ctx, id)
+		if err != nil {
+			return nil, err
+		}
+		return m.claudeFileDiffs(s)
+	}
 	ls, err := m.LS(ctx, id)
 	if err != nil {
 		return nil, err
@@ -460,6 +506,13 @@ type Artifact struct {
 func (m *Manager) Artifacts(id string) ([]Artifact, error) {
 	if strings.ContainsAny(id, "/\\") || strings.Contains(id, "..") {
 		return nil, errors.New("bad id")
+	}
+	if s := m.Get(id); s != nil && s.isClaudeSafe() {
+		var out []Artifact
+		for _, a := range m.claudeArtifacts(s) {
+			out = append(out, Artifact{Name: a.Name, Path: a.Path, Size: a.Size, Mtime: a.Updated})
+		}
+		return out, nil
 	}
 	root := filepath.Join(m.cfg.AgyDataDir, "brain", id)
 	var out []Artifact

@@ -16,6 +16,7 @@ import (
 
 	"agentc/internal/acp"
 	"agentc/internal/agyproc"
+	"agentc/internal/claude"
 )
 
 // SessionMeta is the persisted, client-visible state of a session.
@@ -53,11 +54,17 @@ type SessionMeta struct {
 	Archived      bool               `json:"archived,omitempty"`
 	Pinned        bool               `json:"pinned,omitempty"`
 	NeedsReload   bool               `json:"needsReload,omitempty"`
+	// Claude Code: resume at this entry next time (set by a rewind) and the
+	// parent of a fork whose transcript Claude hasn't written yet.
+	ResumeAt string         `json:"resumeAt,omitempty"`
+	ForkOf   string         `json:"forkOf,omitempty"`
+	Info     map[string]any `json:"info,omitempty"` // agent details (Claude: plan, version, output style)
 }
 
 // QueuedPrompt is a message waiting for the current turn to end.
 type QueuedPrompt struct {
 	ItemID string             `json:"itemId"`
+	Ref    string             `json:"ref,omitempty"`
 	Blocks []acp.ContentBlock `json:"blocks"`
 }
 
@@ -92,6 +99,9 @@ type Summary struct {
 	Error       string    `json:"error,omitempty"`
 	Pid         int       `json:"pid,omitempty"`
 	RSSKiB      int64     `json:"rssKiB,omitempty"`
+	Status      string    `json:"status,omitempty"`     // transient agent status (e.g. compacting)
+	Suggestion  string    `json:"suggestion,omitempty"` // predicted next prompt (Claude)
+	LiveElse    string    `json:"liveElsewhere,omitempty"`
 }
 
 // Detail is the full view sent when a client opens a session.
@@ -105,6 +115,8 @@ type Detail struct {
 	Modes         *acp.Modes         `json:"modes,omitempty"`
 	ConfigOptions []acp.ConfigOption `json:"configOptions,omitempty"`
 	Commands      []acp.Command      `json:"commands,omitempty"`
+	Info          map[string]any     `json:"info,omitempty"`
+	ResumeAt      string             `json:"resumeAt,omitempty"`
 }
 
 type pendingPerm struct {
@@ -112,6 +124,19 @@ type pendingPerm struct {
 	conn   *acp.Conn
 	itemID string
 	callID string
+	key    string // agent-side request key (Claude), for withdrawals
+	kind   string // tool|question|plan
+}
+
+// agentProc is a running agent backend: `agy acp` or the Claude Code adapter.
+type agentProc interface {
+	ACP() *acp.Conn
+	Pid() int
+	Alive() bool
+	Exited() <-chan struct{}
+	ExitErr() error
+	Close(grace time.Duration)
+	RSSKiB() int64
 }
 
 // Session is one agy conversation managed by the daemon.
@@ -120,7 +145,7 @@ type Session struct {
 	mu           sync.Mutex
 	meta         SessionMeta
 	tr           *Transcript
-	proc         *agyproc.Proc
+	proc         agentProc
 	startWait    chan struct{}
 	startErr     error
 	closing      bool
@@ -134,6 +159,11 @@ type Session struct {
 	saveTimer    *time.Timer
 	lastActivity time.Time
 	sentInFlight []string
+	// Claude Code: background tasks/subagents, transient status, suggestion.
+	tasks      []claude.Task
+	status     string
+	suggestion string
+	replaying  bool // replaying stored history: not new activity
 }
 
 func newSession(m *Manager, meta SessionMeta) *Session {
@@ -172,10 +202,15 @@ func (s *Session) summaryLocked() Summary {
 		Attention: m.Attention, Pending: len(s.perms), Queued: len(m.Queue), SkipPerms: m.SkipPerms,
 		CreatedAt: m.CreatedAt, UpdatedAt: m.UpdatedAt, LastText: m.LastText, ContextUsed: m.ContextUsed,
 		ContextSize: m.ContextSize, Usage: m.Usage, Turns: m.Turns, Archived: m.Archived, Pinned: m.Pinned,
-		ForkedFrom: m.ForkedFrom, Origin: m.Origin, Error: m.LastError,
+		ForkedFrom: m.ForkedFrom, Origin: m.Origin, Error: m.LastError, Status: s.status, Suggestion: s.suggestion,
 	}
 	if len(s.perms) > 0 {
 		sum.Attention = "permission"
+		for _, p := range s.perms {
+			if p.kind == "question" || p.kind == "plan" {
+				sum.Attention = p.kind
+			}
+		}
 	}
 	if m.Models != nil {
 		sum.Model = m.Models.CurrentModelID
@@ -198,6 +233,10 @@ func (s *Session) summaryLocked() Summary {
 	}
 	if s.proc != nil {
 		sum.Pid = s.proc.Pid()
+	} else if m.Agent == "claude" {
+		if ls, ok := s.m.claudeLiveCached()[m.ID]; ok {
+			sum.LiveElse = firstNonEmpty(ls.Status, "running")
+		}
 	}
 	return sum
 }
@@ -212,7 +251,7 @@ func (s *Session) Summary() Summary {
 func (s *Session) detailLocked() Detail {
 	return Detail{Summary: s.summaryLocked(), AddDirs: s.meta.AddDirs, Sandbox: s.meta.Sandbox, AgentName: s.meta.AgentName, ExtraArgs: s.meta.ExtraArgs,
 		Models: s.meta.Models, Modes: s.meta.Modes,
-		ConfigOptions: s.meta.ConfigOptions, Commands: s.meta.Commands}
+		ConfigOptions: s.meta.ConfigOptions, Commands: s.meta.Commands, Info: s.meta.Info, ResumeAt: s.meta.ResumeAt}
 }
 
 // ---- op streaming ----
@@ -258,6 +297,15 @@ func coalesce(ops []Op) []Op {
 
 // Subscribe attaches a client and sends it a snapshot or a delta since seq.
 func (s *Session) Subscribe(c *Client, since int64) {
+	s.mu.Lock()
+	claudeIdle := s.isClaude() && s.proc == nil && s.startWait == nil
+	s.mu.Unlock()
+	if claudeIdle && s.claudeStale() {
+		// The conversation went on in a Claude Code terminal: show it.
+		if err := s.replayClaude(); err != nil {
+			log.Printf("session %s: refresh: %v", s.ID(), err)
+		}
+	}
 	s.mu.Lock()
 	// Deliver anything already pending to existing subscribers first.
 	pending := s.pendingOps
@@ -318,6 +366,7 @@ type procHandler struct{ s *Session }
 
 func (h procHandler) HandleNotification(method string, params json.RawMessage) {
 	if method != "session/update" {
+		h.s.onExtension(method, params)
 		return
 	}
 	var n acp.SessionNotification
@@ -357,7 +406,8 @@ func (s *Session) onUpdate(raw json.RawMessage) {
 	switch h.SessionUpdate {
 	case "user_message_chunk":
 		if b, ok := textOf(raw); ok {
-			s.queueOpsLocked(s.tr.UserChunk(b, s.blockForLocked)...)
+			ref, ts := updateMeta(raw)
+			s.queueOpsLocked(s.tr.UserChunkRef(b, s.blockForLocked, ref, ts)...)
 		}
 	case "agent_message_chunk", "agent_thought_chunk":
 		kind := "agent"
@@ -401,6 +451,11 @@ func (s *Session) onUpdate(raw json.RawMessage) {
 				s.meta.Modes = &acp.Modes{}
 			}
 			s.meta.Modes.CurrentModeID = u.CurrentModeID
+			// Keep the mode a restarted process gets in step with changes the
+			// agent made itself (e.g. leaving plan mode after approval).
+			if s.meta.WantMode != "" || s.isClaude() {
+				s.meta.WantMode = u.CurrentModeID
+			}
 			s.configChangedLocked()
 			emit = true
 		}
@@ -438,7 +493,7 @@ func (s *Session) onUpdate(raw json.RawMessage) {
 	default:
 		content = false
 	}
-	if content {
+	if content && !s.replaying {
 		s.meta.UpdatedAt = now()
 		s.lastActivity = time.Now()
 	}
@@ -531,11 +586,26 @@ func (s *Session) onPermission(c *acp.Conn, id json.RawMessage, params json.RawM
 		return
 	}
 	var tc struct {
-		ToolCallID string `json:"toolCallId"`
-		Title      string `json:"title"`
-		Kind       string `json:"kind"`
+		ToolCallID string          `json:"toolCallId"`
+		Title      string          `json:"title"`
+		Kind       string          `json:"kind"`
+		RawInput   json.RawMessage `json:"rawInput"`
 	}
 	_ = json.Unmarshal(req.ToolCall, &tc)
+	var pm struct {
+		Meta struct {
+			Agentc struct {
+				Key         string `json:"key"`
+				Kind        string `json:"kind"`
+				Tool        string `json:"tool"`
+				Reason      string `json:"reason"`
+				BlockedPath string `json:"blockedPath"`
+				Subagent    bool   `json:"subagent"`
+			} `json:"agentc"`
+		} `json:"_meta"`
+	}
+	_ = json.Unmarshal(params, &pm)
+	am := pm.Meta.Agentc
 	s.mu.Lock()
 	if len(req.ToolCall) > 0 {
 		ops, _ := s.tr.ToolCall(req.ToolCall, false)
@@ -543,20 +613,80 @@ func (s *Session) onPermission(c *acp.Conn, id json.RawMessage, params json.RawM
 	}
 	s.permSeq++
 	reqID := fmt.Sprintf("r%d", s.permSeq)
-	p := &Perm{ReqID: reqID, CallID: tc.ToolCallID, Title: tc.Title, ToolKind: tc.Kind, Options: req.Options}
+	p := &Perm{ReqID: reqID, CallID: tc.ToolCallID, Title: tc.Title, ToolKind: tc.Kind, Options: req.Options,
+		Tool: am.Tool, Kind: am.Kind, Reason: am.Reason, BlockedPath: am.BlockedPath, Subagent: am.Subagent}
+	if am.Kind == "question" || am.Kind == "plan" {
+		p.Input = tc.RawInput
+	}
 	it, op := s.tr.AddPerm(p)
 	s.queueOpsLocked(op)
-	s.perms[reqID] = &pendingPerm{rpcID: id, conn: c, itemID: it.ID, callID: tc.ToolCallID}
+	s.perms[reqID] = &pendingPerm{rpcID: id, conn: c, itemID: it.ID, callID: tc.ToolCallID, key: am.Key, kind: firstNonEmpty(am.Kind, "tool")}
 	title := s.meta.Title
 	sid := s.meta.ID
+	label := s.agentLabelLocked()
 	s.mu.Unlock()
 	s.emit()
-	s.m.notify(Notification{SessionID: sid, Kind: "permission", Title: "agy needs your permission", Body: firstNonEmpty(tc.Title, "Tool call") + " — " + title,
-		ReqID: reqID, Options: req.Options})
+	n := Notification{SessionID: sid, Kind: "permission", Title: label + " needs your permission", Body: firstNonEmpty(tc.Title, "Tool call") + " — " + title,
+		ReqID: reqID, Options: req.Options}
+	switch am.Kind {
+	case "question":
+		n.Kind, n.Title, n.Body, n.Options = "question", label+" has a question", firstNonEmpty(questionText(tc.RawInput), tc.Title)+" — "+title, nil
+	case "plan":
+		n.Kind, n.Title, n.Body = "plan", "Plan ready for review", title
+	}
+	s.m.notify(n)
+}
+
+// questionText returns the first question of an AskUserQuestion input.
+func questionText(raw json.RawMessage) string {
+	var in struct {
+		Questions []struct {
+			Question string `json:"question"`
+		} `json:"questions"`
+	}
+	if json.Unmarshal(raw, &in) == nil && len(in.Questions) > 0 {
+		return in.Questions[0].Question
+	}
+	return ""
+}
+
+// updateMeta reads agentc's _meta on a session update (message uuid, time).
+func updateMeta(raw json.RawMessage) (string, int64) {
+	var u struct {
+		Meta struct {
+			Agentc struct {
+				UUID string `json:"uuid"`
+				Ts   int64  `json:"ts"`
+			} `json:"agentc"`
+		} `json:"_meta"`
+	}
+	_ = json.Unmarshal(raw, &u)
+	return u.Meta.Agentc.UUID, u.Meta.Agentc.Ts
+}
+
+func (s *Session) isClaude() bool { return s.meta.Agent == "claude" }
+
+func (s *Session) agentLabelLocked() string {
+	if s.meta.Agent == "claude" {
+		return "Claude"
+	}
+	return "agy"
+}
+
+// PermAnswer carries what a choice can't: answers to questions and the
+// comment given with a denial or plan feedback (Claude Code).
+type PermAnswer struct {
+	Answers map[string]any `json:"answers,omitempty"`
+	Message string         `json:"message,omitempty"`
 }
 
 // RespondPermission answers a pending permission request.
 func (s *Session) RespondPermission(reqID, optionID string) error {
+	return s.RespondPermissionWith(reqID, optionID, nil)
+}
+
+// RespondPermissionWith answers a permission request with extra data.
+func (s *Session) RespondPermissionWith(reqID, optionID string, ans *PermAnswer) error {
 	s.mu.Lock()
 	p := s.perms[reqID]
 	if p == nil {
@@ -570,9 +700,19 @@ func (s *Session) RespondPermission(reqID, optionID string) error {
 		state, chosen = "cancelled", ""
 		result = map[string]any{"outcome": map[string]any{"outcome": "cancelled"}}
 	} else {
-		result = map[string]any{"outcome": map[string]any{"outcome": "selected", "optionId": optionID}}
+		out := map[string]any{"outcome": "selected", "optionId": optionID}
+		if ans != nil && (len(ans.Answers) > 0 || ans.Message != "") {
+			out["_meta"] = ans
+		}
+		result = map[string]any{"outcome": out}
 	}
 	if op, ok := s.tr.ResolvePerm(reqID, state, chosen); ok {
+		if it := s.tr.Get(p.itemID); it != nil && it.Perm != nil && ans != nil {
+			if b, err := json.Marshal(ans); err == nil && string(b) != "{}" {
+				it.Perm.Answer = b
+				op = s.tr.set(it)
+			}
+		}
 		s.queueOpsLocked(op)
 	}
 	s.mu.Unlock()
@@ -650,27 +790,62 @@ func (s *Session) start(ctx context.Context, mode string) error {
 	s.mu.Lock()
 	cwd, addDirs, skip, id := s.meta.Cwd, s.meta.AddDirs, s.meta.SkipPerms, s.meta.ID
 	sandbox, agentName, noTel, extra := s.meta.Sandbox, s.meta.AgentName, s.meta.NoTelemetry, s.meta.ExtraArgs
+	isClaude := s.isClaude()
+	wantModel, wantMode, wantThought := s.meta.WantModel, s.meta.WantMode, s.meta.WantThought
+	resumeAt, forkOf := s.meta.ResumeAt, s.meta.ForkOf
 	s.mu.Unlock()
 	if st, err := os.Stat(cwd); err != nil || !st.IsDir() {
 		return fmt.Errorf("working directory %q is not available", cwd)
 	}
-	p, err := agyproc.Start(ctx, agyproc.Options{
-		AgyPath: s.m.cfg.AgyPath, Cwd: cwd, SkipPermissions: skip, AddDirs: addDirs,
-		Sandbox: sandbox, AgentName: agentName, NoTelemetry: noTel, ExtraArgs: extra,
-		LogDir: filepath.Join(s.m.cfg.StateDir, "logs"), Env: s.m.agyEnv(), Handler: procHandler{s: s},
-	})
-	if err != nil {
-		return err
+	var p agentProc
+	if isClaude {
+		if mode == "load" || (mode == "resume" && s.claudeStale()) {
+			// Claude's transcript is read straight from disk; the process
+			// only needs to resume it.
+			if err := s.replayClaude(); err != nil {
+				log.Printf("session %s: replay: %v", id, err)
+			}
+			mode = "resume"
+		}
+		if mode == "resume" && forkOf == "" && !s.m.claudeTranscriptExists(id, cwd) {
+			mode = "new" // nothing was written yet: start it under the same id
+		}
+		if forkOf != "" && s.m.claudeTranscriptExists(id, cwd) {
+			forkOf = "" // the fork has been written; resume it directly
+		}
+		if live := s.m.claudeLiveElsewhere(id); live != nil {
+			return fmt.Errorf("this conversation is open in another Claude Code process (pid %d, %s); close it there or fork it to continue here", live.Pid, firstNonEmpty(live.Status, "running"))
+		}
+		p = claude.Start(claude.Options{Bin: s.m.claudeBin(), Env: s.m.claudeEnv(), HomeDir: s.m.cfg.HomeDir,
+			LogDir: filepath.Join(s.m.cfg.StateDir, "logs"), SkipPermissions: skip, AddDirs: addDirs,
+			Model: wantModel, Effort: wantThought, Mode: wantMode, AgentName: agentName, ExtraArgs: extra,
+			ResumeAt: resumeAt, ForkFrom: forkOf, Handler: procHandler{s: s}})
+	} else {
+		ap, err := agyproc.Start(ctx, agyproc.Options{
+			AgyPath: s.m.cfg.AgyPath, Cwd: cwd, SkipPermissions: skip, AddDirs: addDirs,
+			Sandbox: sandbox, AgentName: agentName, NoTelemetry: noTel, ExtraArgs: extra,
+			LogDir: filepath.Join(s.m.cfg.StateDir, "logs"), Env: s.m.agyEnv(), Handler: procHandler{s: s},
+		})
+		if err != nil {
+			return err
+		}
+		p = ap
 	}
+	conn := p.ACP()
 	cctx, cancel := context.WithTimeout(ctx, 5*time.Minute)
 	defer cancel()
 	var setup acp.SessionSetup
+	var err error
 	switch mode {
 	case "new":
-		err = p.Conn.Call(cctx, "session/new", map[string]any{"cwd": cwd, "mcpServers": []any{}}, &setup)
+		params := map[string]any{"cwd": cwd, "mcpServers": []any{}}
+		if isClaude && id != "" {
+			params["sessionId"] = id
+		}
+		err = conn.Call(cctx, "session/new", params, &setup)
 	case "resume":
-		err = p.Conn.Call(cctx, "session/resume", map[string]any{"sessionId": id, "cwd": cwd, "mcpServers": []any{}}, &setup)
-		if err != nil {
+		err = conn.Call(cctx, "session/resume", map[string]any{"sessionId": id, "cwd": cwd, "mcpServers": []any{}}, &setup)
+		if err != nil && !isClaude {
 			log.Printf("session %s: resume failed (%v); loading with replay", id, err)
 			mode = "load"
 		}
@@ -686,7 +861,7 @@ func (s *Session) start(ctx context.Context, mode string) error {
 		s.queueOpsLocked(s.tr.Reset())
 		s.mu.Unlock()
 		setup = acp.SessionSetup{}
-		err = p.Conn.Call(cctx, "session/load", map[string]any{"sessionId": id, "cwd": cwd, "mcpServers": []any{}}, &setup)
+		err = conn.Call(cctx, "session/load", map[string]any{"sessionId": id, "cwd": cwd, "mcpServers": []any{}}, &setup)
 		s.mu.Lock()
 		for _, it := range keep {
 			s.queueOpsLocked(s.tr.add(it))
@@ -696,7 +871,7 @@ func (s *Session) start(ctx context.Context, mode string) error {
 	}
 	if err != nil {
 		p.Close(5 * time.Second)
-		return fmt.Errorf("agy session/%s: %w", mode, err)
+		return fmt.Errorf("%s session/%s: %w", map[bool]string{true: "claude", false: "agy"}[isClaude], mode, err)
 	}
 	if setup.SessionID == "" {
 		setup.SessionID = id
@@ -711,17 +886,25 @@ func (s *Session) start(ctx context.Context, mode string) error {
 	if setup.Modes != nil {
 		s.meta.Modes = setup.Modes
 	}
-	if len(setup.ConfigOptions) > 0 {
+	if len(setup.ConfigOptions) > 0 || isClaude {
 		s.meta.ConfigOptions = setup.ConfigOptions
 	}
 	s.proc = p
 	s.lastActivity = time.Now()
-	wantModel, wantMode, wantThought := s.meta.WantModel, s.meta.WantMode, s.meta.WantThought
 	s.mu.Unlock()
 	go s.watchProc(p)
-	// Apply desired configuration (model, thinking level, mode).
-	s.applyConfig(cctx, wantModel, wantThought, wantMode)
+	if !isClaude {
+		// Apply desired configuration (model, thinking level, mode). Claude
+		// got them as command-line flags.
+		s.applyConfig(cctx, wantModel, wantThought, wantMode)
+	}
 	return nil
+}
+
+func (s *Session) needsReload() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.meta.NeedsReload
 }
 
 func (s *Session) applyConfig(ctx context.Context, model, thought, mode string) {
@@ -801,7 +984,7 @@ func fitThought(opts []acp.ConfigOption, want string) string {
 	return want
 }
 
-func (s *Session) watchProc(p *agyproc.Proc) {
+func (s *Session) watchProc(p agentProc) {
 	<-p.Exited()
 	s.mu.Lock()
 	if s.proc != p {
@@ -811,7 +994,7 @@ func (s *Session) watchProc(p *agyproc.Proc) {
 	s.proc = nil
 	perms := s.cancelPermsLocked()
 	if !s.closing {
-		msg := "agy process exited"
+		msg := s.agentLabelLocked() + " process exited"
 		if err := p.ExitErr(); err != nil {
 			msg += ": " + err.Error()
 		}
@@ -837,7 +1020,7 @@ func (s *Session) Hibernate() {
 	perms := s.cancelPermsLocked()
 	s.mu.Unlock()
 	replyCancelled(perms)
-	_ = p.Conn.Notify("session/cancel", map[string]any{"sessionId": s.ID()})
+	_ = p.ACP().Notify("session/cancel", map[string]any{"sessionId": s.ID()})
 	p.Close(20 * time.Second)
 	s.emit()
 	s.m.saveSession(s)
@@ -915,24 +1098,37 @@ func (s *Session) Prompt(in PromptInput) (map[string]any, error) {
 	}
 	delivery := in.Delivery
 	if delivery == "" {
-		delivery = s.m.defaultDelivery()
+		delivery = s.m.defaultDelivery(s.meta.Agent)
 	}
 	s.mu.Lock()
+	if s.isClaude() && s.proc == nil {
+		if live := s.m.claudeLiveElsewhere(s.meta.ID); live != nil {
+			s.mu.Unlock()
+			return nil, fmt.Errorf("this conversation is open in another Claude Code process (pid %d); close it there or fork it to continue here", live.Pid)
+		}
+	}
 	busy := s.inflight > 0 || s.startWait != nil
+	ref := ""
+	if s.isClaude() {
+		ref = claude.NewUUID()
+	}
 	if busy && delivery == "queue" {
 		it, op := s.tr.AddUser(in.Text, shown, "queued")
+		it.Ref = ref
 		s.queueOpsLocked(op)
-		s.meta.Queue = append(s.meta.Queue, QueuedPrompt{ItemID: it.ID, Blocks: blocks})
+		s.meta.Queue = append(s.meta.Queue, QueuedPrompt{ItemID: it.ID, Ref: ref, Blocks: blocks})
 		s.mu.Unlock()
 		s.emit()
 		return map[string]any{"queued": true, "itemId": it.ID}, nil
 	}
 	it, op := s.tr.AddUser(in.Text, shown, "sent")
+	it.Ref = ref
 	s.queueOpsLocked(op)
 	s.beginTurnLocked()
+	s.suggestion = ""
 	s.mu.Unlock()
 	s.emit()
-	go s.runPrompt(it.ID, blocks)
+	go s.runPrompt(it.ID, ref, blocks)
 	return map[string]any{"queued": false, "itemId": it.ID}, nil
 }
 
@@ -946,7 +1142,7 @@ func (s *Session) beginTurnLocked() {
 	s.lastActivity = time.Now()
 }
 
-func (s *Session) runPrompt(itemID string, blocks []acp.ContentBlock) {
+func (s *Session) runPrompt(itemID, ref string, blocks []acp.ContentBlock) {
 	ctx := context.Background()
 	err := s.ensureLive(ctx, "")
 	var res acp.PromptResult
@@ -954,11 +1150,16 @@ func (s *Session) runPrompt(itemID string, blocks []acp.ContentBlock) {
 		s.mu.Lock()
 		p := s.proc
 		id := s.meta.ID
+		label := s.agentLabelLocked()
 		s.mu.Unlock()
 		if p == nil {
-			err = errors.New("agy process is not running")
+			err = errors.New(label + " is not running")
 		} else {
-			err = p.Conn.Call(ctx, "session/prompt", map[string]any{"sessionId": id, "prompt": blocks}, &res)
+			params := map[string]any{"sessionId": id, "prompt": blocks}
+			if ref != "" {
+				params["_meta"] = map[string]any{"agentc": map[string]any{"itemId": itemID, "uuid": ref}}
+			}
+			err = p.ACP().Call(ctx, "session/prompt", params, &res)
 		}
 	}
 	s.finishPrompt(itemID, &res, err)
@@ -983,8 +1184,8 @@ func (s *Session) finishPrompt(itemID string, res *acp.PromptResult, err error) 
 	notifyKind, notifyBody := "", ""
 	if err != nil {
 		msg := err.Error()
-		if errors.Is(err, acp.ErrClosed) {
-			msg = "agy process exited during the turn"
+		if errors.Is(err, acp.ErrClosed) || errors.Is(err, claude.ErrExited) {
+			msg = s.agentLabelLocked() + " process exited during the turn"
 		}
 		s.queueOpsLocked(s.tr.AddNotice("error", msg))
 		s.meta.LastError = msg
@@ -998,6 +1199,14 @@ func (s *Session) finishPrompt(itemID string, res *acp.PromptResult, err error) 
 			s.meta.Usage.CachedWriteTokens += res.Usage.CachedWriteTokens
 			s.meta.Usage.ThoughtTokens += res.Usage.ThoughtTokens
 			s.meta.Usage.TotalTokens += res.Usage.TotalTokens
+			s.meta.Usage.CostUSD += res.Usage.CostUSD
+		}
+		if s.isClaude() && res.StopReason != "cancelled" {
+			// The conversation now continues from the new messages.
+			s.meta.ResumeAt, s.meta.ForkOf = "", ""
+			if s.meta.Turns == 1 && !s.meta.TitleLocked && (s.meta.Title == "" || s.meta.Title == "New session") {
+				go s.autoTitle(s.firstUserTextLocked())
+			}
 		}
 		if s.inflight == 0 {
 			s.queueOpsLocked(s.tr.AddTurn(&Turn{StopReason: res.StopReason, Usage: res.Usage, DurationMs: dur}))
@@ -1014,7 +1223,7 @@ func (s *Session) finishPrompt(itemID string, res *acp.PromptResult, err error) 
 		if err == nil && !cancelled {
 			switch s.meta.Attention {
 			case "question":
-				notifyKind, notifyBody = "question", "agy has a question for you"
+				notifyKind, notifyBody = "question", s.agentLabelLocked()+" has a question for you"
 			case "plan":
 				notifyKind, notifyBody = "plan", "Plan ready for review"
 			default:
@@ -1032,15 +1241,15 @@ func (s *Session) finishPrompt(itemID string, res *acp.PromptResult, err error) 
 			notifyKind = "" // the agent continues with the queued message
 		}
 	}
-	sid, title := s.meta.ID, s.meta.Title
+	sid, title, label := s.meta.ID, s.meta.Title, s.agentLabelLocked()
 	s.mu.Unlock()
 	s.emit()
 	s.m.saveSession(s)
 	if notifyKind != "" {
-		s.m.notify(Notification{SessionID: sid, Kind: notifyKind, Title: firstNonEmpty(title, "agy session"), Body: notifyBody})
+		s.m.notify(Notification{SessionID: sid, Kind: notifyKind, Title: firstNonEmpty(title, label+" session"), Body: notifyBody})
 	}
 	if next != nil {
-		go s.runPrompt(next.ItemID, next.Blocks)
+		go s.runPrompt(next.ItemID, next.Ref, next.Blocks)
 	}
 }
 
@@ -1106,7 +1315,7 @@ func (s *Session) Cancel() error {
 		return nil
 	}
 	s.emit()
-	return p.Conn.Notify("session/cancel", map[string]any{"sessionId": id})
+	return p.ACP().Notify("session/cancel", map[string]any{"sessionId": id})
 }
 
 // QueueAction manipulates a queued message: send (steer now), remove, edit.
@@ -1152,7 +1361,7 @@ func (s *Session) QueueAction(itemID, action, text string) error {
 		s.beginTurnLocked()
 		s.mu.Unlock()
 		s.emit()
-		go s.runPrompt(q.ItemID, q.Blocks)
+		go s.runPrompt(q.ItemID, q.Ref, q.Blocks)
 		return nil
 	}
 	s.mu.Unlock()
@@ -1167,7 +1376,7 @@ func (s *Session) liveConn() (*acp.Conn, string) {
 	if s.proc == nil {
 		return nil, s.meta.ID
 	}
-	return s.proc.Conn, s.meta.ID
+	return s.proc.ACP(), s.meta.ID
 }
 
 // resolveModel maps a model id, base model or display name to a concrete modelId.

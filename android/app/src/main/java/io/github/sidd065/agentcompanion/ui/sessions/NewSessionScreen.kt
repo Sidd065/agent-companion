@@ -90,8 +90,6 @@ import io.github.sidd065.agentcompanion.ui.ShareInbox
 import io.github.sidd065.agentcompanion.ui.activeConnection
 import io.github.sidd065.agentcompanion.ui.chat.AttachmentUtil
 import io.github.sidd065.agentcompanion.ui.chat.Pending
-import io.github.sidd065.agentcompanion.ui.components.AgyFlagsCard
-import io.github.sidd065.agentcompanion.ui.components.AgyFlagsSheet
 import io.github.sidd065.agentcompanion.ui.components.LocalSnack
 import io.github.sidd065.agentcompanion.ui.components.TextPromptDialog
 import io.github.sidd065.agentcompanion.ui.components.baseName
@@ -149,7 +147,13 @@ private fun NewSessionContent(initialCwd: String, textState: androidx.compose.ru
     val home = conn.homeDir()
     var cwd by remember { mutableStateOf(initialCwd) }
     var text by textState
-    var agent by remember { mutableStateOf("agy") }
+    var agent by remember { mutableStateOf(settings.defaultAgent) }
+    LaunchedEffect(agents) {
+        // Fall back to an available agent if the saved one isn't installed on this computer.
+        if (agents.isNotEmpty() && agents.none { it.id == agent && it.available }) {
+            agents.firstOrNull { it.available }?.let { agent = it.id }
+        }
+    }
     val addDirs = remember { mutableStateListOf<String>() }
     var flagsOpen by remember { mutableStateOf(false) }
     val attachments = remember { mutableStateListOf<Pending>() }
@@ -181,12 +185,12 @@ private fun NewSessionContent(initialCwd: String, textState: androidx.compose.ru
         creating = true
         scope.launch {
             try {
-                val flags = settings.agyFlags
+                val flagDirs = if (agent == "claude") settings.claudeFlags.addDirs else settings.agyFlags.addDirs
                 val res = conn.rpc.call("session.create", params {
-                    flags.daemonJson().forEach { (k, v) -> put(k, v) }
+                    settings.flagsJson(agent).forEach { (k, v) -> put(k, v) }
                     put("agent", agent)
                     put("cwd", cwd)
-                    val dirs = (flags.addDirs + addDirs).distinct()
+                    val dirs = (flagDirs + addDirs).distinct()
                     if (dirs.isNotEmpty()) put("addDirs", JsonArray(dirs.map { JsonPrimitive(it) }))
                     if (text.isNotBlank() || attachments.isNotEmpty()) {
                         put("prompt", params {
@@ -222,7 +226,8 @@ private fun NewSessionContent(initialCwd: String, textState: androidx.compose.ru
                 val list = agents.ifEmpty { listOf(io.github.sidd065.agentcompanion.core.AgentProfile("agy", "Antigravity (agy)", available = true)) }
                 list.forEach { a ->
                     FilterChip(
-                        selected = agent == a.id, enabled = a.available, onClick = { agent = a.id },
+                        selected = agent == a.id, enabled = a.available,
+                        onClick = { agent = a.id; scope.launch { g.prefs.update { it.copy(defaultAgent = a.id) } } },
                         label = { Text(a.name + if (!a.available && a.planned) " · soon" else "") },
                     )
                 }
@@ -260,8 +265,8 @@ private fun NewSessionContent(initialCwd: String, textState: androidx.compose.ru
                 }
             }
             HorizontalDivider()
-            // agy launch flags (saved on this phone, used for every session)
-            AgyFlagsCard(kind = "acp", onEdit = { flagsOpen = true })
+            // Launch flags for the chosen agent (saved on this phone, used for every session)
+            io.github.sidd065.agentcompanion.ui.components.AgentFlagsCard(agent, kind = "acp", onEdit = { flagsOpen = true })
             // Extra dirs for this session only
             Text("Extra workspace folders (this session)", style = MaterialTheme.typography.labelLarge)
             FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -275,13 +280,13 @@ private fun NewSessionContent(initialCwd: String, textState: androidx.compose.ru
                 if (creating) {
                     CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp, color = MaterialTheme.colorScheme.onPrimary)
                     Spacer(Modifier.width(10.dp))
-                    Text("Starting agy…")
+                    Text("Starting ${io.github.sidd065.agentcompanion.core.agentProduct(agent)}…")
                 } else Text(if (text.isBlank()) "Start session" else "Start session and send")
             }
             Spacer(Modifier.height(24.dp))
         }
     }
-    if (flagsOpen) AgyFlagsSheet(conn, onDismiss = { flagsOpen = false })
+    if (flagsOpen) io.github.sidd065.agentcompanion.ui.components.AgentFlagsSheet(agent, conn, onDismiss = { flagsOpen = false })
     picking?.let { which ->
         DirectoryPicker(conn, start = if (which == "cwd") cwd else "", onDismiss = { picking = null }) { picked ->
             if (which == "cwd") cwd = picked else if (picked !in addDirs) addDirs.add(picked)

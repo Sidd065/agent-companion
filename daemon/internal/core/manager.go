@@ -19,12 +19,14 @@ import (
 
 	"agentc/internal/acp"
 	"agentc/internal/agyproc"
+	"agentc/internal/claude"
 	"agentc/internal/lsapi"
 )
 
 // Config configures the session manager.
 type Config struct {
 	AgyPath       string
+	ClaudePath    string // claude executable ("" = ~/.local/bin/claude or PATH)
 	StateDir      string
 	HomeDir       string
 	AgyDataDir    string // ~/.gemini/antigravity-cli
@@ -50,6 +52,7 @@ type Notification struct {
 // HistEntry is an agy conversation known from agy's own storage.
 type HistEntry struct {
 	ID        string `json:"id"`
+	Agent     string `json:"agent,omitempty"`
 	Title     string `json:"title"`
 	Cwd       string `json:"cwd"`
 	UpdatedAt int64  `json:"updatedAt"`
@@ -379,14 +382,20 @@ func (m *Manager) AgySettings() map[string]any {
 	return v
 }
 
-func (m *Manager) defaultDelivery() string {
+func (m *Manager) defaultDelivery(agent string) string {
+	if agent == "claude" {
+		return "steer" // Claude takes messages mid-turn, like its own terminal UI
+	}
 	if v, _ := m.AgySettings()["queuedMessages"].(string); strings.Contains(strings.ToLower(v), "immediate") {
 		return "steer"
 	}
 	return "queue"
 }
 
-func (m *Manager) defaultModel() string {
+func (m *Manager) defaultModel(agent string) string {
+	if agent != "agy" {
+		return "" // the agent's own default
+	}
 	if v, _ := m.AgySettings()["model"].(string); v != "" {
 		return v
 	}
@@ -428,7 +437,7 @@ func (utilHandler) HandleRequest(c *acp.Conn, id json.RawMessage, method string,
 func (m *Manager) LS(ctx context.Context, convID string) (*lsapi.Client, error) {
 	if s := m.Get(convID); s != nil {
 		s.mu.Lock()
-		p := s.proc
+		p, _ := s.proc.(*agyproc.Proc)
 		s.mu.Unlock()
 		if p != nil && p.Alive() {
 			port, err := p.LSPort(ctx)
@@ -503,6 +512,7 @@ func (m *Manager) History(ctx context.Context, force bool) []HistEntry {
 		}
 	}
 	out := make([]HistEntry, 0, len(byID))
+	out = append(out, m.claudeHistory()...)
 	for _, e := range byID {
 		ann := m.readAnnotations(e.ID)
 		if ann.Title != "" {
@@ -666,12 +676,25 @@ func (m *Manager) List(ctx context.Context, force bool) []Summary {
 	for _, h := range hist {
 		histByID[h.ID] = h
 	}
+	var liveClaude map[string]claude.LiveSession
+	if _, err := os.Stat(m.claudeDir()); err == nil {
+		liveClaude = claude.LiveSessions(m.claudeDir())
+		own := m.ownPids()
+		for id, ls := range liveClaude {
+			if own[ls.Pid] {
+				delete(liveClaude, id)
+			}
+		}
+	}
 	var out []Summary
 	seen := map[string]bool{}
 	for _, s := range m.all() {
 		sum := s.Summary()
 		if sum.ID == "" {
 			continue
+		}
+		if ls, ok := liveClaude[sum.ID]; ok {
+			sum.LiveElse = firstNonEmpty(ls.Status, "running")
 		}
 		if h, ok := histByID[sum.ID]; ok {
 			sum.Archived, sum.Pinned = h.Archived, h.Pinned
@@ -689,8 +712,12 @@ func (m *Manager) List(ctx context.Context, force bool) []Summary {
 		if seen[h.ID] {
 			continue
 		}
-		out = append(out, Summary{ID: h.ID, Agent: "agy", Title: firstNonEmpty(h.Title, "Untitled conversation"), Cwd: h.Cwd, State: "history",
-			UpdatedAt: h.UpdatedAt, CreatedAt: h.UpdatedAt, Archived: h.Archived, Pinned: h.Pinned, Turns: h.Steps})
+		sum := Summary{ID: h.ID, Agent: firstNonEmpty(h.Agent, "agy"), Title: firstNonEmpty(h.Title, "Untitled conversation"), Cwd: h.Cwd, State: "history",
+			UpdatedAt: h.UpdatedAt, CreatedAt: h.UpdatedAt, Archived: h.Archived, Pinned: h.Pinned, Turns: h.Steps}
+		if ls, ok := liveClaude[h.ID]; ok {
+			sum.LiveElse = firstNonEmpty(ls.Status, "running")
+		}
+		out = append(out, sum)
 	}
 	sort.SliceStable(out, func(i, j int) bool { return out[i].UpdatedAt > out[j].UpdatedAt })
 	return out
@@ -775,7 +802,7 @@ func (m *Manager) Create(ctx context.Context, p CreateParams) (*Session, error) 
 		return nil, fmt.Errorf("directory %q does not exist", cwd)
 	}
 	ts := now()
-	meta := SessionMeta{Agent: agent, Cwd: cwd, SkipPerms: m.cfg.DefaultSkip, WantModel: m.defaultModel(),
+	meta := SessionMeta{Agent: agent, Cwd: cwd, SkipPerms: m.cfg.DefaultSkip, WantModel: m.defaultModel(agent),
 		CreatedAt: ts, UpdatedAt: ts, Origin: "app", Title: "New session"}
 	m.applyFlags(&meta, &p.Flags)
 	s := newSession(m, meta)
@@ -826,10 +853,20 @@ func (m *Manager) OpenWith(ctx context.Context, id string, flags *Flags) (*Sessi
 		}
 	}
 	if h == nil {
+		if p, err := m.claudeTranscript(id, ""); err == nil {
+			if si, ok := claude.ReadSessionInfo(p); ok {
+				h = &HistEntry{ID: id, Agent: "claude", Title: si.Title, Cwd: si.Cwd, UpdatedAt: si.Updated, Archived: si.Archived}
+			}
+		}
+	}
+	if h == nil {
 		if _, err := os.Stat(filepath.Join(m.cfg.AgyDataDir, "conversations", id+".db")); err != nil {
 			return nil, fmt.Errorf("conversation %s not found", id)
 		}
 		h = &HistEntry{ID: id}
+	}
+	if h.Agent == "claude" {
+		return m.openClaude(h, flags)
 	}
 	cwd := h.Cwd
 	if st, err := os.Stat(cwd); cwd == "" || err != nil || !st.IsDir() {
@@ -970,6 +1007,14 @@ func (m *Manager) idleFor(s *Session) time.Duration {
 	}
 	if m.hub.HasSubscribers(s.meta.ID) {
 		return 0
+	}
+	if time.Since(s.lastActivity) < time.Minute {
+		return 0 // just created or used: the app is probably about to open it
+	}
+	for _, t := range s.tasks {
+		if t.Status == "running" {
+			return 0 // a background command or subagent is still working
+		}
 	}
 	n := len(s.tr.Items)
 	for i := n - 1; i >= 0 && i >= n-80; i-- {

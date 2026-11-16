@@ -135,7 +135,7 @@ fun TerminalsScreen() {
                 scope.launch { conns.forEach { c -> runCatching { c.refreshTerms() } }; refreshing = false }
             }, modifier = Modifier.fillMaxSize()) {
                 if (terms.isEmpty()) {
-                    EmptyState(Icons.Outlined.Terminal, "No terminals", "Open a shell or the agy TUI on ${if (multi) "any of your computers" else conn.config.label}. On a computer, run `agyr` to start agy in a terminal you can pick up here.")
+                    EmptyState(Icons.Outlined.Terminal, "No terminals", "Open a shell, agy or Claude Code on ${if (multi) "any of your computers" else conn.config.label}. On a computer, run `agyr` to start agy in a terminal you can pick up here.")
                 } else {
                     LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(bottom = 96.dp)) {
                         items(terms, key = { it.first.config.id + it.second.id }) { (tc, t) ->
@@ -145,7 +145,7 @@ fun TerminalsScreen() {
                                     Modifier.fillMaxWidth().combinedClickable(onClick = { nav.navigate(Routes.term(t.id, host = tc.config.id)) }, onLongClick = { menuFor = t }).padding(horizontal = 16.dp, vertical = 12.dp),
                                     verticalAlignment = Alignment.CenterVertically,
                                 ) {
-                                    Icon(if (t.kind == "agy") Icons.AutoMirrored.Outlined.Chat else Icons.Outlined.Terminal, null, tint = MaterialTheme.colorScheme.primary)
+                                    Icon(if (t.kind == "agy" || t.kind == "claude") Icons.AutoMirrored.Outlined.Chat else Icons.Outlined.Terminal, null, tint = MaterialTheme.colorScheme.primary)
                                     Spacer(Modifier.width(14.dp))
                                     Column(Modifier.weight(1f)) {
                                         Row(verticalAlignment = Alignment.CenterVertically) {
@@ -205,27 +205,38 @@ fun NewTerminalSheet(onDismiss: () -> Unit, hostPicker: @Composable () -> Unit =
     val snack = LocalSnack.current
     val scope = rememberCoroutineScope()
     val home = conn.homeDir() ?: "~"
-    var kind by remember { mutableStateOf("agy") }
+    val st = LocalContext.current.graph.prefs.flow.collectAsState().value
+    val agentsAvail by conn.agents.collectAsState()
+    var kind by remember { mutableStateOf(if (st.defaultAgent == "claude") "claude" else "agy") }
     var cwd by remember { mutableStateOf(home) }
     var command by remember { mutableStateOf("") }
     var args by remember { mutableStateOf("") }
     var picking by remember { mutableStateOf(false) }
     var busy by remember { mutableStateOf(false) }
     var flagsOpen by remember { mutableStateOf(false) }
-    val flags = LocalContext.current.graph.prefs.flow.collectAsState().value.agyFlags
+    val flags = st.agyFlags
+    val cflags = st.claudeFlags
     ModalBottomSheet(onDismissRequest = onDismiss) {
         Column(Modifier.padding(horizontal = 20.dp).padding(bottom = 28.dp).imePadding(), verticalArrangement = Arrangement.spacedBy(12.dp)) {
             Text("New terminal", style = MaterialTheme.typography.titleMedium)
             hostPicker()
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                listOf("agy" to "agy TUI", "shell" to "Shell", "cmd" to "Command").forEach { (k, l) -> FilterChip(kind == k, { kind = k }, label = { Text(l) }) }
+                val kinds = buildList {
+                    add("agy" to "agy")
+                    if (agentsAvail.any { it.id == "claude" && it.available }) add("claude" to "Claude Code")
+                    add("shell" to "Shell"); add("cmd" to "Command")
+                }
+                Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    kinds.forEach { (k, l) -> FilterChip(kind == k, { kind = k }, label = { Text(l) }) }
+                }
             }
             OutlinedTextField(shortPath(cwd, home), {}, readOnly = true, label = { Text("Folder") }, modifier = Modifier.fillMaxWidth().clickable { picking = true },
                 trailingIcon = { TextButton(onClick = { picking = true }) { Text("Change") } })
             when (kind) {
-                "agy" -> {
-                    io.github.sidd065.agentcompanion.ui.components.AgyFlagsCard(kind = "tui", onEdit = { flagsOpen = true })
-                    OutlinedTextField(args, { args = it }, label = { Text("More arguments for this terminal (optional)") }, placeholder = { Text("--conversation <id>") },
+                "agy", "claude" -> {
+                    io.github.sidd065.agentcompanion.ui.components.AgentFlagsCard(kind, kind = "tui", onEdit = { flagsOpen = true })
+                    OutlinedTextField(args, { args = it }, label = { Text("More arguments for this terminal (optional)") },
+                        placeholder = { Text(if (kind == "claude") "--resume <id>" else "--conversation <id>") },
                         singleLine = true, modifier = Modifier.fillMaxWidth())
                 }
                 "cmd" -> OutlinedTextField(command, { command = it }, label = { Text("Command") }, placeholder = { Text("npm run dev") }, singleLine = true, modifier = Modifier.fillMaxWidth())
@@ -242,6 +253,11 @@ fun NewTerminalSheet(onDismiss: () -> Unit, hostPicker: @Composable () -> Unit =
                                 val all = flags.tuiArgs() + io.github.sidd065.agentcompanion.core.splitArgs(args)
                                 if (all.isNotEmpty()) put("args", JsonArray(all.map { JsonPrimitive(it) }))
                             }
+                            if (kind == "claude") {
+                                put("skipPermissions", cflags.skipPermissions)
+                                val all = cflags.tuiArgs() + io.github.sidd065.agentcompanion.core.splitArgs(args)
+                                if (all.isNotEmpty()) put("args", JsonArray(all.map { JsonPrimitive(it) }))
+                            }
                         }).decode(Term.serializer())
                     }.onSuccess { onCreated(it) }.onFailure { snack.showSnackbar("Couldn't start terminal: ${it.message}") }
                     busy = false
@@ -250,7 +266,7 @@ fun NewTerminalSheet(onDismiss: () -> Unit, hostPicker: @Composable () -> Unit =
         }
     }
     if (picking) DirectoryPicker(conn, cwd, onDismiss = { picking = false }) { cwd = it; picking = false }
-    if (flagsOpen) io.github.sidd065.agentcompanion.ui.components.AgyFlagsSheet(conn, onDismiss = { flagsOpen = false })
+    if (flagsOpen) io.github.sidd065.agentcompanion.ui.components.AgentFlagsSheet(kind, conn, onDismiss = { flagsOpen = false })
 }
 
 private data class XKey(val label: String, val keyCode: Int = 0, val text: String? = null, val mod: String? = null)

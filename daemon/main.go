@@ -56,6 +56,10 @@ type Config struct {
 	Cloudflared   string `json:"cloudflared,omitempty"`
 	TunnelMetrics string `json:"tunnelMetrics,omitempty"`
 	AgyPath       string `json:"agyPath,omitempty"`
+	// ClaudePath is the Claude Code executable (default ~/.local/bin/claude or PATH).
+	ClaudePath string `json:"claudePath,omitempty"`
+	// ClaudrArgs are the default claude flags `claudr` adds.
+	ClaudrArgs *[]string `json:"claudrArgs,omitempty"`
 	// AgyrArgs are the default agy flags `agyr` adds (configurable; --safe drops
 	// --dangerously-skip-permissions for one run).
 	AgyrArgs *[]string `json:"agyrArgs,omitempty"`
@@ -149,6 +153,20 @@ func findAgy(home string) string {
 	return "agy"
 }
 
+func findClaude(home, configured string) string {
+	if configured != "" {
+		return configured
+	}
+	cand := filepath.Join(home, ".local", "bin", "claude")
+	if _, err := os.Stat(cand); err == nil {
+		return cand
+	}
+	if p, err := exec.LookPath("claude"); err == nil {
+		return p
+	}
+	return "claude"
+}
+
 func selfExe() string {
 	exe, err := os.Executable()
 	if err != nil {
@@ -165,7 +183,8 @@ func termManager(p paths, c Config, env func() []string) *term.Manager {
 	if c.DefaultSkipPermissions != nil {
 		skip = *c.DefaultSkipPermissions
 	}
-	return &term.Manager{Sock: p.tmuxSock(), Conf: p.tmuxConf(), SelfExe: selfExe(), LocalSock: p.localSock(), AgyPath: c.AgyPath, DefaultSkip: skip, Env: env}
+	return &term.Manager{Sock: p.tmuxSock(), Conf: p.tmuxConf(), SelfExe: selfExe(), LocalSock: p.localSock(), AgyPath: c.AgyPath,
+		ClaudePath: findClaude(p.home, c.ClaudePath), DefaultSkip: skip, Env: env}
 }
 
 func main() {
@@ -175,6 +194,9 @@ func main() {
 	if name == "agyr" {
 		os.Exit(runAgyr(args))
 	}
+	if name == "claudr" {
+		os.Exit(runClaudr(args))
+	}
 	if len(args) == 0 {
 		usage()
 		os.Exit(2)
@@ -183,7 +205,14 @@ func main() {
 	case "serve":
 		os.Exit(serve(args[1:]))
 	case "run", "agyr":
+		if len(args) > 1 && args[1] == "claude" {
+			os.Exit(runClaudr(args[2:]))
+		}
 		os.Exit(runAgyr(args[1:]))
+	case "claudr":
+		os.Exit(runClaudr(args[1:]))
+	case "claude-hook":
+		os.Exit(claudeHook(args[1:]))
 	case "term", "terms":
 		os.Exit(termCmd(args[1:]))
 	case "status":
@@ -220,6 +249,9 @@ usage:
   agentc tunnel stop                 stop the Cloudflare tunnel process (a new URL is made on restart)
   agentc serve [--listen ADDR]       run the daemon (normally via systemd)
   agentc term ls | attach ID | kill ID   manage shared terminals
+  claudr [claude args...]            run Claude Code in a shared terminal the phone can see
+                                     (adds "claudrArgs"; --safe drops --dangerously-skip-permissions)
+  claudr ls | attach [ID]            list / attach shared Claude Code terminals
   agyr [agy args...]                 run agy in a shared terminal the phone can see
                                      (adds "agyrArgs" from ~/.config/agentc/config.json,
                                      default --dangerously-skip-permissions; --safe omits it)
@@ -270,7 +302,7 @@ func serve(args []string) int {
 	}
 	hub := core.NewHub()
 	mgr := core.NewManager(core.Config{
-		AgyPath: cfg.AgyPath, StateDir: p.state, HomeDir: p.home,
+		AgyPath: cfg.AgyPath, ClaudePath: findClaude(p.home, cfg.ClaudePath), StateDir: p.state, HomeDir: p.home,
 		AgyDataDir: filepath.Join(p.home, ".gemini", "antigravity-cli"), IdleHibernate: time.Duration(cfg.IdleHibernateMinutes) * time.Minute,
 		MaxLive: cfg.MaxLive, DefaultSkip: skip,
 	}, hub)
@@ -728,6 +760,135 @@ func toF(v any) float64 {
 	return f
 }
 
+// ---- claudr: Claude Code in a terminal the phone can share ----
+
+func runClaudr(args []string) int {
+	p := getPaths()
+	cfg := loadConfig(p)
+	tm := termManager(p, cfg, nil)
+	if len(args) > 0 {
+		switch args[0] {
+		case "ls", "list":
+			return termCmd([]string{"ls"})
+		case "attach", "a":
+			id := ""
+			if len(args) > 1 {
+				id = args[1]
+			} else {
+				terms, _ := tm.List(context.Background())
+				for _, t := range terms {
+					if t.Kind == "claude" {
+						id = t.ID
+						break
+					}
+				}
+				if id == "" {
+					fmt.Fprintln(os.Stderr, "no shared Claude Code terminals")
+					return 1
+				}
+			}
+			return attach(tm, id)
+		case "help", "-h", "--help":
+			usage()
+			return 0
+		}
+	}
+	defaults := []string{"--dangerously-skip-permissions"}
+	if cfg.ClaudrArgs != nil {
+		defaults = *cfg.ClaudrArgs
+	}
+	pass := append(append([]string{}, defaults...), args...)
+	safe := false
+	var keep []string
+	for _, a := range pass {
+		if a == "--safe" {
+			safe = true
+			continue
+		}
+		keep = append(keep, a)
+	}
+	if safe {
+		var k []string
+		for _, a := range keep {
+			if a != "--dangerously-skip-permissions" {
+				k = append(k, a)
+			}
+		}
+		keep = k
+	}
+	noSkip := false
+	cwd, _ := os.Getwd()
+	cols, rows := 120, 40
+	if ws, err := pty.GetsizeFull(os.Stdin); err == nil && ws.Cols > 0 {
+		cols, rows = int(ws.Cols), int(ws.Rows)
+	}
+	t, err := tm.Create(context.Background(), term.CreateOpts{Kind: "claude", Cwd: cwd, Args: keep, Cols: cols, Rows: rows, Origin: "claudr", Skip: &noSkip})
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "claudr:", err)
+		return 1
+	}
+	fmt.Fprintf(os.Stderr, "claudr: shared terminal %s (detach: Ctrl-b d · reattach: claudr attach %s)\n", t.ID, t.ID)
+	return attach(tm, t.ID)
+}
+
+// ---- claude-hook (internal, run by Claude Code hooks in agentc terminals) ----
+
+func claudeHook(args []string) int {
+	fs := flag.NewFlagSet("claude-hook", flag.ContinueOnError)
+	sock := fs.String("sock", "", "tmux socket")
+	conf := fs.String("conf", "", "tmux config")
+	id := fs.String("id", "", "terminal id")
+	report := fs.String("report", "", "daemon local socket")
+	if fs.Parse(args) != nil || *id == "" {
+		return 0 // never block Claude Code
+	}
+	var in struct {
+		Event        string `json:"hook_event_name"`
+		SessionID    string `json:"session_id"`
+		Message      string `json:"message"`
+		Type         string `json:"notification_type"`
+		LastMessage  string `json:"last_assistant_message"`
+		StopActive   bool   `json:"stop_hook_active"`
+		TranscriptFn string `json:"transcript_path"`
+	}
+	b, _ := io.ReadAll(io.LimitReader(os.Stdin, 4<<20))
+	if json.Unmarshal(b, &in) != nil {
+		return 0
+	}
+	state, msg := "", ""
+	switch in.Event {
+	case "SessionStart":
+		if in.SessionID != "" {
+			term.SetConversation(*sock, *conf, *id, in.SessionID)
+		}
+		state = "idle"
+	case "UserPromptSubmit", "PostToolUse":
+		state = "working"
+	case "Notification":
+		switch {
+		case in.Type == "permission_prompt" || strings.Contains(strings.ToLower(in.Message), "permission"):
+			state, msg = "blocked:permission", in.Message
+		case in.Type == "idle_prompt":
+			state, msg = "idle", in.Message
+		case in.Type == "elicitation_dialog":
+			state, msg = "blocked:question", in.Message
+		default:
+			return 0
+		}
+	case "Stop":
+		state, msg = "done", in.LastMessage
+	case "SessionEnd":
+		state = "idle"
+	default:
+		return 0
+	}
+	if len(msg) > 280 {
+		msg = msg[:280] + "…"
+	}
+	term.Publish(*sock, *conf, *id, *report, state, msg)
+	return 0
+}
+
 // ---- osc-watch (internal, run by tmux pipe-pane) ----
 
 func oscWatch(args []string) int {
@@ -827,6 +988,13 @@ func install(args []string) int {
 			return 1
 		}
 		fmt.Println("installed", dst)
+	}
+	for _, l := range []string{"claudr"} {
+		lp := filepath.Join(bin, l)
+		_ = os.Remove(lp)
+		if err := os.Symlink("agentc", lp); err == nil {
+			fmt.Println("linked", lp, "-> agentc")
+		}
 	}
 	link := filepath.Join(bin, "agyr")
 	_ = os.Remove(link)

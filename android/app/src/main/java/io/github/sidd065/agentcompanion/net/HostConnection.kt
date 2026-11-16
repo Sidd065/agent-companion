@@ -49,7 +49,7 @@ class HostConnection(
     private val onNotifySeq: (hostId: String, seq: Long) -> Unit,
     private val lastNotifSeq: () -> Long,
     private val onConnectedHook: suspend (HostConnection) -> Unit = {},
-    val flagsProvider: () -> JsonObject? = { null },
+    val flagsProvider: (agent: String) -> JsonObject? = { null },
 ) {
     val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
     val rpc = RpcClient(config, http, scope, deviceName)
@@ -282,7 +282,7 @@ class SessionStore(val id: String, private val conn: HostConnection) {
             runCatching {
                 conn.rpc.call("session.subscribe", params {
                     put("id", id); put("since", since)
-                    conn.flagsProvider()?.let { put("flags", it) }
+                    conn.flagsProvider(summary.value?.agent ?: "agy")?.let { put("flags", it) }
                 })
             }
                 .onFailure { Log.w("SessionStore", "subscribe $id: ${it.message}") }

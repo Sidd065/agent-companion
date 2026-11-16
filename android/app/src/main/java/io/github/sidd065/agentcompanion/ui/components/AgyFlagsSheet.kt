@@ -237,12 +237,12 @@ fun AgyFlagsSheet(conn: HostConnection?, onDismiss: () -> Unit) {
 }
 
 @Composable
-private fun Hint(text: String) {
+internal fun Hint(text: String) {
     Text(text, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
 }
 
 @Composable
-private fun FlagSwitch(flag: String, desc: String, checked: Boolean, warn: Boolean = false, onChange: (Boolean) -> Unit) {
+internal fun FlagSwitch(flag: String, desc: String, checked: Boolean, warn: Boolean = false, onChange: (Boolean) -> Unit) {
     val ex = LocalExtra.current
     Row(Modifier.fillMaxWidth().clickable { onChange(!checked) }.padding(vertical = 4.dp), verticalAlignment = Alignment.CenterVertically) {
         Column(Modifier.weight(1f)) {
@@ -255,7 +255,7 @@ private fun FlagSwitch(flag: String, desc: String, checked: Boolean, warn: Boole
 }
 
 @Composable
-private fun FlagText(label: String, placeholder: String, value: String, mono: Boolean = false, gen: Int = 0, onChange: (String) -> Unit) {
+internal fun FlagText(label: String, placeholder: String, value: String, mono: Boolean = false, gen: Int = 0, onChange: (String) -> Unit) {
     var text by remember(gen) { mutableStateOf(value) }
     OutlinedTextField(
         value = text,

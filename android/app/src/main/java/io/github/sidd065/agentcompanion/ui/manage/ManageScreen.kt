@@ -208,12 +208,12 @@ fun ManageScreen() {
                     KV("Fingerprint", d.s("fingerprint"))
                     KV("Daemon", "agentc ${d.s("version")} · up ${fmtDuration((d["uptimeSec"]?.jsonPrimitive?.longOrNull ?: 0) * 1000)}")
                     val st = d.o("stats")
-                    KV("agy processes", "${st?.get("live")?.jsonPrimitive?.content ?: "?"} live of ${st?.get("sessions")?.jsonPrimitive?.content ?: "?"} sessions · ${(st?.get("rssKiB")?.jsonPrimitive?.longOrNull ?: 0) / 1024} MB")
+                    KV("Agent processes", "${st?.get("live")?.jsonPrimitive?.content ?: "?"} live of ${st?.get("sessions")?.jsonPrimitive?.content ?: "?"} sessions · ${(st?.get("rssKiB")?.jsonPrimitive?.longOrNull ?: 0) / 1024} MB")
                     KV("Connected apps", (d["clients"] as? JsonArray)?.joinToString { it.s("device") ?: "?" })
                     val cfg = d.o("config")
                     if (cfg != null) {
                         Spacer(Modifier.height(8.dp))
-                        Text("Stop idle agy processes after", style = MaterialTheme.typography.bodyMedium)
+                        Text("Stop idle agent processes after", style = MaterialTheme.typography.bodyMedium)
                         Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                             val cur = cfg["idleHibernateMinutes"]?.jsonPrimitive?.intOrNull
                             listOf(10, 30, 60, 180, 720).forEach { m ->
@@ -222,7 +222,7 @@ fun ManageScreen() {
                                 }, label = { Text(if (m < 60) "${m}m" else "${m / 60}h") })
                             }
                         }
-                        Text("Max running agy processes", style = MaterialTheme.typography.bodyMedium)
+                        Text("Max running agent processes", style = MaterialTheme.typography.bodyMedium)
                         Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                             val cur = cfg["maxLive"]?.jsonPrimitive?.intOrNull
                             listOf(3, 5, 8, 12, 20).forEach { m ->
@@ -284,6 +284,9 @@ fun ManageScreen() {
                     }
                 }
             }
+
+            // Claude Code
+            ClaudeManageBlocks(conn, reload) { reload++ }
 
             // Account
             Block("agy account") {
@@ -480,7 +483,7 @@ private fun setSetting(conn: HostConnection, key: String, value: JsonElement, af
 }
 
 @Composable
-private fun Block(title: String, action: (@Composable () -> Unit)? = null, content: @Composable () -> Unit) {
+internal fun Block(title: String, action: (@Composable () -> Unit)? = null, content: @Composable () -> Unit) {
     Card(Modifier.fillMaxWidth().padding(vertical = 6.dp), colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainer), shape = RoundedCornerShape(16.dp)) {
         Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
@@ -494,7 +497,7 @@ private fun Block(title: String, action: (@Composable () -> Unit)? = null, conte
 }
 
 @Composable
-private fun KV(k: String, v: String?) {
+internal fun KV(k: String, v: String?) {
     if (v.isNullOrBlank()) return
     Row(Modifier.fillMaxWidth().padding(vertical = 2.dp)) {
         Text(k, style = MaterialTheme.typography.bodySmall, color = LocalExtra.current.muted, modifier = Modifier.width(118.dp))

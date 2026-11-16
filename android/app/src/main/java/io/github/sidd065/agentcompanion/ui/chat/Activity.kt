@@ -287,7 +287,7 @@ fun TaskOutputView(conn: HostConnection, sessionId: String, task: LiveTask, stil
             if (running && stillRunning) OutlinedButton(enabled = !stopping, onClick = {
                 stopping = true
                 scope.launch {
-                    runCatching { conn.rpc.call("session.taskStop", params { put("id", sessionId); put("step", task.step) }) }.onFailure { error = it.message }
+                    runCatching { conn.rpc.call("session.taskStop", params { put("id", sessionId); put("step", task.step); put("taskId", task.id) }) }.onFailure { error = it.message }
                     stopping = false
                 }
             }) {

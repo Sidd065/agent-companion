@@ -147,7 +147,7 @@ class AppGraph(val app: Application) {
                     onNotifySeq = { hostId, seq -> scope.launch { prefs.update { s -> s.copy(lastNotifSeq = s.lastNotifSeq + (hostId to maxOf(seq, s.lastNotifSeq[hostId] ?: 0))) } } },
                     lastNotifSeq = { prefs.value.lastNotifSeq[h.id] ?: 0L },
                     onConnectedHook = { conn -> push.register(conn) },
-                    flagsProvider = { prefs.value.agyFlags.daemonJson() })
+                    flagsProvider = { agent -> prefs.value.flagsJson(agent) })
                 conns[h.id] = c
                 notifier.watch(c)
                 if (foreground.value || prefs.value.backgroundConnection) c.start()

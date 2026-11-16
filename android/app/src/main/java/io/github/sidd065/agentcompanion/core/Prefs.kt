@@ -42,8 +42,20 @@ data class AppSettings(
     val groupBy: String = "date", // date|folder|status|none
     val lastNotifSeq: Map<String, Long> = emptyMap(),
     val agyFlags: AgyFlags = AgyFlags(),
+    val claudeFlags: ClaudeFlags = ClaudeFlags(),
+    /** Agent preselected for new sessions and terminals. */
+    val defaultAgent: String = "agy",
 ) {
     val activeHost: HostConfig? get() = hosts.firstOrNull { it.id == activeHostId } ?: hosts.firstOrNull()
+
+    /** The saved launch flags for an agent, as the daemon's "flags" object. */
+    fun flagsJson(agent: String?): kotlinx.serialization.json.JsonObject =
+        if (agent == "claude") claudeFlags.daemonJson() else agyFlags.daemonJson()
+
+    /** Terminal arguments for continuing a conversation of this agent. */
+    fun tuiResumeArgs(agent: String?): List<String> = if (agent == "claude") claudeFlags.tuiResumeArgs() else agyFlags.tuiResumeArgs()
+
+    fun skipPermissions(agent: String?): Boolean = if (agent == "claude") claudeFlags.skipPermissions else agyFlags.skipPermissions
 }
 
 /** DataStore-backed settings exposed as a StateFlow. */
@@ -68,6 +80,8 @@ class Prefs(private val context: Context, scope: CoroutineScope) {
         val groupBy = stringPreferencesKey("group_by")
         val notifSeq = stringPreferencesKey("notif_seq")
         val flags = stringPreferencesKey("agy_flags")
+        val claudeFlags = stringPreferencesKey("claude_flags")
+        val defaultAgent = stringPreferencesKey("default_agent")
     }
 
     private val hostsSer = ListSerializer(HostConfig.serializer())
@@ -94,6 +108,8 @@ class Prefs(private val context: Context, scope: CoroutineScope) {
         agyFlags = p[K.flags]?.let { runCatching { AppJson.decodeFromString(AgyFlags.serializer(), it) }.getOrNull() }
             // First run after the flags feature: carry over the older individual defaults.
             ?: AgyFlags(skipPermissions = p[K.skip] ?: true, model = p[K.model] ?: "", mode = p[K.mode] ?: ""),
+        claudeFlags = p[K.claudeFlags]?.let { runCatching { AppJson.decodeFromString(ClaudeFlags.serializer(), it) }.getOrNull() } ?: ClaudeFlags(),
+        defaultAgent = p[K.defaultAgent] ?: "agy",
     )
 
     val flow: StateFlow<AppSettings> = context.dataStore.data.map { read(it) }
@@ -123,6 +139,8 @@ class Prefs(private val context: Context, scope: CoroutineScope) {
             p[K.groupBy] = n.groupBy
             p[K.notifSeq] = AppJson.encodeToString(seqSer, n.lastNotifSeq)
             p[K.flags] = AppJson.encodeToString(AgyFlags.serializer(), n.agyFlags)
+            p[K.claudeFlags] = AppJson.encodeToString(ClaudeFlags.serializer(), n.claudeFlags)
+            p[K.defaultAgent] = n.defaultAgent
         }
     }
 }

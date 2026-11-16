@@ -174,6 +174,7 @@ fun parseMarkdownBlocks(src: String): List<ArtifactBlock> {
 @Composable
 fun ArtifactScreen(sessionId: String, path: String) {
     val conn = activeConnection() ?: return
+    val agentName = conn.session(sessionId)?.agentLabel ?: "agy"
     val nav = LocalNav.current
     val snack = LocalSnack.current
     val ctx = LocalContext.current
@@ -238,7 +239,7 @@ fun ArtifactScreen(sessionId: String, path: String) {
             }.onSuccess {
                 drafts.clear()
                 commenting = false
-                snack.showSnackbar(if (list.any { it.approve }) "Sent: proceed" else "Comments sent to agy")
+                snack.showSnackbar(if (list.any { it.approve }) "Sent: proceed" else "Comments sent to $agentName")
                 nav.popBackStack()
             }.onFailure { snack.showSnackbar("Couldn't send: ${it.message}") }
             sending = false
@@ -297,7 +298,7 @@ fun ArtifactScreen(sessionId: String, path: String) {
                     }
                     info?.needsReview == true -> Surface(color = ex.warning.copy(alpha = 0.12f)) {
                         Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 10.dp), verticalAlignment = Alignment.CenterVertically) {
-                            Text("agy asked for your review", style = MaterialTheme.typography.bodyMedium, modifier = Modifier.weight(1f))
+                            Text("$agentName asked for your review", style = MaterialTheme.typography.bodyMedium, modifier = Modifier.weight(1f))
                             OutlinedButton(onClick = { commenting = true }) { Text("Comment") }
                             Spacer(Modifier.width(8.dp))
                             Button(enabled = !sending, onClick = {
@@ -320,7 +321,7 @@ fun ArtifactScreen(sessionId: String, path: String) {
                     contentScale = ContentScale.Fit, modifier = Modifier.fillMaxSize())
                 kind == "markdown" || kind == "text" -> if (content == null) LoadingBox(text = "Loading…") else Column(Modifier.fillMaxSize()) {
                     if (changedSince) Surface(color = MaterialTheme.colorScheme.primaryContainer, modifier = Modifier.fillMaxWidth().clickable { reload++ }) {
-                        Text("agy updated this artifact — tap to reload", style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp))
+                        Text("$agentName updated this artifact — tap to reload", style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp))
                     }
                     LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp)) {
                         itemsIndexed(blocks, key = { _, b -> b.start }) { _, b ->
@@ -419,7 +420,7 @@ fun CommentSheet(
                 Text(quote.trim(), style = MaterialTheme.typography.bodySmall, fontFamily = FontFamily.Monospace, maxLines = 8,
                     overflow = TextOverflow.Ellipsis, modifier = Modifier.fillMaxWidth().padding(10.dp))
             }
-            OutlinedTextField(text, { text = it }, Modifier.fillMaxWidth().focusRequester(focus), placeholder = { Text("Tell agy what to change") }, minLines = 3)
+            OutlinedTextField(text, { text = it }, Modifier.fillMaxWidth().focusRequester(focus), placeholder = { Text("What should change?") }, minLines = 3)
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
                 if (existing) TextButton(onClick = onDelete) { Text("Remove") }
                 Spacer(Modifier.weight(1f))

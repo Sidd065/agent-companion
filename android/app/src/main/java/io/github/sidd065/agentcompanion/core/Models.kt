@@ -40,6 +40,8 @@ data class Usage(
     val cachedWriteTokens: Long = 0,
     val thoughtTokens: Long = 0,
     val totalTokens: Long = 0,
+    /** Spend reported by the agent (Claude Code), in US dollars. */
+    val costUsd: Double = 0.0,
 )
 
 @Serializable
@@ -72,10 +74,31 @@ data class SessionSummary(
     val origin: String? = null,
     val error: String? = null,
     val pid: Int = 0,
+    /** Transient agent status, e.g. "compacting" (Claude Code). */
+    val status: String? = null,
+    /** Predicted next prompt (Claude Code). */
+    val suggestion: String? = null,
+    /** Set when another Claude Code process on the computer has this conversation open (its status). */
+    val liveElsewhere: String? = null,
 ) {
     val busy: Boolean get() = state == "running" || state == "starting" || state == "waiting"
     val needsInput: Boolean get() = !attention.isNullOrEmpty() || state == "waiting"
     val displayTitle: String get() = title.ifBlank { "Untitled conversation" }
+    val isClaude: Boolean get() = agent == "claude"
+    /** How the agent is named in messages ("agy", "Claude"). */
+    val agentLabel: String get() = agentLabel(agent)
+}
+
+fun agentLabel(agent: String?): String = when (agent) {
+    "claude" -> "Claude"
+    "codex" -> "Codex"
+    else -> "agy"
+}
+
+fun agentProduct(agent: String?): String = when (agent) {
+    "claude" -> "Claude Code"
+    "codex" -> "Codex"
+    else -> "agy"
 }
 
 @Serializable
@@ -113,6 +136,9 @@ data class SessionExtras(
     val modes: Modes? = null,
     val configOptions: List<ConfigOption> = emptyList(),
     val commands: List<SlashCommand> = emptyList(),
+    /** Agent details (Claude Code: plan, version, output style, agents). */
+    val info: JsonElement? = null,
+    val resumeAt: String? = null,
 )
 
 @Serializable
@@ -150,6 +176,14 @@ data class Perm(
     val toolKind: String? = null,
     val options: List<PermOption> = emptyList(),
     val chosen: String? = null,
+    /** Claude Code: tool name, request kind (tool|question|plan), its input (questions/plan), reason and the answer given. */
+    val tool: String? = null,
+    val kind: String? = null,
+    val input: JsonElement? = null,
+    val reason: String? = null,
+    val blockedPath: String? = null,
+    val subagent: Boolean = false,
+    val answer: JsonElement? = null,
 )
 
 @Serializable
@@ -175,6 +209,8 @@ data class Item(
     val level: String? = null,
     val turn: Turn? = null,
     val trunc: Boolean = false,
+    /** The agent's id for this message (Claude message uuid). */
+    val ref: String? = null,
 )
 
 @Serializable
@@ -421,6 +457,93 @@ data class AgyFlags(
         if (effort.isNotBlank()) put("thought", kotlinx.serialization.json.JsonPrimitive(effort.trim()))
         if (addDirs.isNotEmpty()) put("addDirs", kotlinx.serialization.json.JsonArray(addDirs.map { kotlinx.serialization.json.JsonPrimitive(it) }))
         val extra = acpExtraArgs()
+        if (extra.isNotEmpty()) put("extraArgs", kotlinx.serialization.json.JsonArray(extra.map { kotlinx.serialization.json.JsonPrimitive(it) }))
+    }
+}
+
+/**
+ * Claude Code launch flags chosen on the phone. Saved in app settings and
+ * applied to every new Claude chat session (`claude -p …` behind the daemon),
+ * Claude terminal (`claude …`) and adopted conversation.
+ */
+@Serializable
+data class ClaudeFlags(
+    val skipPermissions: Boolean = true,
+    val model: String = "",
+    val effort: String = "",
+    val mode: String = "",
+    val agent: String = "",
+    val addDirs: List<String> = emptyList(),
+    val allowedTools: String = "",
+    val disallowedTools: String = "",
+    val appendSystemPrompt: String = "",
+    val fallbackModel: String = "",
+    val maxBudgetUsd: String = "",
+    val mcpConfig: String = "",
+    val strictMcpConfig: Boolean = false,
+    val settingsJson: String = "",
+    val extra: String = "",
+    // Terminal (TUI) only
+    val worktree: Boolean = false,
+    val tuiExtra: String = "",
+) {
+    /** Flags shared by chat sessions and terminals (no model/mode/effort). */
+    fun commonArgs(): List<String> = buildList {
+        if (allowedTools.isNotBlank()) { add("--allowedTools"); add(allowedTools.trim()) }
+        if (disallowedTools.isNotBlank()) { add("--disallowedTools"); add(disallowedTools.trim()) }
+        if (appendSystemPrompt.isNotBlank()) { add("--append-system-prompt"); add(appendSystemPrompt.trim()) }
+        if (fallbackModel.isNotBlank()) { add("--fallback-model"); add(fallbackModel.trim()) }
+        if (mcpConfig.isNotBlank()) { add("--mcp-config"); add(mcpConfig.trim()) }
+        if (strictMcpConfig) add("--strict-mcp-config")
+        if (settingsJson.isNotBlank()) { add("--settings"); add(settingsJson.trim()) }
+    }
+
+    /** Extra flags for chat sessions (the daemon adds the protocol and session flags). */
+    fun headlessExtraArgs(): List<String> = buildList {
+        addAll(commonArgs())
+        maxBudgetUsd.trim().toDoubleOrNull()?.takeIf { it > 0 }?.let { add("--max-budget-usd"); add(maxBudgetUsd.trim()) }
+        addAll(splitArgs(extra))
+    }
+
+    /** Flags for `claude` in a terminal (skip-permissions is sent separately). */
+    fun tuiArgs(): List<String> = buildList {
+        if (model.isNotBlank()) { add("--model"); add(model.trim()) }
+        if (effort.isNotBlank()) { add("--effort"); add(effort.trim()) }
+        if (mode.isNotBlank() && mode != "default") { add("--permission-mode"); add(mode.trim()) }
+        if (agent.isNotBlank()) { add("--agent"); add(agent.trim()) }
+        addDirs.filter { it.isNotBlank() }.forEach { add("--add-dir"); add(it) }
+        addAll(commonArgs())
+        if (worktree) add("--worktree")
+        addAll(splitArgs(tuiExtra))
+    }
+
+    /** Terminal flags for continuing an existing conversation (process options only). */
+    fun tuiResumeArgs(): List<String> = copy(model = "", effort = "", mode = "", agent = "", worktree = false).tuiArgs()
+
+    fun tuiPreview(): String = (listOf("claude") + (if (skipPermissions && (mode.isBlank() || mode == "default")) listOf("--dangerously-skip-permissions") else emptyList()) +
+        tuiArgs().map(::shellQuote)).joinToString(" ")
+
+    fun headlessPreview(): String {
+        val parts = mutableListOf("claude", "-p")
+        if (model.isNotBlank()) parts += listOf("--model", model.trim())
+        if (effort.isNotBlank()) parts += listOf("--effort", effort.trim())
+        if (mode.isNotBlank() && mode != "default") parts += listOf("--permission-mode", mode.trim())
+        else if (skipPermissions) parts += "--dangerously-skip-permissions"
+        if (agent.isNotBlank()) parts += listOf("--agent", agent.trim())
+        addDirs.filter { it.isNotBlank() }.forEach { parts += listOf("--add-dir", it) }
+        parts += headlessExtraArgs()
+        return parts.joinToString(" ") { if (it == "claude" || it == "-p") it else shellQuote(it) }
+    }
+
+    /** JSON for the daemon's session.create / session.open "flags". */
+    fun daemonJson(): kotlinx.serialization.json.JsonObject = kotlinx.serialization.json.buildJsonObject {
+        put("skipPermissions", kotlinx.serialization.json.JsonPrimitive(skipPermissions))
+        if (agent.isNotBlank()) put("agentName", kotlinx.serialization.json.JsonPrimitive(agent.trim()))
+        if (model.isNotBlank()) put("model", kotlinx.serialization.json.JsonPrimitive(model.trim()))
+        if (mode.isNotBlank()) put("mode", kotlinx.serialization.json.JsonPrimitive(mode.trim()))
+        if (effort.isNotBlank()) put("thought", kotlinx.serialization.json.JsonPrimitive(effort.trim()))
+        if (addDirs.isNotEmpty()) put("addDirs", kotlinx.serialization.json.JsonArray(addDirs.map { kotlinx.serialization.json.JsonPrimitive(it) }))
+        val extra = headlessExtraArgs()
         if (extra.isNotEmpty()) put("extraArgs", kotlinx.serialization.json.JsonArray(extra.map { kotlinx.serialization.json.JsonPrimitive(it) }))
     }
 }

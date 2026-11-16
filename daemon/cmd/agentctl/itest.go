@@ -264,6 +264,34 @@ func itest(c *Client, cr *Creds, scenarios []string) int {
 			t.scFlags()
 		case "live":
 			t.scLive()
+		case "claude-basic":
+			t.scClaudeBasic()
+		case "claude-question":
+			t.scClaudeQuestion()
+		case "claude-plan":
+			t.scClaudePlan()
+		case "claude-steer":
+			t.scClaudeSteer()
+		case "claude-cancel":
+			t.scClaudeCancel()
+		case "claude-ops":
+			t.scClaudeOps()
+		case "claude-history":
+			t.scClaudeHistory()
+		case "claude-live":
+			t.scClaudeLive()
+		case "claude-control":
+			t.scClaudeControl()
+		case "claude":
+			t.scClaudeBasic()
+			t.scClaudeQuestion()
+			t.scClaudePlan()
+			t.scClaudeSteer()
+			t.scClaudeCancel()
+			t.scClaudeOps()
+			t.scClaudeHistory()
+			t.scClaudeLive()
+			t.scClaudeControl()
 		default:
 			fmt.Println("unknown scenario", sc)
 			t.fails++
@@ -784,7 +812,7 @@ func (t *tester) scHistory() {
 	hist := 0
 	var target string
 	for id, s := range list {
-		if s["state"] == "history" {
+		if s["state"] == "history" && s["agent"] != "claude" {
 			hist++
 			if target == "" && strings.Contains(fmt.Sprint(s["title"]), "Hello.txt") {
 				target = id
@@ -794,7 +822,7 @@ func (t *tester) scHistory() {
 	t.check(len(list) > 0, "sessions.list returned %d (%d history)", len(list), hist)
 	if target == "" {
 		for id, s := range list {
-			if s["state"] == "history" {
+			if s["state"] == "history" && s["agent"] != "claude" {
 				target = id
 				break
 			}

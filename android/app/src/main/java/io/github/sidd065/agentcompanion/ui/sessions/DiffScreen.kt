@@ -71,6 +71,7 @@ import kotlinx.serialization.json.put
 fun DiffScreen(sessionId: String?, path: String) {
     val nav = LocalNav.current
     val conn = activeConnection() ?: return
+    val who = sessionId?.let { conn.session(it)?.agentLabel } ?: "the agent"
     val g = LocalContext.current.graph
     val settings by g.prefs.flow.collectAsState()
     var tab by remember { mutableIntStateOf(0) }
@@ -126,7 +127,7 @@ fun DiffScreen(sessionId: String?, path: String) {
                                     put("comments", io.github.sidd065.agentcompanion.core.AppJson.encodeToJsonElement(
                                         ListSerializer(io.github.sidd065.agentcompanion.core.DraftComment.serializer()), list))
                                 })
-                            }.onSuccess { drafts.clear(); commenting = false; snack.showSnackbar("Comments sent to agy"); nav.popBackStack() }
+                            }.onSuccess { drafts.clear(); commenting = false; snack.showSnackbar("Comments sent to $who"); nav.popBackStack() }
                                 .onFailure { snack.showSnackbar("Couldn't send: ${it.message}") }
                         }
                     }) { Text("Send") }
@@ -147,7 +148,7 @@ fun DiffScreen(sessionId: String?, path: String) {
                 when {
                     d == null && err == null -> LoadingBox(text = "Running git diff…")
                     d == null -> {}
-                    !d.repo -> EmptyState(Icons.Outlined.Refresh, "Not a git repository", "Switch to “Agent edits” to see what agy changed.")
+                    !d.repo -> EmptyState(Icons.Outlined.Refresh, "Not a git repository", "Switch to “Agent edits” to see what $who changed.")
                     d.diff.isBlank() -> EmptyState(Icons.Outlined.Refresh, "No uncommitted changes", d.branch?.let { "On branch $it" })
                     else -> {
                         val files = remember(d.diff) { UnifiedDiff.parse(d.diff) }
@@ -165,7 +166,7 @@ fun DiffScreen(sessionId: String?, path: String) {
                 val a = agent
                 when {
                     a == null -> LoadingBox()
-                    a.isEmpty() -> EmptyState(Icons.Outlined.Refresh, "No file edits recorded", "agy hasn't changed any files in this conversation.")
+                    a.isEmpty() -> EmptyState(Icons.Outlined.Refresh, "No file edits recorded", "$who hasn't changed any files in this conversation.")
                     else -> {
                         val files = remember(a) {
                             a.map { f ->
@@ -173,7 +174,7 @@ fun DiffScreen(sessionId: String?, path: String) {
                                 Triple(p, LineDiff.diff(f.originalContent, f.modifiedContent), false)
                             }
                         }
-                        FileDiffList("${files.size} files edited by agy", files, settings.codeWrap, onOpen = { p -> nav.navigate(Routes.file(p)) },
+                        FileDiffList("${files.size} files edited by $who", files, settings.codeWrap, onOpen = { p -> nav.navigate(Routes.file(p)) },
                             onLine = onLine, marked = { p, l -> draftFor(p, l) != null })
                     }
                 }

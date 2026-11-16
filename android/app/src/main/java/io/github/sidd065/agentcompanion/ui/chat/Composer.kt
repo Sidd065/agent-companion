@@ -90,11 +90,13 @@ val localCommands = listOf(
     CmdEntry("usage", "Context window and token usage", true),
     CmdEntry("copy", "Copy the latest response", true),
     CmdEntry("export", "Export the conversation as Markdown", true),
-    CmdEntry("artifacts", "Plans, task lists and other files agy saved", true),
+    CmdEntry("artifacts", "Plans, task lists and other files the agent saved", true),
     CmdEntry("files", "Browse this session's folder", true),
-    CmdEntry("terminal", "Continue this conversation in the agy TUI", true),
-    CmdEntry("stop", "Stop the agy process (it resumes on your next message)", true),
-    CmdEntry("reload", "Reload the conversation from agy", true),
+    CmdEntry("terminal", "Continue this conversation in the agent's terminal UI", true),
+    CmdEntry("btw", "Ask a side question without adding it to the conversation (Claude Code)", true),
+    CmdEntry("mcp", "MCP servers and their status (Claude Code)", true),
+    CmdEntry("stop", "Stop the agent process (it resumes on your next message)", true),
+    CmdEntry("reload", "Reload the conversation from the agent's history", true),
     CmdEntry("help", "List commands", true),
 )
 
@@ -108,6 +110,7 @@ class ComposerState {
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
 fun Composer(
+    agentName: String = "agy",
     state: ComposerState,
     busy: Boolean,
     delivery: String,
@@ -222,7 +225,7 @@ fun Composer(
                     value = state.value,
                     onValueChange = { state.value = it },
                     modifier = Modifier.weight(1f).heightIn(min = 48.dp, max = 180.dp).focusRequester(focus),
-                    placeholder = { Text(if (busy) (if (defaultDelivery == "queue") "Queue a message…" else "Steer the agent…") else "Message agy…") },
+                    placeholder = { Text(if (busy) (if (defaultDelivery == "queue") "Queue a message…" else "Steer the agent…") else "Message $agentName…") },
                     shape = RoundedCornerShape(22.dp),
                     colors = TextFieldDefaults.colors(
                         focusedIndicatorColor = Color.Transparent, unfocusedIndicatorColor = Color.Transparent,

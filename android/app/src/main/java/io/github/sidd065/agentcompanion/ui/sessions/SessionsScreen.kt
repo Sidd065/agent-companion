@@ -147,6 +147,7 @@ fun SessionsScreen() {
     val loaded by remember(conns) { kotlinx.coroutines.flow.combine(conns.map { it.sessionsLoaded }) { a -> a.any { it } } }.collectAsState(false)
     val sessions = hosted.map { it.second }
     var filter by remember { mutableStateOf("all") }
+    var agentFilter by remember { mutableStateOf<String?>(null) }
     var query by remember { mutableStateOf("") }
     var searching by remember { mutableStateOf(false) }
     var refreshing by remember { mutableStateOf(false) }
@@ -165,8 +166,10 @@ fun SessionsScreen() {
             "archived" -> s.archived
             else -> !s.archived
         }
-        f && (query.isBlank() || s.title.contains(query, true) || s.cwd.contains(query, true) || (s.lastText?.contains(query, true) == true))
+        f && (agentFilter == null || s.agent == agentFilter) &&
+            (query.isBlank() || s.title.contains(query, true) || s.cwd.contains(query, true) || (s.lastText?.contains(query, true) == true))
     }
+    val agentsPresent = sessions.map { it.agent }.distinct().sorted()
     val counts = mapOf(
         "working" to sessions.count { it.busy && !it.needsInput },
         "input" to sessions.count { it.needsInput },
@@ -239,6 +242,11 @@ fun SessionsScreen() {
                     val c = counts[k]
                     FilterChip(selected = filter == k, onClick = { filter = k }, label = { Text(if (c != null && c > 0) "$l · $c" else l) })
                 }
+                // With more than one agent on the computers, filter by agent too.
+                if (agentsPresent.size > 1) items(agentsPresent) { a ->
+                    FilterChip(selected = agentFilter == a, onClick = { agentFilter = if (agentFilter == a) null else a },
+                        label = { Text(io.github.sidd065.agentcompanion.core.agentProduct(a)) })
+                }
             }
             PullToRefreshBox(isRefreshing = refreshing, onRefresh = {
                 refreshing = true
@@ -292,7 +300,7 @@ private fun SessionList(
         "none" -> listOf("" to rest)
         else -> rest.groupBy { dateBucket(it.second.updatedAt) }.toList()
     }
-    val agyTerms = terms.filter { it.second.kind == "agy" }
+    val agyTerms = terms.filter { it.second.kind == "agy" || it.second.kind == "claude" }
     LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(bottom = 96.dp)) {
         if (agyTerms.isNotEmpty()) {
             item { GroupHeader("Live in terminals") }
@@ -373,16 +381,17 @@ fun SessionRow(s: SessionSummary, home: String?, modifier: Modifier = Modifier, 
                 Text(relTime(s.updatedAt), style = MaterialTheme.typography.labelSmall, color = ex.muted)
             }
             val status = when {
-                s.attention == "permission" || s.pendingPermissions > 0 -> "Needs permission"
                 s.attention == "question" -> "Has a question"
                 s.attention == "plan" -> "Plan ready for review"
+                s.attention == "permission" || s.pendingPermissions > 0 -> "Needs permission"
                 s.state == "running" -> "Working…"
                 s.state == "starting" -> "Starting…"
                 s.state == "error" -> "Error"
                 else -> null
             }
             val sub = listOfNotNull(
-                status,
+                status ?: s.liveElsewhere?.let { "Open in terminal · $it" },
+                if (s.isClaude) "Claude" else null,
                 host,
                 baseName(shortPath(s.cwd, home)).takeIf { it.isNotBlank() },
                 s.modelName?.takeIf { it.isNotBlank() } ?: s.model,
@@ -429,19 +438,19 @@ fun SessionActionsSheet(conn: HostConnection, s: SessionSummary, onDismiss: () -
                     if (id != null) nav.navigate(Routes.chat(id, host = conn.config.id))
                 }
             }
-            SheetItem(Icons.Outlined.Terminal, "Open in agy terminal") {
+            SheetItem(Icons.Outlined.Terminal, "Open in ${s.agentLabel} terminal") {
                 onDismiss()
                 rpc("Open in terminal") {
-                    val fl = ctx.graph.prefs.value.agyFlags
+                    val st = ctx.graph.prefs.value
                     val t = conn.rpc.call("session.openInTerminal", params {
-                        put("id", s.id); put("skipPermissions", fl.skipPermissions)
-                        put("args", kotlinx.serialization.json.JsonArray(fl.tuiResumeArgs().map { kotlinx.serialization.json.JsonPrimitive(it) }))
+                        put("id", s.id); put("skipPermissions", st.skipPermissions(s.agent))
+                        put("args", kotlinx.serialization.json.JsonArray(st.tuiResumeArgs(s.agent).map { kotlinx.serialization.json.JsonPrimitive(it) }))
                     }).decode(Term.serializer())
                     nav.navigate(Routes.term(t.id, host = conn.config.id))
                 }
             }
             if (s.live) {
-                SheetItem(Icons.Outlined.StopCircle, "Stop agy process") {
+                SheetItem(Icons.Outlined.StopCircle, "Stop ${s.agentLabel} process") {
                     onDismiss(); rpc("Stop") { conn.rpc.call("session.stop", params { put("id", s.id) }) }
                 }
             }
@@ -458,7 +467,7 @@ fun SessionActionsSheet(conn: HostConnection, s: SessionSummary, onDismiss: () -
         })
     }
     if (deleting) {
-        ConfirmDialog("Delete session?", "This permanently deletes the conversation from agy on ${conn.config.label}.", "Delete", destructive = true,
+        ConfirmDialog("Delete session?", "This permanently deletes the conversation from ${io.github.sidd065.agentcompanion.core.agentProduct(s.agent)} on ${conn.config.label}.", "Delete", destructive = true,
             onDismiss = { deleting = false; onDismiss() }, onConfirm = {
                 rpc("Delete") { conn.rpc.call("session.delete", params { put("id", s.id) }) }
             })

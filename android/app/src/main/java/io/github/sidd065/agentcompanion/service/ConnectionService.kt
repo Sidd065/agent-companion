@@ -121,13 +121,28 @@ class ActionReceiver : BroadcastReceiver() {
                     }
                     "reply" -> {
                         val text = RemoteInput.getResultsFromIntent(intent)?.getCharSequence(Notifier.KEY_REPLY)?.toString()
+                        val req = intent.getStringExtra(Notifier.EXTRA_REQ)
+                        val kind = intent.getStringExtra(Notifier.EXTRA_KIND)
                         if (!text.isNullOrBlank()) {
-                            conn.rpc.call("session.prompt", params { put("id", sessionId); put("text", text) })
+                            if (req != null && (kind == "question" || kind == "plan")) {
+                                // A pending Claude question/plan: answer it (a plan reply sends it back with feedback).
+                                conn.rpc.call("session.permission", params {
+                                    put("id", sessionId); put("reqId", req); put("optionId", if (kind == "question") "answer" else "deny"); put("message", text)
+                                })
+                            } else {
+                                conn.rpc.call("session.prompt", params { put("id", sessionId); put("text", text) })
+                            }
                             g.notifier.replied(notifId, text)
                         }
                     }
                     "approve_plan" -> {
-                        conn.rpc.call("session.prompt", params { put("id", sessionId); put("text", "The plan looks good. Proceed with the implementation.") })
+                        val req = intent.getStringExtra(Notifier.EXTRA_REQ)
+                        val opt = intent.getStringExtra(Notifier.EXTRA_OPTION)
+                        if (req != null && opt != null) {
+                            conn.rpc.call("session.permission", params { put("id", sessionId); put("reqId", req); put("optionId", opt) })
+                        } else {
+                            conn.rpc.call("session.prompt", params { put("id", sessionId); put("text", "The plan looks good. Proceed with the implementation.") })
+                        }
                         g.notifier.replied(notifId, "Plan approved")
                     }
                 }

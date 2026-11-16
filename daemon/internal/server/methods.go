@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"mime"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
@@ -239,15 +240,35 @@ func (s *Server) registerMethods() {
 	}
 	m["session.permission"] = func(ctx context.Context, c *core.Client, p json.RawMessage) (any, error) {
 		in, _ := bind[struct {
-			ID       string `json:"id"`
-			ReqID    string `json:"reqId"`
-			OptionID string `json:"optionId"`
+			ID       string         `json:"id"`
+			ReqID    string         `json:"reqId"`
+			OptionID string         `json:"optionId"`
+			Answers  map[string]any `json:"answers"`
+			Message  string         `json:"message"`
 		}](p)
 		ss := s.Mgr.Get(in.ID)
 		if ss == nil {
 			return nil, errors.New("unknown session")
 		}
-		return map[string]any{"ok": true}, ss.RespondPermission(in.ReqID, in.OptionID)
+		var ans *core.PermAnswer
+		if len(in.Answers) > 0 || strings.TrimSpace(in.Message) != "" {
+			ans = &core.PermAnswer{Answers: in.Answers, Message: strings.TrimSpace(in.Message)}
+		}
+		return map[string]any{"ok": true}, ss.RespondPermissionWith(in.ReqID, in.OptionID, ans)
+	}
+	// session.control sends a Claude Code control request (context usage,
+	// usage and cost, side questions, MCP servers, …).
+	m["session.control"] = func(ctx context.Context, c *core.Client, p json.RawMessage) (any, error) {
+		in, _ := bind[struct {
+			ID      string         `json:"id"`
+			Subtype string         `json:"subtype"`
+			Params  map[string]any `json:"params"`
+		}](p)
+		raw, err := s.Mgr.ClaudeControl(ctx, in.ID, in.Subtype, in.Params)
+		if err != nil {
+			return nil, err
+		}
+		return raw, nil
 	}
 	m["session.setModel"] = func(ctx context.Context, c *core.Client, p json.RawMessage) (any, error) {
 		in, _ := bind[struct {
@@ -439,10 +460,11 @@ func (s *Server) registerMethods() {
 	}
 	m["session.taskStop"] = func(ctx context.Context, c *core.Client, p json.RawMessage) (any, error) {
 		in, _ := bind[struct {
-			ID   string `json:"id"`
-			Step int    `json:"step"`
+			ID     string `json:"id"`
+			Step   int    `json:"step"`
+			TaskID string `json:"taskId"`
 		}](p)
-		return map[string]any{"ok": true}, s.Mgr.StopTask(ctx, in.ID, in.Step)
+		return map[string]any{"ok": true}, s.Mgr.StopTaskID(ctx, in.ID, in.TaskID, in.Step)
 	}
 	m["session.subagent"] = func(ctx context.Context, c *core.Client, p json.RawMessage) (any, error) {
 		in, _ := bind[struct {
@@ -453,7 +475,7 @@ func (s *Server) registerMethods() {
 		if in.Max <= 0 {
 			in.Max = 300
 		}
-		steps, err := s.Mgr.SubagentTranscript(in.SubID, in.Max)
+		steps, err := s.Mgr.SubagentSteps(ctx, in.ID, in.SubID, in.Max)
 		if err != nil {
 			return nil, err
 		}
@@ -487,7 +509,7 @@ func (s *Server) registerMethods() {
 		if err != nil {
 			return nil, err
 		}
-		return ss.Prompt(core.PromptInput{Text: core.BuildCommentPrompt(in.Comments, in.Text), Delivery: in.Delivery})
+		return ss.Comment(in.Comments, in.Text, in.Delivery)
 	}
 	m["session.openInTerminal"] = func(ctx context.Context, c *core.Client, p json.RawMessage) (any, error) {
 		in, _ := bind[struct {
@@ -505,10 +527,17 @@ func (s *Server) registerMethods() {
 		if sum.State == "running" || sum.State == "waiting" {
 			return nil, errors.New("the session is busy; stop it first")
 		}
-		ss.Hibernate() // one agy process per conversation at a time
+		ss.Hibernate() // one agent process per conversation at a time
 		skip := sum.SkipPerms
 		if in.SkipPermissions != nil {
 			skip = *in.SkipPermissions
+		}
+		if sum.Agent == "claude" {
+			if s.Mgr.ClaudeOpenElsewhere(sum.ID) {
+				return nil, errors.New("this conversation is already open in another Claude Code process")
+			}
+			return s.Terms.Create(ctx, term.CreateOpts{Kind: "claude", Cwd: sum.Cwd, ConvID: sum.ID, Name: "claude · " + sum.Title,
+				Cols: in.Cols, Rows: in.Rows, Skip: &skip, Args: in.Args})
 		}
 		return s.Terms.Create(ctx, term.CreateOpts{Kind: "agy", Cwd: sum.Cwd, ConvID: sum.ID, Name: "agy · " + sum.Title,
 			Cols: in.Cols, Rows: in.Rows, Skip: &skip, Args: in.Args})
@@ -733,6 +762,137 @@ func (s *Server) registerMethods() {
 		}](p)
 		txt, err := s.Terms.Capture(ctx, in.ID, in.Lines)
 		return map[string]any{"text": txt}, err
+	}
+
+	// ---- Claude Code management ----
+	m["claude.info"] = func(ctx context.Context, c *core.Client, p json.RawMessage) (any, error) {
+		out := map[string]any{"path": s.Mgr.ClaudeBin(), "settingsPath": s.Mgr.ClaudeSettingsPath(), "live": s.Mgr.ClaudeLiveSessions()}
+		if a := s.Mgr.Agent("claude"); a != nil {
+			out["available"], out["version"], out["reason"] = a.Available, a.Version, a.Reason
+		}
+		if rl, at := s.Mgr.ClaudeRateLimit(); rl != nil {
+			out["rateLimit"], out["rateLimitAt"] = rl, at
+		}
+		return out, nil
+	}
+	m["claude.usage"] = func(ctx context.Context, c *core.Client, p json.RawMessage) (any, error) {
+		raw, err := s.Mgr.ClaudeQuery(ctx, "get_usage", nil)
+		out := map[string]any{}
+		if err != nil {
+			out["error"] = err.Error()
+		} else {
+			var v map[string]any
+			_ = json.Unmarshal(raw, &v)
+			delete(v, "session") // the probe process's own (empty) session
+			out["usage"] = v
+		}
+		if rl, at := s.Mgr.ClaudeRateLimit(); rl != nil {
+			out["rateLimit"], out["rateLimitAt"] = rl, at
+		}
+		return out, nil
+	}
+	m["claude.query"] = func(ctx context.Context, c *core.Client, p json.RawMessage) (any, error) {
+		in, _ := bind[struct {
+			Subtype string         `json:"subtype"`
+			Params  map[string]any `json:"params"`
+		}](p)
+		raw, err := s.Mgr.ClaudeQuery(ctx, in.Subtype, in.Params)
+		if err != nil {
+			return nil, err
+		}
+		return raw, nil
+	}
+	m["claude.catalog"] = func(ctx context.Context, c *core.Client, p json.RawMessage) (any, error) {
+		in, _ := bind[struct {
+			Force bool `json:"force"`
+		}](p)
+		return s.Mgr.ClaudeCatalog(ctx, in.Force)
+	}
+	m["claude.live"] = func(ctx context.Context, c *core.Client, p json.RawMessage) (any, error) {
+		return s.Mgr.ClaudeLiveSessions(), nil
+	}
+	m["claude.settings.get"] = func(ctx context.Context, c *core.Client, p json.RawMessage) (any, error) {
+		path := s.Mgr.ClaudeSettingsPath()
+		b, err := os.ReadFile(path)
+		if err != nil && !os.IsNotExist(err) {
+			return nil, err
+		}
+		var parsed any
+		_ = json.Unmarshal(b, &parsed)
+		return map[string]any{"text": string(b), "path": path, "parsed": parsed}, nil
+	}
+	m["claude.settings.set"] = func(ctx context.Context, c *core.Client, p json.RawMessage) (any, error) {
+		in, _ := bind[struct {
+			Text  *string `json:"text"`
+			Key   string  `json:"key"`
+			Value any     `json:"value"`
+		}](p)
+		path := s.Mgr.ClaudeSettingsPath()
+		cur := map[string]any{}
+		if b, err := os.ReadFile(path); err == nil {
+			if err := json.Unmarshal(b, &cur); err != nil && in.Text == nil {
+				return nil, fmt.Errorf("settings.json isn't valid JSON: %w", err)
+			}
+		}
+		var out []byte
+		switch {
+		case in.Text != nil:
+			var v map[string]any
+			if err := json.Unmarshal([]byte(*in.Text), &v); err != nil {
+				return nil, fmt.Errorf("not valid JSON: %w", err)
+			}
+			out = []byte(*in.Text)
+		case in.Key != "":
+			if in.Value == nil {
+				delete(cur, in.Key)
+			} else {
+				cur[in.Key] = in.Value
+			}
+			out, _ = json.MarshalIndent(cur, "", "  ")
+		default:
+			return nil, errors.New("nothing to save")
+		}
+		if b, err := os.ReadFile(path); err == nil {
+			_ = os.WriteFile(path+".agentc-backup", b, 0o600)
+		}
+		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+			return nil, err
+		}
+		tmp := path + ".tmp"
+		if err := os.WriteFile(tmp, out, 0o600); err != nil {
+			return nil, err
+		}
+		return map[string]any{"ok": true}, os.Rename(tmp, path)
+	}
+	m["claude.cli"] = func(ctx context.Context, c *core.Client, p json.RawMessage) (any, error) {
+		in, _ := bind[struct {
+			Args []string `json:"args"`
+		}](p)
+		allowed := map[string]time.Duration{"mcp list": time.Minute, "mcp get": time.Minute, "plugin list": time.Minute,
+			"plugin marketplace list": time.Minute, "update": 3 * time.Minute, "auth status": 30 * time.Second, "agents": 30 * time.Second}
+		key := strings.Join(in.Args, " ")
+		var timeout time.Duration
+		for k, t := range allowed {
+			if key == k || (k == "mcp get" && len(in.Args) == 3 && in.Args[0] == "mcp" && in.Args[1] == "get") {
+				timeout = t
+			}
+		}
+		if timeout == 0 {
+			return nil, fmt.Errorf("claude %s is not available from the app", key)
+		}
+		cctx, cancel := context.WithTimeout(ctx, timeout)
+		defer cancel()
+		cmd := exec.CommandContext(cctx, s.Mgr.ClaudeBin(), in.Args...)
+		cmd.Env = s.Mgr.ClaudeEnv()
+		cmd.Dir = s.Mgr.Cfg().HomeDir
+		var stdout, stderr strings.Builder
+		cmd.Stdout, cmd.Stderr = &stdout, &stderr
+		err := cmd.Run()
+		res := map[string]any{"stdout": stdout.String(), "stderr": stderr.String(), "ok": err == nil}
+		if err != nil {
+			res["error"] = err.Error()
+		}
+		return res, nil
 	}
 
 	// ---- agy management ----
