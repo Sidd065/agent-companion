@@ -129,6 +129,13 @@ fun fmtDuration(ms: Long): String {
     }
 }
 
+/** Opens the share sheet for plain text. */
+fun Context.shareText(text: String, subject: String? = null) {
+    val i = android.content.Intent(android.content.Intent.ACTION_SEND).setType("text/plain").putExtra(android.content.Intent.EXTRA_TEXT, text)
+    subject?.takeIf { it.isNotBlank() }?.let { i.putExtra(android.content.Intent.EXTRA_SUBJECT, it.take(120)) }
+    startActivity(android.content.Intent.createChooser(i, "Share").addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK))
+}
+
 fun Context.copyText(text: String, label: String = "text") {
     val cm = getSystemService(ClipboardManager::class.java)
     cm.setPrimaryClip(ClipData.newPlainText(label, text))

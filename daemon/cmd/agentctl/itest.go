@@ -137,6 +137,7 @@ type tester struct {
 	sums    map[string]map[string]any
 	notifs  []map[string]any
 	created []string
+	asides  map[string]map[string]any // side questions by id, from session.aside events
 }
 
 func (t *tester) check(ok bool, format string, a ...any) {
@@ -192,6 +193,10 @@ func (t *tester) handle(ev map[string]any) {
 		t.sums[d["id"].(string)] = d
 	case "notify":
 		t.notifs = append(t.notifs, ev["data"].(map[string]any))
+	case "session.aside":
+		if a, ok := ev["data"].(map[string]any)["aside"].(map[string]any); ok {
+			t.asides[a["id"].(string)] = a
+		}
 	default:
 		if data, ok := ev["data"].(map[string]any); ok {
 			if id, ok := data["id"].(string); ok {
@@ -227,7 +232,7 @@ func (t *tester) waitTurns(id string, n float64, timeout time.Duration) bool {
 const testModel = "gemini-3.8-flash-low"
 
 func itest(c *Client, cr *Creds, scenarios []string) int {
-	t := &tester{c: c, cr: cr, tr: map[string]*transcript{}, sums: map[string]map[string]any{}}
+	t := &tester{c: c, cr: cr, tr: map[string]*transcript{}, sums: map[string]map[string]any{}, asides: map[string]map[string]any{}}
 	ws, _ := os.MkdirTemp("", "agentc-itest-")
 	t.ws = ws
 	fmt.Println("workspace:", ws)

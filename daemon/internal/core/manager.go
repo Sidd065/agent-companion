@@ -140,6 +140,11 @@ func (m *Manager) loadSessions() {
 			}
 		}
 		ss.Meta.LastError = ""
+		for i := range ss.Meta.Asides {
+			if ss.Meta.Asides[i].State == "pending" {
+				ss.Meta.Asides[i].State, ss.Meta.Asides[i].Error = "failed", "Interrupted: agentc restarted before Claude answered."
+			}
+		}
 		s := newSession(m, ss.Meta)
 		s.tr.LoadItems(ss.Items, ss.Seq)
 		s.lastActivity = time.UnixMilli(ss.Meta.UpdatedAt)

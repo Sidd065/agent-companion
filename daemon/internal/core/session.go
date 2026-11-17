@@ -59,6 +59,9 @@ type SessionMeta struct {
 	ResumeAt string         `json:"resumeAt,omitempty"`
 	ForkOf   string         `json:"forkOf,omitempty"`
 	Info     map[string]any `json:"info,omitempty"` // agent details (Claude: plan, version, output style)
+	// Asides are side questions (/btw) asked about the conversation; kept
+	// here, not in the transcript, because they aren't part of it.
+	Asides []Aside `json:"asides,omitempty"`
 }
 
 // QueuedPrompt is a message waiting for the current turn to end.

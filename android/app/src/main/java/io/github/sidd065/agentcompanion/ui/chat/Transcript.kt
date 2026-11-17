@@ -425,7 +425,9 @@ fun AgentMessage(item: Item, actions: TranscriptActions) {
                 AsyncImage(model = b.uri?.let { u -> if (u.startsWith("att:")) io.github.sidd065.agentcompanion.net.RemoteImage(actions.conn.config.id, attachment = u) else null }, contentDescription = null,
                     modifier = Modifier.fillMaxWidth().heightIn(max = 320.dp).clip(RoundedCornerShape(10.dp)))
             }
-            if (!item.text.isNullOrBlank()) MarkdownText(item.text.trim())
+            // Long-press opens the message sheet (Copy, Select text, Fork…); inline
+            // selection would start at the same time and fight it.
+            if (!item.text.isNullOrBlank()) MarkdownText(item.text.trim(), selectable = false)
         }
     }
 }

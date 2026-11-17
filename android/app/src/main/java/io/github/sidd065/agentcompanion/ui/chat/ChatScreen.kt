@@ -58,6 +58,7 @@ import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.ListItem
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
+import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SmallFloatingActionButton
@@ -94,6 +95,9 @@ import io.github.sidd065.agentcompanion.net.decode
 import io.github.sidd065.agentcompanion.net.params
 import io.github.sidd065.agentcompanion.ui.LocalNav
 import io.github.sidd065.agentcompanion.ui.Routes
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.material.icons.outlined.SelectAll
+import io.github.sidd065.agentcompanion.ui.TextHolder
 import io.github.sidd065.agentcompanion.ui.activeConnection
 import io.github.sidd065.agentcompanion.ui.components.ConfirmDialog
 import io.github.sidd065.agentcompanion.ui.components.LoadingBox
@@ -135,7 +139,13 @@ fun ChatScreen(sessionId: String, prefill: String) {
     val extras by store.extras.collectAsState()
     val loaded by store.loaded.collectAsState()
     val items = store.items
-    val composer = remember { ComposerState().also { if (prefill.isNotEmpty()) it.setText(prefill) } }
+    // The draft lives outside the screen, so it survives opening a diff, a file or side questions.
+    val composer = remember(conn, sessionId) { Drafts.of(conn.config.id, sessionId) }
+    var prefillUsed by rememberSaveable(sessionId) { mutableStateOf(false) }
+    LaunchedEffect(sessionId) {
+        if (prefill.isNotEmpty() && !prefillUsed) composer.setText(prefill)
+        prefillUsed = true
+    }
     val focus = remember { FocusRequester() }
     val listState = rememberLazyListState()
     val home = conn.homeDir()
@@ -151,11 +161,11 @@ fun ChatScreen(sessionId: String, prefill: String) {
 
     DisposableEffect(store) {
         store.attach()
-        g.visibleSession.value = sessionId
+        val hide = g.showSession(sessionId)
         g.notifier.cancelFor(conn.config.id, sessionId)
         onDispose {
             store.detach()
-            if (g.visibleSession.value == sessionId) g.visibleSession.value = null
+            hide()
         }
     }
 
@@ -186,6 +196,10 @@ fun ChatScreen(sessionId: String, prefill: String) {
         }
     }
     val busy = s?.state == "running" || s?.state == "starting" || s?.state == "waiting"
+    val asides by store.asides.collectAsState()
+    val asideCount = asides.size
+    val unseenAside by store.unseenAside.collectAsState()
+    LaunchedEffect(store, isClaude) { if (isClaude) runCatching { store.refreshAsides() } }
     val rows by remember(settings.showThoughts) { derivedStateOf { buildRows(items.toList(), settings.showThoughts) } }
     val activeId by remember { derivedStateOf { activeAttentionId(items.toList(), store.summary.value?.attention) } }
 
@@ -200,6 +214,19 @@ fun ChatScreen(sessionId: String, prefill: String) {
 
     fun send(text: String, attachments: List<Pending>, delivery: String?) {
         val t = text.trim()
+        if (s?.isClaude == true && (t == "/btw" || t.startsWith("/btw ") || t.startsWith("/btw\n"))) {
+            // A side question: answered on its own screen, never sent to the conversation.
+            val q = t.removePrefix("/btw").trim()
+            composer.clear()
+            if (q.isNotEmpty()) {
+                val st = store
+                conn.scope.launch(kotlinx.coroutines.Dispatchers.Main) {
+                    runCatching { st.askAside(q) }.onFailure { snack.showSnackbar(it.message ?: "Side question failed") }
+                }
+            }
+            nav.navigate(Routes.asides(sessionId))
+            return
+        }
         if (t.startsWith("/") && !t.contains(' ')) {
             val name = t.drop(1)
             if (localCommands.any { it.name == name } && extras.commands.none { it.name == name }) {
@@ -294,7 +321,9 @@ fun ChatScreen(sessionId: String, prefill: String) {
                             MenuRow(Icons.Outlined.Inventory2, "Artifacts") { menu = false; activityTab = "artifacts" }
                             MenuRow(Icons.Outlined.Terminal, "Background shells & agents") { menu = false; activityTab = if (live?.subagents?.isNotEmpty() == true && live?.tasks.isNullOrEmpty()) "agents" else "tasks" }
                             MenuRow(Icons.Outlined.FolderOpen, "Browse folder") { menu = false; s?.cwd?.let { nav.navigate(Routes.files(it)) } }
-                            if (isClaude) MenuRow(Icons.Outlined.QuestionAnswer, "Ask a side question") { menu = false; sheet = "side" }
+                            if (isClaude) MenuRow(Icons.Outlined.QuestionAnswer, "Side questions" + (asideCount.takeIf { it > 0 }?.let { " ($it)" } ?: "")) {
+                                menu = false; nav.navigate(Routes.asides(sessionId))
+                            }
                             if (isClaude) MenuRow(Icons.Outlined.DataUsage, "Context usage") { menu = false; sheet = "context" }
                             if (isClaude) MenuRow(Icons.Outlined.Extension, "MCP servers") { menu = false; sheet = "mcp" }
                             MenuRow(Icons.Outlined.Terminal, "Continue in $label terminal") { menu = false; openInTerminal(conn, sessionId, s?.agent, nav = { nav.navigate(it) }, rpc = ::rpc) }
@@ -345,6 +374,9 @@ fun ChatScreen(sessionId: String, prefill: String) {
                 }
             }
             ActivityStrip(live, onOpen = { activityTab = it }, onReview = { nav.navigate(Routes.artifact(sessionId, it.path)) })
+            unseenAside?.let { u ->
+                SideAnswerBanner(u, onOpen = { nav.navigate(Routes.asides(sessionId)) }, onDismiss = { store.unseenAside.value = null })
+            }
             val suggestion = s?.suggestion
             if (!suggestion.isNullOrBlank() && !busy && composer.value.text.isBlank()) {
                 SuggestionChip(suggestion) { composer.setText(suggestion); runCatching { focus.requestFocus() } }
@@ -406,6 +438,7 @@ fun ChatScreen(sessionId: String, prefill: String) {
         MessageActionSheet(
             it, isUser = true, onDismiss = { userAction = null },
             onCopy = { ctx.copyText(it.text.orEmpty()) },
+            onSelect = { nav.navigate(Routes.select(TextHolder.put("Your message", it.text.orEmpty()))) },
             onEdit = { rewindTarget = it },
             onFork = { fork(conn, sessionId, it.id, { r -> nav.navigate(r) }, ::rpc) { p -> composer.setText(p) } },
             onRewind = { rewindTarget = it },
@@ -415,6 +448,7 @@ fun ChatScreen(sessionId: String, prefill: String) {
         MessageActionSheet(
             it, isUser = false, onDismiss = { agentAction = null },
             onCopy = { ctx.copyText(it.text.orEmpty()) },
+            onSelect = { nav.navigate(Routes.select(TextHolder.put("$label's response", it.text.orEmpty()))) },
             onEdit = null,
             onFork = { fork(conn, sessionId, it.id, { r -> nav.navigate(r) }, ::rpc, null) },
             onRewind = { rewindTarget = it },
@@ -441,7 +475,6 @@ fun ChatScreen(sessionId: String, prefill: String) {
             }
         }
     }
-    if (sheet == "side") SideQuestionDialog(conn, sessionId, label, onDismiss = { sheet = null })
     if (hostPick) {
         HostFilePicker(conn, s?.cwd ?: "", onDismiss = { hostPick = false }) { path ->
             hostPick = false
@@ -518,7 +551,7 @@ private fun runLocal(
         "artifacts" -> setSheet("artifacts")
         "help" -> setSheet("help")
         "rewind" -> setSheet("rewind")
-        "btw" -> if (summary?.isClaude == true) setSheet("side") else snack("Side questions are a Claude Code feature")
+        "btw" -> if (summary?.isClaude == true) nav(Routes.asides(sessionId)) else snack("Side questions are a Claude Code feature")
         "mcp" -> if (summary?.isClaude == true) setSheet("mcp") else snack("Open Host → MCP servers for agy")
         "rename" -> setRenaming()
         "new", "clear" -> nav(Routes.newSession(summary?.cwd ?: ""))
@@ -681,17 +714,20 @@ private fun MessageActionSheet(
     isUser: Boolean,
     onDismiss: () -> Unit,
     onCopy: () -> Unit,
+    onSelect: () -> Unit,
     onEdit: (() -> Unit)?,
     onFork: () -> Unit,
     onRewind: () -> Unit,
     onShare: (() -> Unit)? = null,
 ) {
-    ModalBottomSheet(onDismissRequest = onDismiss) {
+    ModalBottomSheet(onDismissRequest = onDismiss, sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)) {
         Column(Modifier.padding(bottom = 24.dp)) {
             Text(item.text.orEmpty().take(160), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
                 maxLines = 3, overflow = TextOverflow.Ellipsis, modifier = Modifier.padding(horizontal = 20.dp, vertical = 8.dp))
             HorizontalDivider()
             ListItem(headlineContent = { Text("Copy message") }, leadingContent = { Icon(Icons.Outlined.ContentCopy, null) }, modifier = Modifier.clickable { onDismiss(); onCopy() })
+            ListItem(headlineContent = { Text("Select text") }, supportingContent = { Text("Pick out part of the message to copy") },
+                leadingContent = { Icon(Icons.Outlined.SelectAll, null) }, modifier = Modifier.clickable { onDismiss(); onSelect() })
             if (onEdit != null) ListItem(headlineContent = { Text("Edit & resend") }, supportingContent = { Text("Rewinds the conversation to before this message") },
                 leadingContent = { Icon(Icons.Outlined.Edit, null) }, modifier = Modifier.clickable { onDismiss(); onEdit() })
             ListItem(headlineContent = { Text(if (isUser) "Fork from here" else "Fork after this response") },

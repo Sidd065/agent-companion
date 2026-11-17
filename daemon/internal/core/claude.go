@@ -420,7 +420,9 @@ type claudeAnn struct {
 
 var claudeAnnMu sync.Mutex
 
-func (m *Manager) claudeAnnFile() string { return filepath.Join(m.cfg.StateDir, "claude-annotations.json") }
+func (m *Manager) claudeAnnFile() string {
+	return filepath.Join(m.cfg.StateDir, "claude-annotations.json")
+}
 
 func (m *Manager) claudeAnnotations() map[string]claudeAnn {
 	claudeAnnMu.Lock()
@@ -649,7 +651,11 @@ func (m *Manager) ClaudeControl(ctx context.Context, id, subtype string, params 
 	if a == nil {
 		return nil, errors.New("Claude Code is not running for this session")
 	}
-	cctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
+	limit := 2 * time.Minute
+	if subtype == "side_question" {
+		limit = 5 * time.Minute // a long answer from a slow model
+	}
+	cctx, cancel := context.WithTimeout(ctx, limit)
 	defer cancel()
 	raw, err := a.Control(cctx, subtype, params)
 	if err != nil {
@@ -1446,4 +1452,199 @@ func (s *Session) onAutoTurn(params json.RawMessage) {
 		}
 		s.finishPrompt("", &acp.PromptResult{StopReason: firstNonEmpty(ev.StopReason, "end_turn"), Usage: ev.Usage}, err)
 	}
+}
+
+// Aside is a side question (/btw) about a Claude conversation: answered from
+// the conversation's context without becoming part of it.
+type Aside struct {
+	ID       string `json:"id"`
+	Question string `json:"question"`
+	Answer   string `json:"answer,omitempty"`
+	Error    string `json:"error,omitempty"`
+	State    string `json:"state"` // pending|done|failed
+	Ts       int64  `json:"ts"`
+	DoneTs   int64  `json:"doneTs,omitempty"`
+	FollowUp string `json:"followUp,omitempty"` // the side question this one follows up on
+}
+
+const maxAsides = 40
+
+// Asides returns a session's side questions, oldest first.
+func (m *Manager) Asides(id string) ([]Aside, error) {
+	s := m.Get(id)
+	if s == nil {
+		return []Aside{}, nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]Aside{}, s.meta.Asides...), nil
+}
+
+func (m *Manager) broadcastAside(id string, a Aside) {
+	m.hub.Broadcast("session.aside", map[string]any{"id": id, "aside": a})
+}
+
+// asidePrompt is what Claude is asked. Each side question is answered on its
+// own, so a follow-up carries the earlier side exchange it continues.
+func asidePrompt(list []Aside, question, followUp string) string {
+	var chain []Aside
+	size := 0
+	for cur := followUp; cur != "" && len(chain) < 6; {
+		var prev *Aside
+		for i := range list {
+			if list[i].ID == cur {
+				prev = &list[i]
+			}
+		}
+		if prev == nil || prev.State != "done" || size+len(prev.Question)+len(prev.Answer) > 60_000 {
+			break
+		}
+		chain = append([]Aside{*prev}, chain...)
+		size += len(prev.Question) + len(prev.Answer)
+		cur = prev.FollowUp
+	}
+	if len(chain) == 0 {
+		return question
+	}
+	var b strings.Builder
+	b.WriteString("This continues an earlier side conversation about this session:\n")
+	for _, a := range chain {
+		b.WriteString("\nQuestion: " + a.Question + "\n\nYour answer:\n" + a.Answer + "\n")
+	}
+	b.WriteString("\nFollow-up question: " + question)
+	return b.String()
+}
+
+// AskAside asks Claude a side question. It returns at once with the pending
+// question; the answer arrives as a session.aside event (and stays in the
+// session's list), so it isn't lost when the phone leaves the screen.
+// followUp names an earlier side question this one continues.
+func (m *Manager) AskAside(ctx context.Context, id, question, followUp string) (*Aside, error) {
+	question = strings.TrimSpace(question)
+	if question == "" {
+		return nil, errors.New("the question is empty")
+	}
+	s := m.Get(id)
+	if s == nil {
+		var err error
+		if s, err = m.Open(ctx, id); err != nil {
+			return nil, err
+		}
+	}
+	if !s.isClaudeSafe() {
+		return nil, errors.New("side questions are a Claude Code feature")
+	}
+	s.mu.Lock()
+	for _, a := range s.meta.Asides {
+		if a.State == "pending" {
+			s.mu.Unlock()
+			return nil, errors.New("Claude is still answering the previous side question")
+		}
+	}
+	prompt := asidePrompt(s.meta.Asides, question, followUp)
+	if prompt == question {
+		followUp = ""
+	}
+	a := Aside{ID: "q" + randHex(5), Question: question, State: "pending", Ts: now(), FollowUp: followUp}
+	s.meta.Asides = append(s.meta.Asides, a)
+	if n := len(s.meta.Asides); n > maxAsides {
+		s.meta.Asides = append([]Aside(nil), s.meta.Asides[n-maxAsides:]...)
+	}
+	s.scheduleSaveLocked()
+	s.mu.Unlock()
+	m.broadcastAside(id, a)
+	go func() {
+		cctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+		defer cancel()
+		var raw json.RawMessage
+		var err error
+		if m.claudeLiveElsewhere(id) != nil {
+			raw, err = m.asideElsewhere(cctx, s, prompt)
+		} else {
+			raw, err = m.ClaudeControl(cctx, id, "side_question", map[string]any{"question": prompt})
+		}
+		done := a
+		done.DoneTs = now()
+		if err == nil {
+			var r struct {
+				Response string `json:"response"`
+			}
+			if json.Unmarshal(raw, &r) == nil && strings.TrimSpace(r.Response) != "" {
+				done.State, done.Answer = "done", r.Response
+			} else {
+				err = errors.New("Claude returned no answer")
+			}
+		}
+		if err != nil {
+			done.State, done.Error = "failed", err.Error()
+		}
+		s.mu.Lock()
+		found := false
+		for i := range s.meta.Asides {
+			if s.meta.Asides[i].ID == a.ID {
+				s.meta.Asides[i] = done
+				found = true
+			}
+		}
+		s.scheduleSaveLocked()
+		title := firstNonEmpty(s.meta.Title, "Claude session")
+		removed := s.removed
+		s.mu.Unlock()
+		if found && !removed {
+			m.broadcastAside(id, done)
+			// Phones showing this session suppress it; anywhere else it's
+			// how a long answer finds its reader.
+			n := Notification{SessionID: id, Kind: "aside", Title: "Side answer · " + title, Body: "“" + question + "”\n\n" + done.Answer}
+			if done.State != "done" {
+				n.Title, n.Body = "Side question failed · "+title, done.Error
+			}
+			m.notify(n)
+		}
+	}()
+	return &a, nil
+}
+
+// asideElsewhere answers a side question about a conversation that another
+// Claude Code process (usually a terminal) holds. A throwaway fork loads the
+// conversation, answers and exits without writing anything, so the other
+// process is never disturbed.
+func (m *Manager) asideElsewhere(ctx context.Context, s *Session, question string) (json.RawMessage, error) {
+	s.mu.Lock()
+	id, cwd, model := s.meta.ID, s.meta.Cwd, s.meta.WantModel
+	s.mu.Unlock()
+	args := []string{"--resume", id, "--fork-session", "--no-session-persistence"}
+	if model != "" {
+		args = append(args, "--model", model)
+	}
+	p, err := claude.StartProc(claude.ProcOptions{Bin: m.claudeBin(), Cwd: cwd, Env: m.claudeEnv(), Args: args,
+		LogFile: filepath.Join(m.cfg.StateDir, "logs", "claude-aside.log")})
+	if err != nil {
+		return nil, err
+	}
+	defer p.Close(3 * time.Second)
+	if _, err := p.Control(ctx, "initialize", nil); err != nil {
+		return nil, fmt.Errorf("claude did not start: %w", err)
+	}
+	return p.Control(ctx, "side_question", map[string]any{"question": question})
+}
+
+// DeleteAside removes one side question, or every finished one when asideID is empty.
+func (m *Manager) DeleteAside(id, asideID string) error {
+	s := m.Get(id)
+	if s == nil {
+		return fmt.Errorf("unknown session %s", id)
+	}
+	s.mu.Lock()
+	keep := s.meta.Asides[:0:0]
+	for _, a := range s.meta.Asides {
+		if (asideID == "" && a.State != "pending") || a.ID == asideID {
+			continue
+		}
+		keep = append(keep, a)
+	}
+	s.meta.Asides = keep
+	s.scheduleSaveLocked()
+	s.mu.Unlock()
+	m.hub.Broadcast("session.asides", map[string]any{"id": id, "asides": keep})
+	return nil
 }

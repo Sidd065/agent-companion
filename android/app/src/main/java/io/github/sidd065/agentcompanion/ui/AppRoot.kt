@@ -86,6 +86,8 @@ object Routes {
     fun diff(sessionId: String = "-", path: String = "", host: String? = null) = "diff/$sessionId?path=${enc(path)}&${h(host)}"
     fun artifact(sessionId: String, path: String, host: String? = null) = "artifact/$sessionId?path=${enc(path)}&${h(host)}"
     fun text(key: String) = "text/$key"
+    fun select(key: String) = "select/$key"
+    fun asides(sessionId: String, host: String? = null) = "asides/$sessionId?${h(host)}"
 }
 
 /** Provides [hostId] (blank = the selected host) to a host-scoped screen. */
@@ -203,7 +205,11 @@ private fun MainNav(nav: NavHostController, settings: AppSettings) {
         val sid = i.getStringExtra(Notifier.EXTRA_SESSION)
         val tid = i.getStringExtra(Notifier.EXTRA_TERM)
         when {
-            sid != null -> nav.navigate(Routes.chat(sid, host = host)) { launchSingleTop = true }
+            sid != null -> {
+                nav.navigate(Routes.chat(sid, host = host)) { launchSingleTop = true }
+                // A side answer opens on its own screen, above the chat.
+                if (i.getStringExtra(Notifier.EXTRA_KIND) == "aside") nav.navigate(Routes.asides(sid, host = host))
+            }
             tid != null -> nav.navigate(Routes.term(tid, host = host)) { launchSingleTop = true }
             i.action == Intent.ACTION_SEND -> {
                 val text = i.getStringExtra(Intent.EXTRA_TEXT).orEmpty()
@@ -269,6 +275,14 @@ private fun MainNav(nav: NavHostController, settings: AppSettings) {
         }
         composable("text/{key}", arguments = listOf(navArgument("key") { type = NavType.StringType })) {
             TextViewerScreen(key = it.arguments?.getString("key") ?: "")
+        }
+        composable("select/{key}", arguments = listOf(navArgument("key") { type = NavType.StringType })) {
+            io.github.sidd065.agentcompanion.ui.components.SelectTextScreen(key = it.arguments?.getString("key") ?: "")
+        }
+        composable("asides/{sid}?h={h}", arguments = listOf(navArgument("sid") { type = NavType.StringType }, hArg)) {
+            HostScope(it.arguments?.getString("h")) {
+                io.github.sidd065.agentcompanion.ui.chat.SideQuestionsScreen(sessionId = it.arguments?.getString("sid") ?: "")
+            }
         }
     }
 }

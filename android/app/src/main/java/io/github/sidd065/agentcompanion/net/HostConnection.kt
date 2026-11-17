@@ -3,6 +3,7 @@ package io.github.sidd065.agentcompanion.net
 import android.util.Log
 import androidx.compose.runtime.mutableStateListOf
 import io.github.sidd065.agentcompanion.core.AgentNotification
+import io.github.sidd065.agentcompanion.core.Aside
 import io.github.sidd065.agentcompanion.core.AgentProfile
 import io.github.sidd065.agentcompanion.core.AppJson
 import io.github.sidd065.agentcompanion.core.HostConfig
@@ -97,6 +98,7 @@ class HostConnection(
         for (st in stores.values) {
             st.summaryFrom(_sessions.value.firstOrNull { it.id == st.id })
             if (st.isAttached) st.subscribe()
+            if (st.asidesLoaded) scope.launch { runCatching { st.refreshAsides() } }
         }
         scope.launch { refreshTerms() }
         scope.launch { catchUpNotifications() }
@@ -135,6 +137,18 @@ class HostConnection(
                 val parsed = SessionStore.parse(ev.name, obj)
                 withContext(Dispatchers.Main) { st.apply(parsed) }
                 parsed.summary?.let { upsertSession(it) }
+            }
+            "session.aside" -> {
+                val obj = ev.data.jsonObject
+                val st = stores[obj["id"]?.jsonPrimitive?.content ?: return] ?: return
+                val a = obj["aside"]?.decode(Aside.serializer()) ?: return
+                withContext(Dispatchers.Main) { st.onAside(a, fromEvent = true) }
+            }
+            "session.asides" -> {
+                val obj = ev.data.jsonObject
+                val st = stores[obj["id"]?.jsonPrimitive?.content ?: return] ?: return
+                val list = obj["asides"]?.takeIf { it !is JsonNull }?.decode(ListSerializer(Aside.serializer())) ?: emptyList()
+                withContext(Dispatchers.Main) { st.setAsides(list) }
             }
             "notify" -> {
                 val n = ev.data.decode(AgentNotification.serializer())
@@ -237,6 +251,23 @@ class HostConnection(
             runCatching { rpc.call("fs.uploadAbort", params { put("id", id) }) }
             throw e
         }
+    }
+}
+
+/** The follow-up context agentc adds itself (see asidePrompt in the daemon), for older versions. */
+internal fun legacyAsidePrompt(list: List<Aside>, question: String, followUp: String?): String {
+    val chain = ArrayList<Aside>()
+    var cur = followUp
+    while (!cur.isNullOrEmpty() && chain.size < 6) {
+        val prev = list.firstOrNull { it.id == cur && it.state == "done" } ?: break
+        chain.add(0, prev)
+        cur = prev.followUp
+    }
+    if (chain.isEmpty()) return question
+    return buildString {
+        append("This continues an earlier side conversation about this session:\n")
+        chain.forEach { append("\nQuestion: ").append(it.question).append("\n\nYour answer:\n").append(it.answer).append('\n') }
+        append("\nFollow-up question: ").append(question)
     }
 }
 
@@ -363,6 +394,74 @@ class SessionStore(val id: String, private val conn: HostConnection) {
     }
 
     fun itemIndex(itemId: String): Int = index[itemId] ?: -1
+
+    // ---- side questions (/btw) ----
+
+    /** Side questions, oldest first. agentc keeps them; older versions only answer, so they live here. */
+    val asides = MutableStateFlow<List<Aside>>(emptyList())
+    /** A side answer that arrived while the side questions screen wasn't open. */
+    val unseenAside = MutableStateFlow<Aside?>(null)
+    /** How many side question screens are open for this session. */
+    var asideViewers = 0
+    var asidesLoaded = false
+        private set
+    private val keepsAsides: Boolean
+        get() = conn.agents.value.firstOrNull { it.id == "claude" }?.features?.contains("asides") == true
+
+    fun onAside(a: Aside, fromEvent: Boolean = false) {
+        val cur = asides.value
+        val i = cur.indexOfFirst { it.id == a.id }
+        val wasPending = i >= 0 && cur[i].state == "pending"
+        asides.value = if (i >= 0) cur.toMutableList().also { it[i] = a } else cur + a
+        if (fromEvent && a.state != "pending" && (wasPending || i < 0) && asideViewers == 0) unseenAside.value = a
+    }
+
+    fun setAsides(list: List<Aside>) {
+        asides.value = list
+        unseenAside.value = unseenAside.value?.takeIf { u -> list.any { it.id == u.id } }
+    }
+
+    suspend fun refreshAsides() {
+        if (!keepsAsides) return
+        val list = conn.rpc.call("session.asides", params { put("id", id) }).decode(ListSerializer(Aside.serializer()))
+        asidesLoaded = true
+        withContext(Dispatchers.Main) { setAsides(list) }
+    }
+
+    /** Asks a side question; the answer arrives later (see [asides]). */
+    suspend fun askAside(question: String, followUp: String? = null) {
+        if (keepsAsides) {
+            val a = conn.rpc.call("session.aside", params {
+                put("id", id); put("question", question)
+                if (!followUp.isNullOrEmpty()) put("followUp", followUp)
+            }).decode(Aside.serializer())
+            withContext(Dispatchers.Main) { onAside(a) }
+            return
+        }
+        // agentc 0.3.0: answer directly; the result stays on this phone.
+        if (asides.value.any { it.state == "pending" }) throw RpcException("Claude is still answering the previous side question")
+        val a = Aside("local-" + System.nanoTime(), question, ts = System.currentTimeMillis(), followUp = followUp.orEmpty())
+        withContext(Dispatchers.Main) { onAside(a) }
+        conn.scope.launch {
+            val done = runCatching {
+                conn.rpc.call("session.control", params {
+                    put("id", id); put("subtype", "side_question")
+                    put("params", params { put("question", legacyAsidePrompt(asides.value, question, followUp)) })
+                }, timeoutMs = 300_000).jsonObject["response"]?.jsonPrimitive?.content?.takeIf { it.isNotBlank() } ?: throw RpcException("Claude returned no answer")
+            }.fold({ a.copy(state = "done", answer = it, doneTs = System.currentTimeMillis()) },
+                { a.copy(state = "failed", error = it.message ?: "failed", doneTs = System.currentTimeMillis()) })
+            withContext(Dispatchers.Main) { onAside(done, fromEvent = true) }
+        }
+    }
+
+    /** Deletes one side question, or every answered one when [asideId] is null. */
+    suspend fun deleteAside(asideId: String?) {
+        val keep = asides.value.filterNot { if (asideId == null) it.state != "pending" else it.id == asideId }
+        if (keepsAsides && asideId?.startsWith("local-") != true) {
+            conn.rpc.call("session.asideDelete", params { put("id", id); put("asideId", asideId ?: "") })
+        }
+        withContext(Dispatchers.Main) { setAsides(keep) }
+    }
 
     companion object {
         private val itemsSer = ListSerializer(Item.serializer())

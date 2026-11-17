@@ -26,7 +26,9 @@ func writeTranscript(t *testing.T, dir string, entries []map[string]any) string 
 	return p
 }
 
-func msg(role string, content any) map[string]any { return map[string]any{"role": role, "content": content} }
+func msg(role string, content any) map[string]any {
+	return map[string]any{"role": role, "content": content}
+}
 
 func sampleTranscript() []map[string]any {
 	sid := "11111111-2222-4333-8444-555555555555"

@@ -560,3 +560,16 @@ fun splitArgs(s: String): List<String> = argRe.findAll(s.trim()).map { m ->
 }.toList()
 
 fun shellQuote(a: String): String = if (a.isNotEmpty() && a.all { it.isLetterOrDigit() || it in "-_./=:@,+%~" }) a else "'" + a.replace("'", "'\\''") + "'"
+
+/** A side question (/btw) about a Claude conversation: answered from it without becoming part of it. */
+@Serializable
+data class Aside(
+    val id: String,
+    val question: String = "",
+    val answer: String = "",
+    val error: String = "",
+    val state: String = "pending", // pending|done|failed
+    val ts: Long = 0,
+    val doneTs: Long = 0,
+    val followUp: String = "",
+)

@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -380,6 +381,10 @@ func (t *tester) scClaudeControl() {
 	t.check(cu != nil && cu["categories"] != nil && cu["gridRows"] == nil, "context usage (grid dropped)")
 	sq := t.call("session.control", map[string]any{"id": id, "subtype": "side_question", "params": map[string]any{"question": "What is 2+2? Answer with just the number."}})
 	t.check(sq != nil && strings.Contains(sq["response"].(string), "4"), "side question: %v", sq["response"])
+	t.checkAside(id, "What is 3+5? Answer with just the number.", "8")
+	if _, err := t.callErr("session.aside", map[string]any{"id": id, "question": " "}); err == nil {
+		t.check(false, "an empty side question is refused")
+	}
 	us := t.call("claude.usage", nil)
 	t.check(us != nil && us["usage"] != nil, "claude.usage")
 	if _, err := t.callErr("session.control", map[string]any{"id": id, "subtype": "end_session"}); err == nil {
@@ -389,6 +394,28 @@ func (t *tester) scClaudeControl() {
 	}
 	info := t.call("claude.info", nil)
 	t.check(info != nil && info["available"] == true, "claude.info available (%v)", info["version"])
+}
+
+// checkAside asks a side question the way the app does: the daemon answers
+// in the background, reports it with a session.aside event and keeps it.
+func (t *tester) checkAside(id, question, want string) {
+	a := t.call("session.aside", map[string]any{"id": id, "question": question})
+	aid, _ := a["id"].(string)
+	t.check(aid != "" && a["state"] == "pending", "side question accepted (%v)", a["state"])
+	if _, err := t.callErr("session.aside", map[string]any{"id": id, "question": "And 1+1?"}); err == nil {
+		t.check(false, "a second side question waits for the first")
+	}
+	t.pump(3*time.Minute, func() bool { x := t.asides[aid]; return x != nil && x["state"] != "pending" })
+	x := t.asides[aid]
+	ans, _ := x["answer"].(string)
+	t.check(x != nil && x["state"] == "done" && strings.Contains(ans, want), "side answer arrives as an event (%v %q %v)", x["state"], ans, x["error"])
+	raw, _ := t.callErr("session.asides", map[string]any{"id": id})
+	l, _ := raw.([]any)
+	t.check(len(l) == 1 && l[0].(map[string]any)["answer"] == ans, "side questions are kept (%d)", len(l))
+	t.call("session.asideDelete", map[string]any{"id": id, "asideId": aid})
+	raw, _ = t.callErr("session.asides", map[string]any{"id": id})
+	l, _ = raw.([]any)
+	t.check(len(l) == 0, "side question deleted")
 }
 
 // approveUntilDone allows every tool permission until the session finishes n turns.
@@ -450,4 +477,40 @@ func (t *tester) scClaudeFollow() {
 		}
 	}
 	t.check(ones == 1 && users == 2, "nothing duplicated (%d ONE replies, %d user messages)", ones, users)
+
+	// While another process holds the conversation (a terminal), side
+	// questions are answered by a throwaway fork that writes nothing.
+	hold := exec.Command("claude", "-p", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose",
+		"--resume", id, "--model", claudeModel)
+	hold.Dir, hold.Env = dir, env
+	stdin, _ := hold.StdinPipe()
+	if err := hold.Start(); err != nil {
+		t.check(false, "start a process holding the conversation: %v", err)
+		return
+	}
+	defer func() { _ = stdin.Close(); _ = hold.Wait() }()
+	home, _ := os.UserHomeDir()
+	reg := filepath.Join(home, ".claude", "sessions", fmt.Sprintf("%d.json", hold.Process.Pid))
+	t.pump(30*time.Second, func() bool {
+		if _, err := os.Stat(reg); err == nil {
+			return true
+		}
+		time.Sleep(300 * time.Millisecond)
+		return false
+	})
+	paths, _ := filepath.Glob(filepath.Join(home, ".claude", "projects", "*", id+".jsonl"))
+	var before int64 = -1
+	if len(paths) == 1 {
+		if st, err := os.Stat(paths[0]); err == nil {
+			before = st.Size()
+		}
+	}
+	t.checkAside(id, "What exact word did you reply with most recently? Answer with just that word.", "TWO")
+	after := int64(-2)
+	if len(paths) == 1 {
+		if st, err := os.Stat(paths[0]); err == nil {
+			after = st.Size()
+		}
+	}
+	t.check(before >= 0 && before == after, "the fork wrote nothing to the held conversation (%d → %d bytes)", before, after)
 }

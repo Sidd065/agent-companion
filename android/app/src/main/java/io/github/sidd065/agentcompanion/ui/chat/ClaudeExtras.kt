@@ -10,40 +10,34 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.AutoAwesome
 import androidx.compose.material.icons.outlined.Terminal
-import androidx.compose.material3.AlertDialog
-import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
-import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedButton
-import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.setValue
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
-import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -54,7 +48,6 @@ import androidx.compose.ui.unit.dp
 import io.github.sidd065.agentcompanion.core.SessionSummary
 import io.github.sidd065.agentcompanion.net.HostConnection
 import io.github.sidd065.agentcompanion.net.params
-import io.github.sidd065.agentcompanion.ui.components.MarkdownText
 import io.github.sidd065.agentcompanion.ui.components.fmtTokens
 import io.github.sidd065.agentcompanion.ui.theme.LocalExtra
 import kotlinx.coroutines.launch
@@ -116,49 +109,6 @@ fun SuggestionChip(text: String, onClick: () -> Unit) {
             }
         }
     }
-}
-
-/** Ask Claude something on the side without adding it to the conversation (/btw). */
-@Composable
-fun SideQuestionDialog(conn: HostConnection, sessionId: String, label: String, onDismiss: () -> Unit) {
-    val scope = rememberCoroutineScope()
-    var q by remember { mutableStateOf("") }
-    var answer by remember { mutableStateOf<String?>(null) }
-    var busy by remember { mutableStateOf(false) }
-    var err by remember { mutableStateOf<String?>(null) }
-    AlertDialog(
-        onDismissRequest = { if (!busy) onDismiss() },
-        title = { Text("Side question") },
-        text = {
-            Column(Modifier.heightIn(max = 460.dp).verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                Text("$label answers from the conversation so far. Nothing is added to the transcript.", style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant)
-                OutlinedTextField(q, { q = it }, Modifier.fillMaxWidth(), placeholder = { Text("e.g. Which file handles login?") }, minLines = 2, enabled = !busy)
-                if (busy) LinearProgressIndicator(Modifier.fillMaxWidth())
-                err?.let { Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall) }
-                answer?.let { a ->
-                    HorizontalDivider()
-                    SelectionContainer { MarkdownText(a) }
-                }
-            }
-        },
-        confirmButton = {
-            Button(enabled = q.isNotBlank() && !busy, onClick = {
-                busy = true; err = null
-                scope.launch {
-                    runCatching {
-                        val r = conn.rpc.call("session.control", params {
-                            put("id", sessionId); put("subtype", "side_question")
-                            put("params", params { put("question", q.trim()) })
-                        }, timeoutMs = 180_000).jsonObject
-                        answer = r.s("response") ?: "(no answer)"
-                    }.onFailure { err = it.message }
-                    busy = false
-                }
-            }) { Text(if (answer == null) "Ask" else "Ask again") }
-        },
-        dismissButton = { TextButton(onClick = onDismiss, enabled = !busy) { Text("Close") } },
-    )
 }
 
 private val palette = listOf(

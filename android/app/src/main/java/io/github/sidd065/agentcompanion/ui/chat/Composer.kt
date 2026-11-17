@@ -105,6 +105,22 @@ class ComposerState {
     val attachments: SnapshotStateList<Pending> = mutableStateListOf()
     fun setText(t: String) { value = TextFieldValue(t, TextRange(t.length)) }
     fun clear() { value = TextFieldValue(""); attachments.clear() }
+
+    /** Adds [text] as a Markdown quote after what's already typed, ready for a reply below it. */
+    fun appendQuote(text: String, heading: String? = null) {
+        val quote = buildString {
+            heading?.let { append("> ").append(it).append("\n>\n") }
+            text.trimEnd().lines().forEachIndexed { i, l -> if (i > 0) append('\n'); append(if (l.isBlank()) ">" else "> $l") }
+        }
+        val cur = value.text.trimEnd()
+        setText((if (cur.isEmpty()) "" else "$cur\n\n") + quote + "\n\n")
+    }
+}
+
+/** Unsent messages per session, so a draft survives leaving the chat (process lifetime). */
+object Drafts {
+    private val map = HashMap<String, ComposerState>()
+    fun of(hostId: String, sessionId: String): ComposerState = map.getOrPut("$hostId/$sessionId") { ComposerState() }
 }
 
 @OptIn(ExperimentalFoundationApi::class)

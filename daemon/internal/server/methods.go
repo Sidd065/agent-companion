@@ -256,6 +256,30 @@ func (s *Server) registerMethods() {
 		}
 		return map[string]any{"ok": true}, ss.RespondPermissionWith(in.ReqID, in.OptionID, ans)
 	}
+	// Side questions (/btw): answered from the conversation, not added to it.
+	m["session.aside"] = func(ctx context.Context, c *core.Client, p json.RawMessage) (any, error) {
+		in, _ := bind[struct {
+			ID       string `json:"id"`
+			Question string `json:"question"`
+			FollowUp string `json:"followUp"`
+		}](p)
+		a, err := s.Mgr.AskAside(ctx, in.ID, in.Question, in.FollowUp)
+		if err != nil {
+			return nil, err
+		}
+		return a, nil
+	}
+	m["session.asides"] = func(ctx context.Context, c *core.Client, p json.RawMessage) (any, error) {
+		in, _ := bind[idParam](p)
+		return s.Mgr.Asides(in.ID)
+	}
+	m["session.asideDelete"] = func(ctx context.Context, c *core.Client, p json.RawMessage) (any, error) {
+		in, _ := bind[struct {
+			ID      string `json:"id"`
+			AsideID string `json:"asideId"`
+		}](p)
+		return map[string]any{"ok": true}, s.Mgr.DeleteAside(in.ID, in.AsideID)
+	}
 	// session.control sends a Claude Code control request (context usage,
 	// usage and cost, side questions, MCP servers, …).
 	m["session.control"] = func(ctx context.Context, c *core.Client, p json.RawMessage) (any, error) {

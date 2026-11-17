@@ -82,6 +82,27 @@ class AppGraph(val app: Application) {
 
     /** Session currently on screen (suppresses its notifications). */
     val visibleSession = MutableStateFlow<String?>(null)
+    private val shown = ArrayList<Pair<Any, String>>()
+
+    /**
+     * Marks [sessionId] as on screen (no notifications for it) until the
+     * returned function is called. Marks stack, so a screen opened on top
+     * of the chat (side questions) and the chat being disposed after it
+     * don't clear each other.
+     */
+    fun showSession(sessionId: String): () -> Unit {
+        val token = Any()
+        synchronized(shown) {
+            shown.add(token to sessionId)
+            visibleSession.value = sessionId
+        }
+        return {
+            synchronized(shown) {
+                shown.removeAll { it.first === token }
+                visibleSession.value = shown.lastOrNull()?.second
+            }
+        }
+    }
     val foreground = MutableStateFlow(false)
     val notifier = Notifier(app)
     val push = PushRegistrar(this)

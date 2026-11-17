@@ -56,7 +56,7 @@ func (m *Manager) Agents() []AgentProfile {
 	}
 	claude := AgentProfile{ID: "claude", Name: "Claude Code", Command: m.claudeBin(),
 		Features: []string{"history", "fork", "rewind", "rename", "archive", "pin", "delete", "export", "changes", "artifacts", "terminal",
-			"usage", "context", "sideQuestion", "mcp", "tasks", "subagents", "plans", "questions", "effort", "modes", "steer"}}
+			"usage", "context", "sideQuestion", "asides", "mcp", "tasks", "subagents", "plans", "questions", "effort", "modes", "steer"}}
 	codex := AgentProfile{ID: "codex", Name: "Codex", Command: "codex", Planned: true, Reason: "coming soon", Features: []string{"terminal"}}
 	if v := versionOf(claude.Command, "--version"); v != "" {
 		claude.Available, claude.Version = true, strings.TrimSuffix(v, " (Claude Code)")

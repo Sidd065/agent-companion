@@ -84,12 +84,15 @@ class Notifier(private val ctx: Context) {
         nm.cancel(notifId(hostId, "p:$sessionId"))
     }
 
-    private fun openIntent(hostId: String, sessionId: String?, termId: String?, reqCode: Int): PendingIntent {
+    fun cancelAside(hostId: String, sessionId: String) = nm.cancel(notifId(hostId, "a:$sessionId"))
+
+    private fun openIntent(hostId: String, sessionId: String?, termId: String?, reqCode: Int, kind: String? = null): PendingIntent {
         val i = Intent(ctx, MainActivity::class.java).apply {
             flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP
             putExtra(EXTRA_HOST, hostId)
             sessionId?.let { putExtra(EXTRA_SESSION, it) }
             termId?.let { putExtra(EXTRA_TERM, it) }
+            kind?.let { putExtra(EXTRA_KIND, it) }
         }
         return PendingIntent.getActivity(ctx, reqCode, i, PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
     }
@@ -131,9 +134,10 @@ class Notifier(private val ctx: Context) {
                     "term_done" -> "The agent finished"
                     "term_blocked" -> "The agent is waiting for you"
                     "test" -> "Push notifications are working"
+                    "aside" -> "Your side question has an answer"
                     else -> known?.lastText ?: "Turn finished"
                 }
-            },
+            }.let { if (n0.kind == "aside") io.github.sidd065.agentcompanion.ui.chat.plainPreview(it) else it },
         )
         val hostId = conn.config.id
         val hostLabel = conn.config.label
@@ -143,6 +147,7 @@ class Notifier(private val ctx: Context) {
             "question", "plan" -> CH_QUESTIONS to "s:${n.sessionId}"
             "term_done", "term_blocked", "term_failed" -> CH_TERMINALS to "t:${n.termId}"
             "test" -> CH_SESSIONS to "test"
+            "aside" -> CH_SESSIONS to "a:${n.sessionId}"
             else -> CH_SESSIONS to "s:${n.sessionId}"
         }
         val id = notifId(hostId, key)
@@ -163,7 +168,7 @@ class Notifier(private val ctx: Context) {
             .setAutoCancel(true)
             .setWhen(if (n.ts > 0) n.ts else System.currentTimeMillis())
             .setShowWhen(true)
-            .setContentIntent(openIntent(hostId, n.sessionId, n.termId, id))
+            .setContentIntent(openIntent(hostId, n.sessionId, n.termId, id, n.kind))
             .setCategory(if (channel == CH_PERMISSIONS) NotificationCompat.CATEGORY_CALL else NotificationCompat.CATEGORY_MESSAGE)
             .setPriority(if (channel == CH_PERMISSIONS || channel == CH_QUESTIONS) NotificationCompat.PRIORITY_HIGH else NotificationCompat.PRIORITY_DEFAULT)
         if (multiHost) b.setSubText(hostLabel)
