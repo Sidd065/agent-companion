@@ -47,6 +47,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.text.font.FontWeight
@@ -158,6 +159,26 @@ fun StatusDot(state: String, attention: String?, modifier: Modifier = Modifier, 
         t.animateFloat(0.35f, 1f, infiniteRepeatable(tween(800), RepeatMode.Reverse), label = "a").value
     } else 1f
     Box(modifier.size(size.dp).alpha(alpha).clip(CircleShape).background(color))
+}
+
+/**
+ * A light checkerboard behind an image, like image editors show transparency, so a
+ * dark logo on a transparent background stays visible on a dark bubble.
+ */
+fun Modifier.checkerboard(cell: androidx.compose.ui.unit.Dp = 6.dp): Modifier = drawBehind {
+    val c = cell.toPx()
+    drawRect(Color(0xFFF3F3F3))
+    var y = 0f
+    var row = 0
+    while (y < size.height) {
+        var x = if (row % 2 == 0) 0f else c
+        while (x < size.width) {
+            drawRect(Color(0xFFD9D9D9), androidx.compose.ui.geometry.Offset(x, y), androidx.compose.ui.geometry.Size(c, c))
+            x += 2 * c
+        }
+        y += c
+        row++
+    }
 }
 
 private val backticked = Regex("`([^`]+)`")

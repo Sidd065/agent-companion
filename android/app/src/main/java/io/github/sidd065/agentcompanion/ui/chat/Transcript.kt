@@ -84,6 +84,7 @@ import io.github.sidd065.agentcompanion.core.Tool
 import io.github.sidd065.agentcompanion.net.HostConnection
 import io.github.sidd065.agentcompanion.net.decode
 import io.github.sidd065.agentcompanion.net.params
+import io.github.sidd065.agentcompanion.ui.components.checkerboard
 import io.github.sidd065.agentcompanion.ui.components.markdownToPlain
 import io.github.sidd065.agentcompanion.ui.components.CodeBox
 import io.github.sidd065.agentcompanion.ui.components.DiffView
@@ -366,7 +367,7 @@ fun UserBubble(item: Item, actions: TranscriptActions) {
                             AsyncImage(
                                 model = b.uri?.let { u -> if (u.startsWith("att:")) io.github.sidd065.agentcompanion.net.RemoteImage(actions.conn.config.id, attachment = u) else null },
                                 contentDescription = b.name, contentScale = ContentScale.Crop,
-                                modifier = Modifier.size(120.dp).clip(RoundedCornerShape(10.dp)),
+                                modifier = Modifier.size(120.dp).clip(RoundedCornerShape(10.dp)).checkerboard(),
                             )
                         }
                     }

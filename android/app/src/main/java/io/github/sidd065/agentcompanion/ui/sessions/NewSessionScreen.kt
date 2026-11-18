@@ -1,5 +1,6 @@
 package io.github.sidd065.agentcompanion.ui.sessions
 
+import io.github.sidd065.agentcompanion.ui.components.checkerboard
 import io.github.sidd065.agentcompanion.ui.components.AppSheet
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.PickVisualMediaRequest
@@ -305,7 +306,7 @@ fun AttachmentChip(a: Pending, onRemove: () -> Unit) {
     Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainerHigh), shape = RoundedCornerShape(10.dp)) {
         Row(Modifier.padding(6.dp), verticalAlignment = Alignment.CenterVertically) {
             if (a.preview != null) {
-                Image(a.preview.asImageBitmap(), null, Modifier.size(40.dp).clip(RoundedCornerShape(6.dp)), contentScale = ContentScale.Crop)
+                Image(a.preview.asImageBitmap(), null, Modifier.size(40.dp).clip(RoundedCornerShape(6.dp)).checkerboard(), contentScale = ContentScale.Crop)
             } else {
                 Icon(Icons.AutoMirrored.Outlined.InsertDriveFile, null, Modifier.size(24.dp))
             }

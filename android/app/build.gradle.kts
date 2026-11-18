@@ -4,8 +4,8 @@ plugins {
     alias(libs.plugins.kotlin.serialization)
 }
 
-val appVersionCode = 6
-val appVersionName = "0.3.3"
+val appVersionCode = 7
+val appVersionName = "0.3.4"
 
 android {
     namespace = "io.github.sidd065.agentcompanion"

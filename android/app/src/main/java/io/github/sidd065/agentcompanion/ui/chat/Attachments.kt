@@ -29,6 +29,22 @@ data class Pending(
 object AttachmentUtil {
     private const val MAX_SIDE = 2000
     private const val MAX_FILE = 25L * 1024 * 1024
+    private const val MAX_PNG = 6 * 1024 * 1024
+
+    private fun encode(bmp: Bitmap, png: Boolean): ByteArray = ByteArrayOutputStream().also {
+        bmp.compress(if (png) Bitmap.CompressFormat.PNG else Bitmap.CompressFormat.JPEG, 88, it)
+    }.toByteArray()
+
+    /** Whether any pixel is see-through (a PNG or WebP can have an alpha channel and still be opaque). */
+    internal fun hasTransparency(bmp: Bitmap): Boolean {
+        if (!bmp.hasAlpha()) return false
+        val row = IntArray(bmp.width)
+        for (y in 0 until bmp.height) {
+            bmp.getPixels(row, 0, bmp.width, 0, y, bmp.width, 1)
+            for (p in row) if (p ushr 24 != 0xFF) return true
+        }
+        return false
+    }
 
     suspend fun fromUri(ctx: Context, uri: Uri): Pending = withContext(Dispatchers.IO) {
         val cr = ctx.contentResolver
@@ -50,10 +66,16 @@ object AttachmentUtil {
                 if (scale < 1f) dec.setTargetSize((w * scale).toInt(), (h * scale).toInt())
                 dec.allocator = ImageDecoder.ALLOCATOR_SOFTWARE
             }
-            val out = ByteArrayOutputStream()
-            val png = mime == "image/png" && bmp.width * bmp.height < 1_500_000
-            bmp.compress(if (png) Bitmap.CompressFormat.PNG else Bitmap.CompressFormat.JPEG, 88, out)
-            val bytes = out.toByteArray()
+            // JPEG has no alpha: transparent pixels would turn black (a dark logo became
+            // a black square, for the agent too). Transparent images stay PNG at any size.
+            val alpha = hasTransparency(bmp)
+            val png = alpha || (mime == "image/png" && bmp.width * bmp.height < 1_500_000)
+            var bytes = encode(bmp, png)
+            var scaled = bmp
+            while (alpha && bytes.size > MAX_PNG && scaled.width > 400 && scaled.height > 400) {
+                scaled = Bitmap.createScaledBitmap(scaled, scaled.width * 3 / 4, scaled.height * 3 / 4, true)
+                bytes = encode(scaled, true)
+            }
             val thumb = Bitmap.createScaledBitmap(bmp, 160, (160f * bmp.height / bmp.width).toInt().coerceAtLeast(1), true)
             Pending("image", name, if (png) "image/png" else "image/jpeg", Base64.encodeToString(bytes, Base64.NO_WRAP), preview = thumb, size = bytes.size.toLong())
         } else {
