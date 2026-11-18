@@ -69,6 +69,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalUriHandler
@@ -296,6 +297,8 @@ class TranscriptActions(
     val onLiveOutput: ((String) -> Unit)? = null,
     /** The session's agent (agy|claude): wording and answer formats differ. */
     val agent: String = "agy",
+    /** The tool call a permission request is about (for its diff). */
+    val toolFor: (String) -> io.github.sidd065.agentcompanion.core.Tool? = { null },
 ) {
     val label: String get() = io.github.sidd065.agentcompanion.core.agentLabel(agent)
     val isClaude: Boolean get() = agent == "claude"
@@ -380,7 +383,7 @@ fun UserBubble(item: Item, actions: TranscriptActions) {
                     Column(Modifier.clickable { full = !full }) {
                         Text(if (fb.isEmpty()) "Approved" else "${fb.size} comment${if (fb.size > 1) "s" else ""}",
                             style = MaterialTheme.typography.labelMedium, color = ex.onUserBubble.copy(alpha = 0.7f))
-                        if (full) SelectionContainer { Text(item.text, style = MaterialTheme.typography.bodySmall, color = ex.onUserBubble) }
+                        if (full) Text(item.text, style = MaterialTheme.typography.bodySmall, color = ex.onUserBubble)
                         else fb.forEach { (file, c) ->
                             Text("$file: $c", style = MaterialTheme.typography.bodyMedium, color = ex.onUserBubble)
                         }
@@ -389,10 +392,9 @@ fun UserBubble(item: Item, actions: TranscriptActions) {
                     // A pasted log or review can run for screens: show the start until asked.
                     val long = item.text.length > 1500 || item.text.count { it == '\n' } > 24
                     var expanded by rememberSaveable(item.id) { mutableStateOf(false) }
-                    SelectionContainer {
-                        Text(item.text, style = MaterialTheme.typography.bodyMedium, color = ex.onUserBubble,
-                            maxLines = if (long && !expanded) 14 else Int.MAX_VALUE, overflow = TextOverflow.Ellipsis)
-                    }
+                    // Not selectable: a long press opens the message sheet (which has Select text).
+                    Text(item.text, style = MaterialTheme.typography.bodyMedium, color = ex.onUserBubble,
+                        maxLines = if (long && !expanded) 14 else Int.MAX_VALUE, overflow = TextOverflow.Ellipsis)
                     if (long) Text(
                         if (expanded) "Show less" else "Show all ${item.text.length / 1000}k characters",
                         style = MaterialTheme.typography.labelLarge, color = ex.onUserBubble.copy(alpha = 0.8f),
@@ -662,6 +664,38 @@ fun PermCard(item: Item, actions: TranscriptActions) {
         "search" -> "$who wants to search:"
         else -> if (p.tool != null) "$who wants to use ${toolDisplayName(p.tool)}:" else "$who wants to use a tool:"
     }
+    if (!pending) {
+        // Answered: one line under the tool row it was about, the command a tap away.
+        val chosen = p.options.firstOrNull { it.optionId == p.chosen }
+        val allowed = chosen?.kind?.startsWith("allow") == true
+        val status = when {
+            item.state == "cancelled" -> "Cancelled"
+            chosen == null -> "Answered"
+            // Only add the option name when it says more than allow/deny (e.g. "Always allow").
+            allowed -> if (chosen!!.name.trim().lowercase() in setOf("allow", "allow once", "yes")) "Allowed" else "Allowed · ${chosen.name}"
+            else -> if (chosen!!.name.trim().lowercase() in setOf("deny", "reject", "no")) "Denied" else "Denied · ${chosen.name}"
+        }
+        val tint = if (allowed) ex.success else ex.muted
+        var open by remember(item.id) { mutableStateOf(false) }
+        Column(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 2.dp)) {
+            Row(
+                Modifier.fillMaxWidth().clip(RoundedCornerShape(8.dp)).clickable { open = !open }.padding(vertical = 4.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Icon(Icons.Outlined.Shield, null, Modifier.size(14.dp), tint = tint)
+                Spacer(Modifier.width(6.dp))
+                Text(status, style = MaterialTheme.typography.labelMedium, color = tint)
+                Spacer(Modifier.width(8.dp))
+                Text(p.title.orEmpty(), style = MaterialTheme.typography.labelSmall, fontFamily = FontFamily.Monospace, color = ex.muted,
+                    maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
+            }
+            if (open) CodeBox(p.title ?: "tool call", wrap = true)
+            p.answer.obj()?.get("message")?.let { (it as? JsonPrimitive)?.contentOrNull }?.takeIf { it.isNotBlank() }?.let { m ->
+                Text("“$m”", style = MaterialTheme.typography.bodySmall, color = ex.muted, fontStyle = FontStyle.Italic, modifier = Modifier.padding(start = 20.dp))
+            }
+        }
+        return
+    }
     Surface(
         Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 6.dp),
         shape = RoundedCornerShape(14.dp),
@@ -672,9 +706,19 @@ fun PermCard(item: Item, actions: TranscriptActions) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Icon(Icons.Outlined.Shield, null, Modifier.size(18.dp), tint = if (pending) ex.warning else ex.muted)
                 Spacer(Modifier.width(8.dp))
-                Text(if (pending) verb else "Permission request", style = MaterialTheme.typography.titleSmall)
+                Text(verb, style = MaterialTheme.typography.titleSmall)
             }
             CodeBox(p.title ?: "tool call", wrap = true)
+            // An edit shows what it would change, not just the file name.
+            p.callId?.let(actions.toolFor)?.let { t ->
+                val patch = t.patchLines()
+                when {
+                    patch != null -> DiffView(patch, Modifier.fillMaxWidth().clip(RoundedCornerShape(8.dp)), wrap = true, maxLines = 60)
+                    else -> t.diffs().forEach { d ->
+                        DiffView(LineDiff.diff(d.old, d.new), Modifier.fillMaxWidth().clip(RoundedCornerShape(8.dp)), wrap = true, maxLines = 60)
+                    }
+                }
+            }
             p.reason?.takeIf { pending }?.let { Text(it, style = MaterialTheme.typography.bodySmall, color = ex.muted) }
             p.blockedPath?.takeIf { pending }?.let { Text("Outside the workspace: $it", style = MaterialTheme.typography.bodySmall, color = ex.warning) }
             if (pending) {
@@ -704,22 +748,6 @@ fun PermCard(item: Item, actions: TranscriptActions) {
                     p.options.firstOrNull { it.kind == "reject_once" }?.let {
                         androidx.compose.material3.TextButton(onClick = { denyNote = "" }, enabled = !busy) { Text("Deny with comment") }
                     }
-                }
-            } else {
-                val chosen = p.options.firstOrNull { it.optionId == p.chosen }
-                Text(
-                    when {
-                        item.state == "cancelled" -> "Cancelled"
-                        chosen == null -> "Answered"
-                        // Only add the option name when it says more than allow/deny (e.g. "Always allow").
-                        chosen.kind.startsWith("allow") -> if (chosen.name.trim().lowercase() in setOf("allow", "allow once", "yes")) "Allowed" else "Allowed · ${chosen.name}"
-                        else -> if (chosen.name.trim().lowercase() in setOf("deny", "reject", "no")) "Denied" else "Denied · ${chosen.name}"
-                    },
-                    style = MaterialTheme.typography.labelMedium,
-                    color = if (chosen?.kind?.startsWith("allow") == true) ex.success else ex.muted,
-                )
-                p.answer.obj()?.get("message")?.let { (it as? JsonPrimitive)?.contentOrNull }?.takeIf { it.isNotBlank() }?.let { m ->
-                    Text("“$m”", style = MaterialTheme.typography.bodySmall, color = ex.muted, fontStyle = FontStyle.Italic)
                 }
             }
         }

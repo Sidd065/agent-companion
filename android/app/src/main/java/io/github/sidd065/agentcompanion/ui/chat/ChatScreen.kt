@@ -239,22 +239,42 @@ fun ChatScreen(sessionId: String, prefill: String) {
                 return
             }
         }
+        // Claude running in one of our terminals: type the message there instead.
+        val termHere = terms.firstOrNull { it.conversationId == sessionId && !it.dead }
+        if (s?.liveElsewhere != null && termHere != null && attachments.isEmpty()) {
+            composer.clear()
+            follow = true
+            scope.launch {
+                runCatching {
+                    conn.rpc.call("term.sendKeys", params { put("id", termHere.id); put("text", t.replace('\n', ' ')); put("enter", true) })
+                }.onSuccess { snack.showSnackbar("Typed into the terminal") }
+                    .onFailure { composer.setText(text); snack.showSnackbar("Couldn't type into the terminal: ${it.message}") }
+            }
+            return
+        }
         val effDelivery = delivery ?: settings.delivery.ifBlank { null }
         composer.clear()
         follow = true
-        rpc("Send failed") {
-            conn.rpc.call("session.prompt", params {
-                put("id", sessionId)
-                put("text", text)
-                if (attachments.isNotEmpty()) put("attachments", AttachmentUtil.toJson(attachments))
-                if (effDelivery != null) put("delivery", effDelivery)
-            })
+        scope.launch {
+            runCatching {
+                conn.rpc.call("session.prompt", params {
+                    put("id", sessionId)
+                    put("text", text)
+                    if (attachments.isNotEmpty()) put("attachments", AttachmentUtil.toJson(attachments))
+                    if (effDelivery != null) put("delivery", effDelivery)
+                })
+            }.onFailure {
+                // Don't lose what was typed.
+                if (composer.value.text.isBlank()) composer.setText(text)
+                snack.showSnackbar("Send failed: ${it.message}")
+            }
         }
     }
 
     val actions = remember(conn, sessionId) {
         TranscriptActions(
             conn = conn, sessionId = sessionId,
+            toolFor = { cid -> items.lastOrNull { it.tool?.callId == cid }?.tool },
             onUserLong = { userAction = it },
             onAgentLong = { agentAction = it },
             onSendText = { send(it, emptyList(), null) },
@@ -304,12 +324,30 @@ fun ChatScreen(sessionId: String, prefill: String) {
             TopAppBar(
                 title = {
                     Column(Modifier.clickable { renaming = true }) {
-                        Text(s?.displayTitle ?: "Session", maxLines = 1, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.titleMedium)
+                        // Until the agent names it, a new session goes by its first message.
+                        val title = s?.displayTitle?.takeIf { s.title.isNotBlank() && s.title != "New session" }
+                            ?: items.firstOrNull { it.kind == "user" }?.text?.lineSequence()?.firstOrNull { it.isNotBlank() }?.trim()?.take(80)
+                            ?: s?.displayTitle ?: "Session"
+                        Text(title, maxLines = 1, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.titleMedium)
                         Row(verticalAlignment = Alignment.CenterVertically) {
                             StatusDot(s?.state ?: "", s?.attention, size = 7)
                             Spacer(Modifier.width(6.dp))
                             Text(
-                                listOfNotNull(stateLabel(s), shortPath(s?.cwd ?: "", home).takeIf { it.isNotBlank() }).joinToString(" · "),
+                                listOfNotNull(
+                                    stateLabel(s),
+                                    // Ready, but a subagent or background command still runs.
+                                    live?.let { l ->
+                                        val agents = l.subagents.count { it.alive }
+                                        val shells = l.tasks.size
+                                        when {
+                                            s?.state != "idle" -> null
+                                            agents > 0 -> if (agents == 1) "1 agent working" else "$agents agents working"
+                                            shells > 0 -> if (shells == 1) "1 command running" else "$shells commands running"
+                                            else -> null
+                                        }
+                                    },
+                                    shortPath(s?.cwd ?: "", home).takeIf { it.isNotBlank() },
+                                ).joinToString(" · "),
                                 style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1, overflow = TextOverflow.Ellipsis,
                             )
                         }
@@ -789,7 +827,7 @@ private fun RewindDialog(conn: HostConnection, sessionId: String, target: Item, 
                     null -> Text("Checking file changes…", style = MaterialTheme.typography.bodySmall)
                     -1 -> {}
                     0 -> Text("No file edits to undo.", style = MaterialTheme.typography.bodySmall)
-                    else -> Text("$files file change(s) can be reverted too.", style = MaterialTheme.typography.bodySmall)
+                    else -> Text(if (files == 1) "1 file change can be undone too." else "$files file changes can be undone too.", style = MaterialTheme.typography.bodySmall)
                 }
                 if (busy) LinearProgressIndicator(Modifier.fillMaxWidth())
             }

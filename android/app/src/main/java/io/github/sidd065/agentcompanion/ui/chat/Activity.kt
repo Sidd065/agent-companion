@@ -406,14 +406,15 @@ private val tagRe = Regex("</?(USER_REQUEST|ADDITIONAL_METADATA|USER_SETTINGS_CH
 @Composable
 private fun SubStepRow(st: SubStep) {
     val ex = LocalExtra.current
+    // agy names its steps USER_INPUT / PLANNER_RESPONSE; Claude's are user / assistant (tool results: tool).
     when (st.type) {
-        "USER_INPUT" -> Surface(color = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.5f), shape = RoundedCornerShape(12.dp)) {
+        "USER_INPUT", "user" -> Surface(color = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.5f), shape = RoundedCornerShape(12.dp)) {
             Column(Modifier.fillMaxWidth().padding(10.dp)) {
                 Text("Task", style = MaterialTheme.typography.labelSmall, color = ex.muted)
                 Text(st.text.orEmpty().substringBefore("<ADDITIONAL_METADATA>").replace(tagRe, "").trim(), style = MaterialTheme.typography.bodyMedium)
             }
         }
-        "PLANNER_RESPONSE" -> Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+        "PLANNER_RESPONSE", "assistant" -> Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(4.dp)) {
             st.thinking?.takeIf { it.isNotBlank() }?.let { th ->
                 var open by remember { mutableStateOf(false) }
                 Text(if (open) th.trim() else "Thinking: " + th.trim().lineSequence().first().removePrefix("**").removeSuffix("**"),
@@ -425,7 +426,8 @@ private fun SubStepRow(st: SubStep) {
                 Surface(color = ex.codeBg, shape = RoundedCornerShape(8.dp)) {
                     Column(Modifier.fillMaxWidth().padding(8.dp)) {
                         Text(t.name, style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.SemiBold)
-                        if (t.args.isNotBlank()) Text(t.args, style = MaterialTheme.typography.bodySmall, fontFamily = FontFamily.Monospace, maxLines = 6, overflow = TextOverflow.Ellipsis)
+                        val summary = subToolSummary(t.args)
+                        if (summary.isNotBlank()) Text(summary, style = MaterialTheme.typography.bodySmall, fontFamily = FontFamily.Monospace, maxLines = 6, overflow = TextOverflow.Ellipsis)
                     }
                 }
             }
@@ -433,9 +435,22 @@ private fun SubStepRow(st: SubStep) {
         else -> st.text?.takeIf { it.isNotBlank() }?.let { out ->
             var open by remember { mutableStateOf(false) }
             Surface(color = ex.codeBg.copy(alpha = 0.6f), shape = RoundedCornerShape(8.dp), modifier = Modifier.clickable { open = !open }) {
-                Text(cleanTerminalText(out).trim(), style = MaterialTheme.typography.bodySmall, fontFamily = FontFamily.Monospace,
-                    maxLines = if (open) Int.MAX_VALUE else 6, overflow = TextOverflow.Ellipsis, modifier = Modifier.fillMaxWidth().padding(8.dp))
+                Column(Modifier.fillMaxWidth().padding(8.dp)) {
+                    Text(if (open) "Output" else "Output · tap to expand", style = MaterialTheme.typography.labelSmall, color = ex.muted)
+                    Text(cleanTerminalText(out).trim(), style = MaterialTheme.typography.bodySmall, fontFamily = FontFamily.Monospace,
+                        maxLines = if (open) Int.MAX_VALUE else 4, overflow = TextOverflow.Ellipsis)
+                }
             }
         }
     }
+}
+
+private val argField = Regex(""""(command|file_path|path|pattern|url|query|description|prompt|skill)"\s*:\s*"((?:[^"\\]|\\.)*)""")
+
+/** A tool call's input in a line: the command, file or pattern, else the raw arguments. */
+internal fun subToolSummary(args: String): String {
+    if (args.isBlank()) return ""
+    val fields = argField.findAll(args).associate { it.groupValues[1] to it.groupValues[2] }
+    val pick = listOf("command", "file_path", "path", "pattern", "url", "query", "skill", "description", "prompt").firstNotNullOfOrNull { fields[it] }
+    return (pick ?: return args).replace("\\n", "\n").replace("\\\"", "\"").replace("\\\\", "\\")
 }

@@ -119,7 +119,38 @@ class Notifier(private val ctx: Context) {
             seen[dedupKey] = true
         }
         if (!g.prefs.value.notificationsEnabled) return
-        if (g.foreground.value && n0.sessionId != null && g.visibleSession.value == n0.sessionId) return
+        if (g.foreground.value && n0.sessionId != null && g.covers(n0.sessionId, n0.kind)) {
+            // On screen now; if the app goes to the background before it's answered, it notifies then.
+            if (n0.kind in setOf("permission", "question", "plan")) synchronized(heldBack) { heldBack[conn.config.id + "/" + n0.sessionId] = conn to n0 }
+            return
+        }
+        show(conn, n0)
+    }
+
+    /** Prompts held back because their session was on screen (see [post]). */
+    private val heldBack = HashMap<String, Pair<HostConnection, AgentNotification>>()
+
+    /**
+     * The app went to the background: requests that arrived while their session
+     * was on screen and still wait for an answer get their notification now
+     * (sending a prompt and switching apps right away used to lose it).
+     */
+    fun flushHeldBack(leaving: Boolean = true) {
+        val g = ctx.graph
+        // Leaving the app posts them all; switching screens posts those no longer on screen.
+        val held = synchronized(heldBack) {
+            val due = heldBack.filterValues { (_, n) -> leaving || !g.foreground.value || !g.covers(n.sessionId ?: "", n.kind) }
+            due.keys.forEach { heldBack.remove(it) }
+            due.values.toList()
+        }
+        held.forEach { (conn, n) ->
+            val waiting = n.sessionId?.let { conn.session(it) }?.needsInput == true
+            if (waiting && g.prefs.value.notificationsEnabled) show(conn, n)
+        }
+    }
+
+    private fun show(conn: HostConnection, n0: AgentNotification) {
+        val g = ctx.graph
         if (!allowed()) return
         // "minimal" push content: fill in what we know locally.
         val known = n0.sessionId?.let { conn.session(it) }

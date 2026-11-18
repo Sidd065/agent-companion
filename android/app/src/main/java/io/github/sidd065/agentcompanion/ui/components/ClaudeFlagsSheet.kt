@@ -147,7 +147,10 @@ fun ClaudeFlagsSheet(conn: HostConnection?, onDismiss: () -> Unit) {
             }
         }
     }
-    val modelLabel = models.firstOrNull { it.value == f.model }?.name ?: f.model.ifBlank { "Claude's default (settings.json)" }
+    // Claude's "default" entry describes itself as "Opus 5.5 · Best for …".
+    val defaultLabel = models.firstOrNull { it.value == "default" }?.description?.substringBefore(" · ", "")?.trim()
+        ?.takeIf { it.isNotBlank() && it.length <= 40 }?.let { "Claude's default · $it" } ?: "Claude's default (settings.json)"
+    val modelLabel = models.firstOrNull { it.value == f.model }?.name ?: f.model.ifBlank { defaultLabel }
     AppSheet(onDismissRequest = onDismiss, sheetState = sheet) {
         Column(
             Modifier.fillMaxWidth().imePadding().verticalScroll(rememberScrollState()).padding(horizontal = 20.dp).padding(bottom = 32.dp),
@@ -185,7 +188,7 @@ fun ClaudeFlagsSheet(conn: HostConnection?, onDismiss: () -> Unit) {
             Box {
                 OutlinedButton(onClick = { modelMenu = true }, modifier = Modifier.fillMaxWidth()) { Text(modelLabel, modifier = Modifier.weight(1f)) }
                 DropdownMenu(modelMenu, { modelMenu = false }) {
-                    DropdownMenuItem(text = { Text("Claude's default (settings.json)") }, onClick = { modelMenu = false; upd { it.copy(model = "") } })
+                    DropdownMenuItem(text = { Text(defaultLabel) }, onClick = { modelMenu = false; upd { it.copy(model = "") } })
                     models.filter { it.value != "default" }.forEach { m ->
                         DropdownMenuItem(
                             text = { Column { Text(m.name); if (m.description.isNotBlank()) Text(m.description, style = MaterialTheme.typography.labelSmall, color = ex.muted) } },

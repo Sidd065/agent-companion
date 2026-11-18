@@ -2,6 +2,10 @@ package io.github.sidd065.agentcompanion.ui.components
 
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.material.icons.outlined.CheckBox
+import androidx.compose.material.icons.outlined.CheckBoxOutlineBlank
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Modifier
@@ -16,6 +20,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.isSpecified
 import com.mikepenz.markdown.compose.components.markdownComponents
+import com.mikepenz.markdown.compose.elements.MarkdownCheckBox
 import com.mikepenz.markdown.compose.elements.MarkdownHighlightedCodeBlock
 import com.mikepenz.markdown.compose.elements.MarkdownHighlightedCodeFence
 import com.mikepenz.markdown.compose.elements.MarkdownTable
@@ -182,6 +187,17 @@ fun MarkdownText(
                 table = base,
             ),
             components = markdownComponents(
+                // Task lists ("- [ ] step") get boxes, not "[ ]" text.
+                checkbox = { m ->
+                    MarkdownCheckBox(m.content, m.node, m.typography.text, checkedIndicator = { checked, mod ->
+                        androidx.compose.material3.Icon(
+                            if (checked) androidx.compose.material.icons.Icons.Outlined.CheckBox else androidx.compose.material.icons.Icons.Outlined.CheckBoxOutlineBlank,
+                            if (checked) "done" else "to do",
+                            mod.padding(end = 4.dp).size(18.dp),
+                            tint = if (checked) ex.success else MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    })
+                },
                 codeBlock = { MarkdownHighlightedCodeBlock(content = it.content, node = it.node, style = it.typography.code, showHeader = true) },
                 codeFence = { MarkdownHighlightedCodeFence(content = it.content, node = it.node, style = it.typography.code, showHeader = true) },
                 // Cells wrap instead of being cut off after one line.

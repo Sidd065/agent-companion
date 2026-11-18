@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"sort"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -638,4 +639,133 @@ func GitDiff(ctx context.Context, dir string) (map[string]any, error) {
 		truncated = true
 	}
 	return map[string]any{"repo": true, "root": root, "branch": strings.TrimSpace(branch), "files": files, "diff": text, "truncated": truncated}, nil
+}
+
+// Commit is one entry of GitLog.
+type Commit struct {
+	SHA     string `json:"sha"`
+	Short   string `json:"short"`
+	Subject string `json:"subject"`
+	Author  string `json:"author"`
+	Time    int64  `json:"time"` // ms
+	Files   int    `json:"files"`
+	Added   int    `json:"added"`
+	Removed int    `json:"removed"`
+	// Mine: on this branch but not on its upstream or main (what an agent added).
+	Mine bool `json:"mine,omitempty"`
+}
+
+func gitIn(ctx context.Context, dir string, args ...string) (string, error) {
+	cctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(cctx, "git", append([]string{"-C", dir, "-c", "core.quotepath=off"}, args...)...)
+	cmd.Env = append(os.Environ(), "GIT_PAGER=cat", "PAGER=cat", "LC_ALL=C")
+	b, err := cmd.Output()
+	return string(b), err
+}
+
+var shortStat = regexp.MustCompile(`(\d+) files? changed(?:, (\d+) insertions?\(\+\))?(?:, (\d+) deletions?\(-\))?`)
+
+// GitLog lists the newest n commits of HEAD in the repository containing dir.
+// Commits not reachable from the upstream (or main/master) are marked Mine:
+// after an agent commits, they are what it added.
+func GitLog(ctx context.Context, dir string, n int) (map[string]any, error) {
+	if n <= 0 || n > 200 {
+		n = 30
+	}
+	root, err := gitIn(ctx, dir, "rev-parse", "--show-toplevel")
+	if err != nil {
+		return map[string]any{"repo": false}, nil
+	}
+	root = strings.TrimSpace(root)
+	branch, _ := gitIn(ctx, root, "rev-parse", "--abbrev-ref", "HEAD")
+	out, err := gitIn(ctx, root, "log", "-n", strconv.Itoa(n), "--format=%x1e%H%x1f%h%x1f%s%x1f%an%x1f%at", "--shortstat")
+	if err != nil {
+		return map[string]any{"repo": true, "root": root, "branch": strings.TrimSpace(branch), "commits": []Commit{}}, nil
+	}
+	mine := map[string]bool{}
+	for _, base := range []string{"@{upstream}", "main", "master"} {
+		if _, err := gitIn(ctx, root, "rev-parse", "--verify", "-q", base); err != nil {
+			continue
+		}
+		if ahead, err := gitIn(ctx, root, "rev-list", base+"..HEAD"); err == nil {
+			for _, s := range strings.Fields(ahead) {
+				mine[s] = true
+			}
+		}
+		break
+	}
+	commits := []Commit{}
+	for _, rec := range strings.Split(out, "\x1e") {
+		rec = strings.TrimSpace(rec)
+		if rec == "" {
+			continue
+		}
+		head, rest, _ := strings.Cut(rec, "\n")
+		f := strings.Split(head, "\x1f")
+		if len(f) < 5 {
+			continue
+		}
+		at, _ := strconv.ParseInt(f[4], 10, 64)
+		c := Commit{SHA: f[0], Short: f[1], Subject: f[2], Author: f[3], Time: at * 1000, Mine: mine[f[0]]}
+		if m := shortStat.FindStringSubmatch(rest); m != nil {
+			c.Files, _ = strconv.Atoi(m[1])
+			c.Added, _ = strconv.Atoi(m[2])
+			c.Removed, _ = strconv.Atoi(m[3])
+		}
+		commits = append(commits, c)
+	}
+	return map[string]any{"repo": true, "root": root, "branch": strings.TrimSpace(branch), "commits": commits}, nil
+}
+
+var shaRe = regexp.MustCompile(`^[0-9a-f]{4,64}$`)
+
+// GitShow returns one commit's changes in GitDiff's shape (files, diff).
+func GitShow(ctx context.Context, dir, sha string) (map[string]any, error) {
+	if !shaRe.MatchString(sha) {
+		return nil, errors.New("bad commit id")
+	}
+	root, err := gitIn(ctx, dir, "rev-parse", "--show-toplevel")
+	if err != nil {
+		return map[string]any{"repo": false}, nil
+	}
+	root = strings.TrimSpace(root)
+	diff, err := gitIn(ctx, root, "show", "--no-color", "--no-ext-diff", "-M", "--format=", sha)
+	if err != nil {
+		return nil, fmt.Errorf("no commit %s", sha)
+	}
+	nums, _ := gitIn(ctx, root, "show", "--numstat", "-M", "--format=", sha)
+	type file struct {
+		Path    string `json:"path"`
+		Status  string `json:"status"`
+		Added   int    `json:"added"`
+		Removed int    `json:"removed"`
+	}
+	files := []file{}
+	for _, line := range strings.Split(nums, "\n") {
+		f := strings.SplitN(line, "\t", 3)
+		if len(f) != 3 {
+			continue
+		}
+		a, _ := strconv.Atoi(f[0])
+		r, _ := strconv.Atoi(f[1])
+		p := f[2]
+		if i := strings.Index(p, " => "); i >= 0 {
+			p = strings.TrimSuffix(p[i+4:], "}")
+		}
+		files = append(files, file{Path: p, Status: "M", Added: a, Removed: r})
+	}
+	head, _ := gitIn(ctx, root, "show", "-s", "--format=%h%x1f%s%x1f%an%x1f%at", sha)
+	meta := map[string]any{"repo": true, "root": root, "sha": sha, "files": files}
+	if f := strings.Split(strings.TrimSpace(head), "\x1f"); len(f) == 4 {
+		at, _ := strconv.ParseInt(f[3], 10, 64)
+		meta["short"], meta["subject"], meta["author"], meta["time"] = f[0], f[1], f[2], at*1000
+	}
+	truncated := false
+	if len(diff) > 3<<20 {
+		diff = diff[:3<<20]
+		truncated = true
+	}
+	meta["diff"], meta["truncated"] = diff, truncated
+	return meta, nil
 }

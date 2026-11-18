@@ -28,6 +28,8 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.outlined.Folder
+import io.github.sidd065.agentcompanion.ui.components.baseName
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.outlined.Chat
@@ -231,8 +233,19 @@ fun NewTerminalSheet(onDismiss: () -> Unit, hostPicker: @Composable () -> Unit =
                     kinds.forEach { (k, l) -> FilterChip(kind == k, { kind = k }, label = { Text(l) }) }
                 }
             }
-            OutlinedTextField(shortPath(cwd, home), {}, readOnly = true, label = { Text("Folder") }, modifier = Modifier.fillMaxWidth().clickable { picking = true },
-                trailingIcon = { TextButton(onClick = { picking = true }) { Text("Change") } })
+            // A row, not a text field: it can't be typed in, and a long path stays on one line.
+            Surface(shape = RoundedCornerShape(12.dp), color = MaterialTheme.colorScheme.surfaceContainerHigh, modifier = Modifier.fillMaxWidth().clickable { picking = true }) {
+                Row(Modifier.padding(start = 14.dp, end = 4.dp, top = 6.dp, bottom = 6.dp), verticalAlignment = Alignment.CenterVertically) {
+                    Icon(Icons.Outlined.Folder, null, Modifier.size(20.dp), tint = MaterialTheme.colorScheme.primary)
+                    Spacer(Modifier.width(10.dp))
+                    Column(Modifier.weight(1f)) {
+                        Text(baseName(cwd).ifBlank { "~" }, style = MaterialTheme.typography.titleSmall, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        Text(shortPath(cwd, home), style = MaterialTheme.typography.bodySmall, fontFamily = FontFamily.Monospace,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1, overflow = TextOverflow.StartEllipsis)
+                    }
+                    TextButton(onClick = { picking = true }) { Text("Change") }
+                }
+            }
             when (kind) {
                 "agy", "claude" -> {
                     io.github.sidd065.agentcompanion.ui.components.AgentFlagsCard(kind, kind = "tui", onEdit = { flagsOpen = true })

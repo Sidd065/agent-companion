@@ -8,6 +8,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -142,24 +143,28 @@ fun DiffScreen(sessionId: String?, path: String) {
         },
     ) { pad ->
         Column(Modifier.padding(pad).fillMaxSize()) {
-            if (sessionId != null) {
-                PrimaryTabRow(selectedTabIndex = tab) {
-                    Tab(tab == 0, { tab = 0 }, text = { Text("Uncommitted") })
-                    Tab(tab == 1, { tab = 1 }, text = { Text("Agent edits${agent?.size?.let { " · $it" } ?: ""}") })
+            val tabs = if (sessionId != null) listOf("Uncommitted", "Agent edits", "Commits") else listOf("Uncommitted", "Commits")
+            PrimaryTabRow(selectedTabIndex = tab.coerceAtMost(tabs.size - 1)) {
+                tabs.forEachIndexed { i, name ->
+                    Tab(tab == i, { tab = i }, text = { Text(if (name == "Agent edits") "Agent edits${agent?.size?.let { " · $it" } ?: ""}" else name) })
                 }
             }
             err?.let { ErrorBox(it) { reload++ } }
-            if (tab == 0) {
+            val repoPath = git?.root ?: sessionId?.let { conn.session(it)?.cwd } ?: path
+            if (tabs.getOrNull(tab) == "Commits") {
+                CommitsTab(conn, repoPath, settings.codeWrap, reload) { p -> nav.navigate(Routes.file(p)) }
+            } else if (tab == 0) {
                 val d = git
                 when {
                     d == null && err == null -> LoadingBox(text = "Running git diff…")
                     d == null -> {}
                     !d.repo -> EmptyState(Icons.Outlined.Refresh, "Not a git repository", "Switch to “Agent edits” to see what $who changed.")
-                    d.diff.isBlank() -> EmptyState(Icons.Outlined.Refresh, "No uncommitted changes", d.branch?.let { "On branch $it" })
+                    d.diff.isBlank() -> EmptyState(Icons.Outlined.Refresh, "No uncommitted changes",
+                        listOfNotNull(d.branch?.let { "On branch $it." }, "Committed work is under Commits.").joinToString(" "))
                     else -> {
                         val files = remember(d.diff) { UnifiedDiff.parse(d.diff) }
                         FileDiffList(
-                            header = "${d.branch ?: ""} · ${files.size} files · +${files.sumOf { it.added }} −${files.sumOf { it.removed }}" + if (d.truncated) " (truncated)" else "",
+                            header = "${d.branch ?: ""} · ${filesLabel(files.size)} · +${files.sumOf { it.added }} −${files.sumOf { it.removed }}" + if (d.truncated) " (truncated)" else "",
                             files = files.map { Triple(it.path, it.lines, it.binary) },
                             wrap = settings.codeWrap,
                             onOpen = { p -> nav.navigate(Routes.file((d.root ?: "") + "/" + p)) },
@@ -180,7 +185,7 @@ fun DiffScreen(sessionId: String?, path: String) {
                                 Triple(p, LineDiff.diff(f.originalContent, f.modifiedContent), false)
                             }
                         }
-                        FileDiffList("${files.size} files edited by $who", files, settings.codeWrap, onOpen = { p -> nav.navigate(Routes.file(p)) },
+                        FileDiffList("${filesLabel(files.size)} edited by $who", files, settings.codeWrap, onOpen = { p -> nav.navigate(Routes.file(p)) },
                             onLine = onLine, marked = { p, l -> draftFor(p, l) != null })
                     }
                 }
@@ -198,6 +203,87 @@ fun DiffScreen(sessionId: String?, path: String) {
             drafts.add(io.github.sidd065.agentcompanion.core.DraftComment(kind = "diff", uri = p, startLine = lineNo(l), endLine = lineNo(l), quote = l.text, comment = text))
             editing = null
         }
+    }
+}
+
+/** Recent commits of the repo at [path]; one opens as a diff. */
+@Composable
+private fun CommitsTab(conn: io.github.sidd065.agentcompanion.net.HostConnection, path: String, wrap: Boolean, reload: Int, onOpen: (String) -> Unit) {
+    val ex = LocalExtra.current
+    var log by remember { mutableStateOf<io.github.sidd065.agentcompanion.core.GitLog?>(null) }
+    var err by remember { mutableStateOf<String?>(null) }
+    var open by androidx.compose.runtime.saveable.rememberSaveable { mutableStateOf<String?>(null) }
+    var shown by remember { mutableStateOf<GitDiff?>(null) }
+    LaunchedEffect(path, reload) {
+        err = null; log = null
+        runCatching { log = conn.rpc.call("git.log", params { put("path", path); put("limit", 40) }).decode(io.github.sidd065.agentcompanion.core.GitLog.serializer()) }
+            .onFailure { err = it.message }
+    }
+    LaunchedEffect(open, reload) {
+        shown = null
+        val sha = open ?: return@LaunchedEffect
+        runCatching { shown = conn.rpc.call("git.show", params { put("path", path); put("sha", sha) }).decode(GitDiff.serializer()) }
+            .onFailure { err = it.message }
+    }
+    androidx.activity.compose.BackHandler(enabled = open != null) { open = null }
+    err?.let { Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(16.dp)) }
+    if (open != null) {
+        val d = shown
+        if (d == null) { LoadingBox(text = "Reading the commit…"); return }
+        val files = remember(d.diff) { UnifiedDiff.parse(d.diff) }
+        Column(Modifier.fillMaxSize()) {
+            Row(Modifier.fillMaxWidth().clickable { open = null }.padding(horizontal = 8.dp, vertical = 6.dp), verticalAlignment = Alignment.CenterVertically) {
+                Icon(Icons.AutoMirrored.Filled.ArrowBack, "All commits", Modifier.size(20.dp))
+                Spacer(Modifier.width(8.dp))
+                Text(d.subject ?: d.sha.orEmpty(), style = MaterialTheme.typography.titleSmall, maxLines = 2, overflow = TextOverflow.Ellipsis)
+            }
+            if (files.isEmpty()) EmptyState(Icons.Outlined.Refresh, "No file changes", "This commit changes no files.")
+            else FileDiffList(
+                header = "${d.sha?.take(7).orEmpty()} · ${filesLabel(files.size)} · +${files.sumOf { it.added }} −${files.sumOf { it.removed }}" + if (d.truncated) " (truncated)" else "",
+                files = files.map { Triple(it.path, it.lines, it.binary) }, wrap = wrap,
+                onOpen = { p -> onOpen((d.root ?: path) + "/" + p) },
+            )
+        }
+        return
+    }
+    val l = log
+    when {
+        l == null && err == null -> LoadingBox(text = "Reading git log…")
+        l == null -> {}
+        !l.repo -> EmptyState(Icons.Outlined.Refresh, "Not a git repository", null)
+        l.commits.isEmpty() -> EmptyState(Icons.Outlined.Refresh, "No commits yet", null)
+        else -> {
+            val mine = l.commits.filter { it.mine }
+            val rest = l.commits.filterNot { it.mine }
+            LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(vertical = 8.dp)) {
+                if (mine.isNotEmpty()) {
+                    item { Text("On ${l.branch ?: "this branch"} · not on main", style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.primary,
+                        modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp)) }
+                    items(mine, key = { "m" + it.sha }) { c -> CommitRow(c) { open = c.sha } }
+                }
+                if (rest.isNotEmpty()) {
+                    item { Text(if (mine.isEmpty()) "Recent commits" else "Earlier", style = MaterialTheme.typography.labelLarge, color = ex.muted,
+                        modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp)) }
+                    items(rest, key = { "r" + it.sha }) { c -> CommitRow(c) { open = c.sha } }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun CommitRow(c: io.github.sidd065.agentcompanion.core.GitCommit, onClick: () -> Unit) {
+    val ex = LocalExtra.current
+    Row(Modifier.fillMaxWidth().clickable(onClick = onClick).padding(horizontal = 16.dp, vertical = 10.dp), verticalAlignment = Alignment.CenterVertically) {
+        Column(Modifier.weight(1f)) {
+            Text(c.subject, style = MaterialTheme.typography.bodyMedium, maxLines = 2, overflow = TextOverflow.Ellipsis)
+            Text(listOf(c.short, c.author, io.github.sidd065.agentcompanion.ui.components.relTime(c.time), "${c.files} file${if (c.files == 1) "" else "s"}").joinToString(" · "),
+                style = MaterialTheme.typography.labelSmall, color = ex.muted, maxLines = 1, overflow = TextOverflow.Ellipsis)
+        }
+        Spacer(Modifier.width(8.dp))
+        Text("+${c.added}", color = ex.diffAdd, style = MaterialTheme.typography.labelMedium)
+        Spacer(Modifier.width(6.dp))
+        Text("−${c.removed}", color = ex.diffDel, style = MaterialTheme.typography.labelMedium)
     }
 }
 
@@ -249,3 +335,5 @@ private fun FileDiffList(
         }
     }
 }
+
+private fun filesLabel(n: Int) = if (n == 1) "1 file" else "$n files"

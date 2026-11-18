@@ -408,7 +408,10 @@ func (a *Agent) open(ctx context.Context, mode, sid, cwd string) (any, error) {
 		return nil, errors.New("this adapter already hosts a session")
 	}
 	a.started = true
-	if mode == "new" || sid == "" {
+	// A new conversation keeps the id it was given: after rewinding to the
+	// first message the session starts over under its own id, so fork, rename
+	// and history still find its transcript.
+	if sid == "" {
 		sid = NewUUID()
 		mode = "new"
 	}
@@ -574,9 +577,24 @@ func (a *Agent) modesLocked() *acp.Modes {
 func (a *Agent) modelsLocked() *acp.Models {
 	ms := &acp.Models{CurrentModelID: firstNonEmpty(a.model, "default")}
 	for _, m := range a.models {
-		ms.AvailableModels = append(ms.AvailableModels, acp.Model{ModelID: m.Value, Name: m.DisplayName, Description: m.Description})
+		name, desc := m.DisplayName, m.Description
+		if m.Value == "default" {
+			name, desc = defaultModelLabel(m.DisplayName, m.Description)
+		}
+		ms.AvailableModels = append(ms.AvailableModels, acp.Model{ModelID: m.Value, Name: name, Description: desc})
 	}
 	return ms
+}
+
+// defaultModelLabel names Claude's "Default (recommended)" entry after the model
+// it stands for: its description reads "Opus 5.5 · Best for everyday, complex
+// tasks", so the phone shows "Opus 5.5 (default)".
+func defaultModelLabel(name, desc string) (string, string) {
+	model, rest, ok := strings.Cut(desc, " · ")
+	if !ok || strings.TrimSpace(model) == "" || len(model) > 40 {
+		return name, desc
+	}
+	return strings.TrimSpace(model) + " (default)", strings.TrimSpace(rest)
 }
 
 func (a *Agent) configOptionsLocked() []acp.ConfigOption {

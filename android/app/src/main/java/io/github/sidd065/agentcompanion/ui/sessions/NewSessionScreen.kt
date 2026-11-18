@@ -362,12 +362,23 @@ fun DirectoryPicker(conn: HostConnection, start: String, onDismiss: () -> Unit, 
             }
             error?.let { Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(16.dp)) }
             LazyColumn(Modifier.fillMaxWidth()) {
-                // Recent folders where the picker opens and at home, before browsing away.
-                if (recent.isNotEmpty() && (path == home || path == start)) {
-                    item { Text("Recent", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.primary, modifier = Modifier.padding(start = 16.dp, top = 8.dp)) }
-                    items(recent.filter { it != path }) { r ->
-                        ListItem(headlineContent = { Text(baseName(r)) }, supportingContent = { Text(shortPath(r, home), fontFamily = FontFamily.Monospace) },
-                            leadingContent = { Icon(Icons.Outlined.History, null) }, modifier = Modifier.clickable { path = r })
+                // Recent folders where the picker opens and at home: one row of chips,
+                // so ".." and the folder's own subfolders stay in view.
+                val others = recent.filter { it != path }
+                if (others.isNotEmpty() && (path == home || path == start)) {
+                    item {
+                        androidx.compose.foundation.lazy.LazyRow(
+                            contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 12.dp, vertical = 4.dp),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        ) {
+                            items(others) { r ->
+                                androidx.compose.material3.AssistChip(
+                                    onClick = { path = r },
+                                    label = { Text(baseName(r).ifBlank { r }, maxLines = 1) },
+                                    leadingIcon = { Icon(Icons.Outlined.History, null, Modifier.size(16.dp)) },
+                                )
+                            }
+                        }
                     }
                     item { HorizontalDivider() }
                 }

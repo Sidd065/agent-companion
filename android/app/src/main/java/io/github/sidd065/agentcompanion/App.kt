@@ -82,7 +82,7 @@ class AppGraph(val app: Application) {
 
     /** Session currently on screen (suppresses its notifications). */
     val visibleSession = MutableStateFlow<String?>(null)
-    private val shown = ArrayList<Pair<Any, String>>()
+    private val shown = ArrayList<Triple<Any, String, Set<String>?>>()
 
     /**
      * Marks [sessionId] as on screen (no notifications for it) until the
@@ -90,18 +90,30 @@ class AppGraph(val app: Application) {
      * of the chat (side questions) and the chat being disposed after it
      * don't clear each other.
      */
-    fun showSession(sessionId: String): () -> Unit {
+    fun showSession(sessionId: String, only: Set<String>? = null): () -> Unit {
         val token = Any()
         synchronized(shown) {
-            shown.add(token to sessionId)
+            shown.add(Triple(token, sessionId, only))
             visibleSession.value = sessionId
         }
+        notifier.flushHeldBack(leaving = false)
         return {
             synchronized(shown) {
                 shown.removeAll { it.first === token }
                 visibleSession.value = shown.lastOrNull()?.second
             }
+            notifier.flushHeldBack(leaving = false)
         }
+    }
+
+    /**
+     * Whether the screen on top already shows notifications of [kind] for
+     * [sessionId]. The side questions screen covers only its answers: a
+     * permission request still notifies there.
+     */
+    fun covers(sessionId: String, kind: String): Boolean = synchronized(shown) {
+        val top = shown.lastOrNull() ?: return false
+        top.second == sessionId && (top.third == null || kind in top.third!!)
     }
     val foreground = MutableStateFlow(false)
     val notifier = Notifier(app)
@@ -116,6 +128,7 @@ class AppGraph(val app: Application) {
 
             override fun onStop(owner: LifecycleOwner) {
                 foreground.value = false
+                notifier.flushHeldBack()
             }
         })
         scope.launch {

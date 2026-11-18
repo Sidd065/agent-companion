@@ -446,8 +446,14 @@ func AppendTitle(path, id, title string) error {
 
 // DeleteSession removes a transcript and its sidecar directory.
 func DeleteSession(path string) error {
-	if err := os.Remove(path); err != nil {
+	if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return err
+	}
+	// Transcripts set aside by rewinding to the first message.
+	if old, _ := filepath.Glob(path + ".rewound-*"); len(old) > 0 {
+		for _, f := range old {
+			_ = os.Remove(f)
+		}
 	}
 	return os.RemoveAll(strings.TrimSuffix(path, ".jsonl"))
 }

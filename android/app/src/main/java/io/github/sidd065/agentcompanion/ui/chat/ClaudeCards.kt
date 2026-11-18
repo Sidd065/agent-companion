@@ -48,6 +48,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import io.github.sidd065.agentcompanion.core.Item
 import io.github.sidd065.agentcompanion.net.params
@@ -233,8 +234,8 @@ fun ClaudePlanCard(item: Item, actions: TranscriptActions) {
                 Spacer(Modifier.width(8.dp))
                 Column(Modifier.weight(1f)) {
                     Text(if (pending) "Plan ready for review" else "Plan", style = MaterialTheme.typography.titleSmall)
-                    plan.lineSequence().firstOrNull { it.isNotBlank() }?.trim()?.trimStart('#', ' ')?.let {
-                        Text(it, style = MaterialTheme.typography.bodySmall, color = ex.muted, maxLines = 1)
+                    plan.lineSequence().firstOrNull { it.isNotBlank() }?.let { plainPreview(it) }?.let {
+                        Text(it, style = MaterialTheme.typography.bodySmall, color = ex.muted, maxLines = 1, overflow = TextOverflow.Ellipsis)
                     }
                 }
                 Icon(if (expanded) Icons.Outlined.ExpandLess else Icons.Outlined.ExpandMore, null)

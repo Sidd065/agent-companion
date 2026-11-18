@@ -27,3 +27,11 @@ func TestAsidePrompt(t *testing.T) {
 		t.Errorf("the chain should be oldest first:\n%s", p)
 	}
 }
+
+func TestRewindFilesNote(t *testing.T) {
+	for n, want := range map[int]string{-1: " and its file changes", 0: " (no file changes to undo)", 1: " and 1 file", 2: " and 2 files"} {
+		if got := rewindFilesNote(n); got != want {
+			t.Errorf("rewindFilesNote(%d) = %q, want %q", n, got, want)
+		}
+	}
+}

@@ -39,7 +39,8 @@ and terminals of all your computers together.
   share it, quote it into your next message or ask a follow-up. Answers wait for you if you leave.
 - **Artifacts and plans**, rendered, with comments on any paragraph, list item (nested ones too) or code
   block: select text and pick Comment, or turn on commenting. Once you reply or approve, the review
-  request clears. You can also comment on single lines in the diff viewer, with line wrapping a tap away.
+  request clears. You can also comment on single lines in the diff viewer, with line wrapping a tap away,
+  and review what the agent committed: the Changes screen lists the branch's commits with their diffs.
 - **History**: every conversation on each computer, with fork, rewind (previewing what it undoes), rename,
   pin, archive, delete, export and per-file diffs.
 - **Files**: browse, edit, upload, download, create, rename, move and delete files on any computer.
@@ -64,8 +65,9 @@ and terminals of all your computers together.
 - **Rewind** restores files from Claude's checkpoints as well as the conversation; **fork** branches at any
   message. Turns Claude starts on its own, when background agents report back, appear as they happen.
 - **Your terminal sessions too**: conversations started with `claude` on the laptop are in the history.
-  While one is open in a terminal, the phone follows it live, read-only (fork it to continue). Sessions
-  started from the phone show up in `claude --resume`.
+  While one is open in a terminal, the phone follows it live; if that terminal is one of the app's, what
+  you send from the chat is typed into it (otherwise fork it to continue). Sessions started from the
+  phone show up in `claude --resume`.
 - **MCP servers** (status, enable/disable, reconnect) and, on the Host screen, the Claude Code version,
   plan usage limits (5-hour and weekly), settings.json and `claude update`.
 

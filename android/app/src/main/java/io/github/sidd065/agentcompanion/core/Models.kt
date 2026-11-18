@@ -321,6 +321,31 @@ data class GitDiff(
     val files: List<GitFile> = emptyList(),
     val diff: String = "",
     val truncated: Boolean = false,
+    // git.show (one commit): what it is.
+    val sha: String? = null,
+    val subject: String? = null,
+)
+
+@Serializable
+data class GitCommit(
+    val sha: String,
+    val short: String = "",
+    val subject: String = "",
+    val author: String = "",
+    val time: Long = 0,
+    val files: Int = 0,
+    val added: Int = 0,
+    val removed: Int = 0,
+    /** On this branch but not on its upstream or main: what was added here. */
+    val mine: Boolean = false,
+)
+
+@Serializable
+data class GitLog(
+    val repo: Boolean = false,
+    val root: String? = null,
+    val branch: String? = null,
+    val commits: List<GitCommit> = emptyList(),
 )
 
 @Serializable

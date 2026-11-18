@@ -736,6 +736,20 @@ func (s *Server) registerMethods() {
 		}](p)
 		return core.GitDiff(ctx, fsops.Resolve(in.Path))
 	}
+	m["git.log"] = func(ctx context.Context, c *core.Client, p json.RawMessage) (any, error) {
+		in, _ := bind[struct {
+			Path  string `json:"path"`
+			Limit int    `json:"limit"`
+		}](p)
+		return core.GitLog(ctx, fsops.Resolve(in.Path), in.Limit)
+	}
+	m["git.show"] = func(ctx context.Context, c *core.Client, p json.RawMessage) (any, error) {
+		in, _ := bind[struct {
+			Path string `json:"path"`
+			SHA  string `json:"sha"`
+		}](p)
+		return core.GitShow(ctx, fsops.Resolve(in.Path), in.SHA)
+	}
 
 	// ---- terminals ----
 	m["term.list"] = func(ctx context.Context, c *core.Client, p json.RawMessage) (any, error) {

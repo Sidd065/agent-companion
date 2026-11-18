@@ -128,7 +128,7 @@ fun SideQuestionsScreen(sessionId: String) {
     DisposableEffect(store) {
         store.asideViewers++
         store.unseenAside.value = null
-        val hide = g.showSession(sessionId)
+        val hide = g.showSession(sessionId, only = setOf("aside"))
         g.notifier.cancelAside(conn.config.id, sessionId)
         onDispose {
             store.asideViewers--

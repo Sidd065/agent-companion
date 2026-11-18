@@ -839,6 +839,21 @@ func (m *Manager) revertPreviewClaude(ctx context.Context, s *Session, itemID st
 	return raw, 0, err
 }
 
+// rewindFilesNote completes "Rewound conversation…" for n restored files (-1:
+// Claude didn't say how many).
+func rewindFilesNote(n int) string {
+	switch {
+	case n < 0:
+		return " and its file changes"
+	case n == 0:
+		return " (no file changes to undo)"
+	case n == 1:
+		return " and 1 file"
+	default:
+		return fmt.Sprintf(" and %d files", n)
+	}
+}
+
 func (m *Manager) rewindClaude(ctx context.Context, s *Session, itemID string, conversationOnly bool) (string, error) {
 	resumeAt, prefill, idx, err := m.claudeCut(s, itemID)
 	first := errors.Is(err, errFirstMessage)
@@ -854,23 +869,32 @@ func (m *Manager) rewindClaude(ctx context.Context, s *Session, itemID string, c
 	s.mu.Unlock()
 	filesNote := ""
 	if !conversationOnly && ref != "" {
-		raw, err := m.ClaudeControl(ctx, id, "rewind_files", map[string]any{"user_message_id": ref})
-		if err != nil {
-			return prefill, fmt.Errorf("restore files: %w", err)
-		}
-		var r struct {
+		type rewound struct {
 			CanRewind    *bool    `json:"canRewind"`
 			Error        string   `json:"error"`
 			FilesChanged []string `json:"filesChanged"`
 		}
+		// Only a dry run lists the files; the rewind itself answers {canRewind}.
+		files := -1
+		if raw, err := m.ClaudeControl(ctx, id, "rewind_files", map[string]any{"user_message_id": ref, "dry_run": true}); err == nil {
+			var d rewound
+			if json.Unmarshal(raw, &d) == nil && d.FilesChanged != nil {
+				files = len(d.FilesChanged)
+			}
+		}
+		raw, err := m.ClaudeControl(ctx, id, "rewind_files", map[string]any{"user_message_id": ref})
+		if err != nil {
+			return prefill, fmt.Errorf("restore files: %w", err)
+		}
+		var r rewound
 		_ = json.Unmarshal(raw, &r)
 		if r.Error != "" && (r.CanRewind == nil || !*r.CanRewind) {
 			return prefill, fmt.Errorf("can't restore files: %s", r.Error)
 		}
-		filesNote = fmt.Sprintf(" and %d file(s)", len(r.FilesChanged))
-		if len(r.FilesChanged) == 0 {
-			filesNote = " (no file changes to undo)"
+		if r.FilesChanged != nil {
+			files = len(r.FilesChanged)
 		}
+		filesNote = rewindFilesNote(files)
 	}
 	s.Hibernate()
 	if first {
@@ -1095,6 +1119,11 @@ func (m *Manager) deleteClaude(id string) error {
 		m.mu.Unlock()
 		_ = os.Remove(m.sessionFile(id))
 		_ = os.RemoveAll(m.attachmentDir(id))
+	}
+	if pathErr != nil && cwd != "" {
+		// No live transcript (rewound to the first message, or never saved):
+		// still clear what it left in its project folder.
+		path, pathErr = filepath.Join(m.claudeDir(), "projects", claude.SanitizePath(cwd), id+".jsonl"), nil
 	}
 	if pathErr == nil {
 		if err := claude.DeleteSession(path); err != nil {

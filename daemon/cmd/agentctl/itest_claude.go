@@ -303,6 +303,26 @@ func (t *tester) scClaudeOps() {
 	t.call("session.prompt", map[string]any{"id": fid, "text": "What did a.txt contain after my first message? Reply with just the word."})
 	t.check(t.waitTurns(fid, 1, 3*time.Minute), "fork turn")
 	t.check(strings.Contains(strings.ToLower(lastAgentText(ftr)), "one"), "fork knows the history: %q", lastAgentText(ftr))
+	// rewind the fork to its very first message: it starts over under its own
+	// id, so a later fork (or rename, history) still finds its transcript
+	var first map[string]any
+	for _, it := range ftr.items {
+		if it["kind"] == "user" {
+			first = it
+			break
+		}
+	}
+	if first != nil {
+		r2 := t.call("session.rewind", map[string]any{"id": fid, "itemId": first["id"], "conversationOnly": true})
+		t.check(r2 != nil, "rewind to the first message")
+		t.call("session.prompt", map[string]any{"id": fid, "text": "Reply with just the word: fresh"})
+		t.check(t.waitTurns(fid, 2, 3*time.Minute), "turn after rewinding to the first message")
+		fr2 := t.call("session.fork", map[string]any{"id": fid})
+		t.check(fr2 != nil && fr2["session"] != nil, "fork after rewinding to the first message")
+		if fr2 != nil && fr2["session"] != nil {
+			t.created = append(t.created, fr2["session"].(map[string]any)["id"].(string))
+		}
+	}
 	// export
 	ex := t.call("session.export", map[string]any{"id": id})
 	t.check(ex != nil && strings.Contains(ex["markdown"].(string), "## You"), "export markdown")

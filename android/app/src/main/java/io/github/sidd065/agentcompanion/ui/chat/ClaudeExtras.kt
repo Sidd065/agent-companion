@@ -85,7 +85,7 @@ fun LiveElsewhereBanner(s: SessionSummary?, onOpenTerminal: (() -> Unit)? = null
             Icon(Icons.Outlined.Terminal, null, Modifier.size(16.dp), tint = ex.warning)
             Spacer(Modifier.width(8.dp))
             Text(
-                if (onOpenTerminal != null) "Running in a terminal ($st). It updates here live; type in the terminal, or fork it."
+                if (onOpenTerminal != null) "Running in a terminal here ($st). It updates live, and what you send is typed into it."
                 else "Open in Claude Code on the computer ($st). It updates here live; close it there to continue here, or fork it.",
                 style = MaterialTheme.typography.bodySmall, modifier = Modifier.weight(1f),
             )
