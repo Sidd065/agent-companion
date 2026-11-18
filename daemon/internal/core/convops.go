@@ -9,8 +9,8 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"sort"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -679,14 +679,23 @@ func GitLog(ctx context.Context, dir string, n int) (map[string]any, error) {
 	}
 	root = strings.TrimSpace(root)
 	branch, _ := gitIn(ctx, root, "rev-parse", "--abbrev-ref", "HEAD")
-	out, err := gitIn(ctx, root, "log", "-n", strconv.Itoa(n), "--format=%x1e%H%x1f%h%x1f%s%x1f%an%x1f%at", "--shortstat")
+	// A merge's stats are what it brought onto the branch (against its first parent).
+	out, err := gitIn(ctx, root, "log", "-n", strconv.Itoa(n), "--format=%x1e%H%x1f%h%x1f%s%x1f%an%x1f%at", "--shortstat", "--diff-merges=first-parent")
 	if err != nil {
 		return map[string]any{"repo": true, "root": root, "branch": strings.TrimSpace(branch), "commits": []Commit{}}, nil
 	}
 	mine := map[string]bool{}
+	baseName, upstream := "", false
 	for _, base := range []string{"@{upstream}", "main", "master"} {
 		if _, err := gitIn(ctx, root, "rev-parse", "--verify", "-q", base); err != nil {
 			continue
+		}
+		baseName = base
+		if base == "@{upstream}" {
+			upstream = true
+			if u, err := gitIn(ctx, root, "rev-parse", "--abbrev-ref", "@{upstream}"); err == nil && strings.TrimSpace(u) != "" {
+				baseName = strings.TrimSpace(u)
+			}
 		}
 		if ahead, err := gitIn(ctx, root, "rev-list", base+"..HEAD"); err == nil {
 			for _, s := range strings.Fields(ahead) {
@@ -715,7 +724,8 @@ func GitLog(ctx context.Context, dir string, n int) (map[string]any, error) {
 		}
 		commits = append(commits, c)
 	}
-	return map[string]any{"repo": true, "root": root, "branch": strings.TrimSpace(branch), "commits": commits}, nil
+	// base: what "mine" commits are missing from; upstream: base is the branch's upstream (they are unpushed).
+	return map[string]any{"repo": true, "root": root, "branch": strings.TrimSpace(branch), "commits": commits, "base": baseName, "upstream": upstream}, nil
 }
 
 var shaRe = regexp.MustCompile(`^[0-9a-f]{4,64}$`)
@@ -730,11 +740,12 @@ func GitShow(ctx context.Context, dir, sha string) (map[string]any, error) {
 		return map[string]any{"repo": false}, nil
 	}
 	root = strings.TrimSpace(root)
-	diff, err := gitIn(ctx, root, "show", "--no-color", "--no-ext-diff", "-M", "--format=", sha)
+	// A merge shows what it brought in (against its first parent), not git's combined diff, which is empty for a clean merge.
+	diff, err := gitIn(ctx, root, "show", "--no-color", "--no-ext-diff", "-M", "--diff-merges=first-parent", "--format=", sha)
 	if err != nil {
 		return nil, fmt.Errorf("no commit %s", sha)
 	}
-	nums, _ := gitIn(ctx, root, "show", "--numstat", "-M", "--format=", sha)
+	nums, _ := gitIn(ctx, root, "show", "--numstat", "-M", "--diff-merges=first-parent", "--format=", sha)
 	type file struct {
 		Path    string `json:"path"`
 		Status  string `json:"status"`

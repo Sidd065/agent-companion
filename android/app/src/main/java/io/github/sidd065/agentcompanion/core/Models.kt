@@ -346,6 +346,10 @@ data class GitLog(
     val root: String? = null,
     val branch: String? = null,
     val commits: List<GitCommit> = emptyList(),
+    /** What the "mine" commits are missing from: the upstream (e.g. origin/main) or main/master. */
+    val base: String? = null,
+    /** [base] is the branch's upstream, so those commits are unpushed. */
+    val upstream: Boolean = false,
 )
 
 @Serializable

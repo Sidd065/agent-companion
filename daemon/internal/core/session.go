@@ -650,7 +650,15 @@ func (s *Session) onPermission(c *acp.Conn, id json.RawMessage, params json.RawM
 	label := s.agentLabelLocked()
 	s.mu.Unlock()
 	s.emit()
-	n := Notification{SessionID: sid, Kind: "permission", Title: label + " needs your permission", Body: firstNonEmpty(tc.Title, "Tool call") + " — " + title,
+	what := firstNonEmpty(tc.Title, "Tool call")
+	if tc.Kind == "execute" {
+		// The title is only the command's first line; a notification can be
+		// answered without opening the chat, so it carries the whole command.
+		if cmd := commandText(tc.RawInput); cmd != "" {
+			what = clipRunes(cmd, 1500)
+		}
+	}
+	n := Notification{SessionID: sid, Kind: "permission", Title: label + " needs your permission", Body: what + " — " + title,
 		ReqID: reqID, Options: req.Options}
 	switch am.Kind {
 	case "question":
@@ -659,6 +667,29 @@ func (s *Session) onPermission(c *acp.Conn, id json.RawMessage, params json.RawM
 		n.Kind, n.Title, n.Body = "plan", "Plan ready for review", title
 	}
 	s.m.notify(n)
+}
+
+// commandText returns the command line of a shell tool's input: Claude's Bash
+// uses "command", agy's run_command "CommandLine".
+func commandText(raw json.RawMessage) string {
+	var in map[string]any
+	if json.Unmarshal(raw, &in) != nil {
+		return ""
+	}
+	for _, k := range []string{"command", "CommandLine", "cmd"} {
+		if v, ok := in[k].(string); ok && strings.TrimSpace(v) != "" {
+			return strings.TrimSpace(v)
+		}
+	}
+	return ""
+}
+
+// clipRunes shortens s to at most n runes, marking the cut with "…".
+func clipRunes(s string, n int) string {
+	if r := []rune(s); len(r) > n {
+		return string(r[:n]) + "…"
+	}
+	return s
 }
 
 // questionText returns the first question of an AskUserQuestion input.

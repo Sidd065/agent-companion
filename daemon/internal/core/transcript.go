@@ -460,7 +460,7 @@ func (t *Transcript) ToolCall(raw json.RawMessage, isNew bool) ([]Op, *Item) {
 		tl.Output = u.RawOutput
 	}
 	if present(u.Content) {
-		tl.Content = u.Content
+		tl.Content = compactDiffs(u.Content)
 	}
 	if created {
 		return []Op{t.add(it)}, it

@@ -586,10 +586,26 @@ func (a *Agent) modelsLocked() *acp.Models {
 	return ms
 }
 
+// RelabelDefaultModel applies defaultModelLabel to a model list saved before
+// agentc named the default entry (sessions from 0.3.4 and older).
+func RelabelDefaultModel(ms *acp.Models) {
+	if ms == nil {
+		return
+	}
+	for i, m := range ms.AvailableModels {
+		if m.ModelID == "default" {
+			ms.AvailableModels[i].Name, ms.AvailableModels[i].Description = defaultModelLabel(m.Name, m.Description)
+		}
+	}
+}
+
 // defaultModelLabel names Claude's "Default (recommended)" entry after the model
 // it stands for: its description reads "Opus 5.5 · Best for everyday, complex
 // tasks", so the phone shows "Opus 5.5 (default)".
 func defaultModelLabel(name, desc string) (string, string) {
+	if strings.HasSuffix(name, "(default)") {
+		return name, desc // already named after its model
+	}
 	model, rest, ok := strings.Cut(desc, " · ")
 	if !ok || strings.TrimSpace(model) == "" || len(model) > 40 {
 		return name, desc

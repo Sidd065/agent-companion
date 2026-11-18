@@ -51,6 +51,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import io.github.sidd065.agentcompanion.core.AgentFileDiff
 import io.github.sidd065.agentcompanion.core.GitDiff
+import io.github.sidd065.agentcompanion.core.GitLog
 import io.github.sidd065.agentcompanion.graph
 import io.github.sidd065.agentcompanion.net.decode
 import io.github.sidd065.agentcompanion.net.params
@@ -257,7 +258,7 @@ private fun CommitsTab(conn: io.github.sidd065.agentcompanion.net.HostConnection
             val rest = l.commits.filterNot { it.mine }
             LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(vertical = 8.dp)) {
                 if (mine.isNotEmpty()) {
-                    item { Text("On ${l.branch ?: "this branch"} · not on main", style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.primary,
+                    item { Text(mineLabel(l), style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.primary,
                         modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp)) }
                     items(mine, key = { "m" + it.sha }) { c -> CommitRow(c) { open = c.sha } }
                 }
@@ -337,3 +338,14 @@ private fun FileDiffList(
 }
 
 private fun filesLabel(n: Int) = if (n == 1) "1 file" else "$n files"
+
+/** Heading for the commits on this branch that its base doesn't have. */
+internal fun mineLabel(l: GitLog): String {
+    val branch = l.branch?.takeIf { it.isNotBlank() && it != "HEAD" } ?: "this branch"
+    val base = l.base?.takeIf { it.isNotBlank() }
+    return when {
+        l.upstream -> "On $branch · not pushed" + (base?.let { " to $it" } ?: "")
+        base != null -> "On $branch · not on $base"
+        else -> "On $branch"
+    }
+}

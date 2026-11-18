@@ -15,6 +15,7 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.FlowRow
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -81,6 +82,7 @@ import androidx.compose.ui.unit.dp
 import coil3.compose.AsyncImage
 import io.github.sidd065.agentcompanion.core.AppJson
 import io.github.sidd065.agentcompanion.core.Item
+import io.github.sidd065.agentcompanion.core.Perm
 import io.github.sidd065.agentcompanion.core.Tool
 import io.github.sidd065.agentcompanion.net.HostConnection
 import io.github.sidd065.agentcompanion.net.decode
@@ -135,13 +137,22 @@ fun Tool.commandOutput(): Pair<Int?, String> {
     return exit to body
 }
 
-data class FileDiff(val path: String, val old: String?, val new: String?)
+/** One file's change. agentc trims big diffs to the changed lines; [startLine] is where the kept text starts in the file. */
+data class FileDiff(val path: String, val old: String?, val new: String?, val startLine: Int = 1)
 
 fun Tool.diffs(): List<FileDiff> = content.arr()?.mapNotNull { c ->
     val o = c.obj() ?: return@mapNotNull null
     if (o.str("type") != "diff") return@mapNotNull null
-    FileDiff(o.str("path") ?: "", o.str("oldText"), o.str("newText"))
+    FileDiff(o.str("path") ?: "", o.str("oldText"), o.str("newText"), (o["line"] as? JsonPrimitive)?.intOrNull?.coerceAtLeast(1) ?: 1)
 } ?: emptyList()
+
+/** The diff's lines, numbered as in the file. */
+fun FileDiff.lines(): List<io.github.sidd065.agentcompanion.ui.components.DiffLine> {
+    val lines = LineDiff.diff(old, new)
+    val k = startLine - 1
+    if (k <= 0) return lines
+    return lines.map { it.copy(oldNo = if (it.oldNo > 0) it.oldNo + k else 0, newNo = if (it.newNo > 0) it.newNo + k else 0) }
+}
 
 fun Tool.path(): String? = locations.arr()?.firstOrNull().str("path") ?: input.str("Path") ?: input.str("path") ?: input.str("AbsolutePath") ?: input.str("file_path")
 
@@ -624,7 +635,7 @@ fun ToolDetails(t: Tool, actions: TranscriptActions, wrap: Boolean) {
                     baseName(d.path), style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.primary,
                     modifier = Modifier.clickable { actions.onOpenFile(d.path) },
                 )
-                DiffView(LineDiff.diff(d.old, d.new), Modifier.fillMaxWidth().clip(RoundedCornerShape(8.dp)), wrap = wrap, maxLines = 400)
+                DiffView(d.lines(), Modifier.fillMaxWidth().clip(RoundedCornerShape(8.dp)), wrap = wrap, maxLines = 400)
             }
         }
         else -> {
@@ -642,6 +653,25 @@ fun ToolDetails(t: Tool, actions: TranscriptActions, wrap: Boolean) {
                 Text("Output", style = MaterialTheme.typography.labelSmall, color = ex.muted)
                 CodeBox(out, wrap = wrap, maxChars = 40_000)
             }
+        }
+    }
+}
+
+/** The full command a shell permission request would run, from its tool call's input. */
+internal fun permCommand(p: Perm, actions: TranscriptActions): String? =
+    if (p.toolKind != "execute") null
+    else p.callId?.let(actions.toolFor)?.command()?.trimEnd()?.takeIf { it.isNotBlank() }
+
+/** A command in a code box. Over [collapsedLines] lines it starts folded, with a toggle to show the rest. */
+@Composable
+fun CommandBox(text: String, collapsedLines: Int = 30) {
+    val lines = remember(text) { text.lines() }
+    val long = lines.size > collapsedLines + 4
+    var all by remember(text) { mutableStateOf(false) }
+    CodeBox(if (long && !all) lines.take(collapsedLines).joinToString("\n") else text, wrap = true)
+    if (long) {
+        androidx.compose.material3.TextButton(onClick = { all = !all }, contentPadding = PaddingValues(horizontal = 4.dp)) {
+            Text(if (all) "Show less" else "Show all ${lines.size} lines")
         }
     }
 }
@@ -689,7 +719,7 @@ fun PermCard(item: Item, actions: TranscriptActions) {
                 Text(p.title.orEmpty(), style = MaterialTheme.typography.labelSmall, fontFamily = FontFamily.Monospace, color = ex.muted,
                     maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
             }
-            if (open) CodeBox(p.title ?: "tool call", wrap = true)
+            if (open) CommandBox(permCommand(p, actions) ?: p.title ?: "tool call")
             p.answer.obj()?.get("message")?.let { (it as? JsonPrimitive)?.contentOrNull }?.takeIf { it.isNotBlank() }?.let { m ->
                 Text("“$m”", style = MaterialTheme.typography.bodySmall, color = ex.muted, fontStyle = FontStyle.Italic, modifier = Modifier.padding(start = 20.dp))
             }
@@ -708,14 +738,15 @@ fun PermCard(item: Item, actions: TranscriptActions) {
                 Spacer(Modifier.width(8.dp))
                 Text(verb, style = MaterialTheme.typography.titleSmall)
             }
-            CodeBox(p.title ?: "tool call", wrap = true)
+            // A shell request shows the whole command (the title is only its first line).
+            CommandBox(permCommand(p, actions) ?: p.title ?: "tool call")
             // An edit shows what it would change, not just the file name.
             p.callId?.let(actions.toolFor)?.let { t ->
                 val patch = t.patchLines()
                 when {
                     patch != null -> DiffView(patch, Modifier.fillMaxWidth().clip(RoundedCornerShape(8.dp)), wrap = true, maxLines = 60)
                     else -> t.diffs().forEach { d ->
-                        DiffView(LineDiff.diff(d.old, d.new), Modifier.fillMaxWidth().clip(RoundedCornerShape(8.dp)), wrap = true, maxLines = 60)
+                        DiffView(d.lines(), Modifier.fillMaxWidth().clip(RoundedCornerShape(8.dp)), wrap = true, maxLines = 60)
                     }
                 }
             }

@@ -1041,6 +1041,13 @@ func install(args []string) int {
 	if status() != 0 {
 		return 1
 	}
+	// Upgrades keep their paired phones; only a fresh install needs pairing.
+	var info map[string]any
+	if localGet("/local/status", &info) == nil {
+		if devs, _ := info["deviceList"].([]any); len(devs) > 0 {
+			return 0
+		}
+	}
 	fmt.Println("\nNext: run `agentc pair` and scan the QR code with the Agent Companion app.")
 	return 0
 }

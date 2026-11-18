@@ -140,15 +140,23 @@ func (m *Manager) loadSessions() {
 			}
 		}
 		ss.Meta.LastError = ""
+		if ss.Meta.Agent == "claude" {
+			claude.RelabelDefaultModel(ss.Meta.Models)
+		}
 		for i := range ss.Meta.Asides {
 			if ss.Meta.Asides[i].State == "pending" {
 				ss.Meta.Asides[i].State, ss.Meta.Asides[i].Error = "failed", "Interrupted: agentc restarted before Claude answered."
 			}
 		}
+		compacted := compactToolDiffs(ss.Items)
 		s := newSession(m, ss.Meta)
 		s.tr.LoadItems(ss.Items, ss.Seq)
 		s.lastActivity = time.UnixMilli(ss.Meta.UpdatedAt)
 		m.sessions[ss.Meta.ID] = s
+		if compacted {
+			// Write the smaller file once instead of reading the old one at every start.
+			go m.saveSession(s)
+		}
 	}
 	log.Printf("loaded %d sessions from %s", len(m.sessions), m.cfg.StateDir)
 }

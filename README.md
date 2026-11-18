@@ -30,7 +30,8 @@ and terminals of all your computers together.
   Markdown renders with highlighted code, tables and math (`$…$` as readable formulas).
   Long-press a message to copy it, select part of it, fork or rewind from it.
 - **Approvals**: allow or deny tool calls (optionally with a comment), answer questions and approve plans,
-  including straight from notifications.
+  including straight from notifications. A command request shows the whole command, heredocs included,
+  and edits show their diff.
 - **Ongoing work**: background shells with live output, subagents with their transcripts, and Stop
   buttons for both. When the agent picks work back up by itself (a background task reported back), the
   session shows as working and you're notified when it's done.
@@ -40,7 +41,8 @@ and terminals of all your computers together.
 - **Artifacts and plans**, rendered, with comments on any paragraph, list item (nested ones too) or code
   block: select text and pick Comment, or turn on commenting. Once you reply or approve, the review
   request clears. You can also comment on single lines in the diff viewer, with line wrapping a tap away,
-  and review what the agent committed: the Changes screen lists the branch's commits with their diffs.
+  and review what the agent committed: the Changes screen lists the branch's commits (merges included)
+  with their diffs, and which ones aren't pushed yet.
 - **History**: every conversation on each computer, with fork, rewind (previewing what it undoes), rename,
   pin, archive, delete, export and per-file diffs.
 - **Files**: browse, edit, upload, download, create, rename, move and delete files on any computer.
