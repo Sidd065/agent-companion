@@ -1,5 +1,6 @@
 package io.github.sidd065.agentcompanion.ui.terminal
 
+import io.github.sidd065.agentcompanion.ui.components.AppSheet
 import android.graphics.Typeface
 import android.util.TypedValue
 import android.view.KeyEvent
@@ -216,7 +217,7 @@ fun NewTerminalSheet(onDismiss: () -> Unit, hostPicker: @Composable () -> Unit =
     var flagsOpen by remember { mutableStateOf(false) }
     val flags = st.agyFlags
     val cflags = st.claudeFlags
-    ModalBottomSheet(onDismissRequest = onDismiss) {
+    AppSheet(onDismissRequest = onDismiss) {
         Column(Modifier.padding(horizontal = 20.dp).padding(bottom = 28.dp).imePadding(), verticalArrangement = Arrangement.spacedBy(12.dp)) {
             Text("New terminal", style = MaterialTheme.typography.titleMedium)
             hostPicker()

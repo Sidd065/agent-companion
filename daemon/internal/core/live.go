@@ -3,6 +3,8 @@ package core
 import (
 	"bufio"
 	"context"
+	"encoding/base64"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -14,6 +16,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"agentc/internal/agyproc"
 	"agentc/internal/lsapi"
@@ -80,6 +83,10 @@ type AgentMessage struct {
 	Content string `json:"content"`
 	Ts      int64  `json:"ts"`
 	Read    bool   `json:"read"`
+	// Kind says what the message is: "task" (a background command's result:
+	// console output), "user" (your own message, queued while agy worked),
+	// "notice" (from agy itself) or "" (from a subagent).
+	Kind string `json:"kind,omitempty"`
 }
 
 func (m *Manager) brainDir(id string) (string, error) {
@@ -290,17 +297,33 @@ func (m *Manager) ComputeLive(ctx context.Context, id string, ls *lsapi.Client) 
 				Render    struct {
 					Title string `json:"messageTitle"`
 				} `json:"renderDetails"`
-				Content string `json:"content"`
+				Content     string `json:"content"`
+				StepPayload string `json:"stepPayload"`
 			}
 			if json.Unmarshal(b, &msg) != nil || msg.ID == "" {
 				continue
 			}
-			c := msg.Content
-			if len(c) > 4000 {
-				c = c[:4000] + "…"
+			am := AgentMessage{ID: msg.ID, Sender: msg.Sender, Title: msg.Render.Title, Content: msg.Content,
+				Ts: parseTime(msg.Timestamp), Read: read[msg.ID]}
+			switch {
+			case msg.Sender == "user":
+				// A message you sent while agy was busy: its text is only in the step payload.
+				am.Kind, am.Title = "user", firstNonEmpty(am.Title, "Your message")
+				if strings.TrimSpace(am.Content) == "" {
+					am.Content = userPayloadText(msg.StepPayload)
+				}
+			case msg.Sender == "system":
+				am.Kind, am.Title = "notice", firstNonEmpty(am.Title, "Notice")
+			case strings.HasPrefix(am.Content, "Task id "):
+				am.Kind = "task"
 			}
-			live.Messages = append(live.Messages, AgentMessage{ID: msg.ID, Sender: msg.Sender, Title: msg.Render.Title, Content: c,
-				Ts: parseTime(msg.Timestamp), Read: read[msg.ID]})
+			if strings.TrimSpace(am.Content) == "" {
+				continue // nothing to show
+			}
+			if len(am.Content) > 4000 {
+				am.Content = am.Content[:4000] + "…"
+			}
+			live.Messages = append(live.Messages, am)
 		}
 		sort.Slice(live.Messages, func(i, j int) bool { return live.Messages[i].Ts < live.Messages[j].Ts })
 		if n := len(live.Messages); n > 50 {
@@ -653,4 +676,58 @@ func (m *Manager) ReadArtifact(id, path string) (map[string]any, error) {
 		return nil, err
 	}
 	return map[string]any{"path": p, "uri": "file://" + p, "content": string(b), "size": st.Size(), "mtime": st.ModTime().UnixMilli(), "kind": artifactKind(p)}, nil
+}
+
+// userPayloadText digs the text out of a queued user message's step payload:
+// a base64 CortexStep protobuf whose user input (field 19) holds the text in
+// field 2.
+func userPayloadText(b64 string) string {
+	b, err := base64.StdEncoding.DecodeString(b64)
+	if err != nil {
+		if b, err = base64.RawStdEncoding.DecodeString(b64); err != nil {
+			return ""
+		}
+	}
+	if in := protoField(b, 19); in != nil {
+		if t := protoField(in, 2); t != nil && utf8.Valid(t) {
+			return strings.TrimSpace(string(t))
+		}
+	}
+	return ""
+}
+
+// protoField returns the first length-delimited field num of a protobuf
+// message, or nil.
+func protoField(b []byte, num uint64) []byte {
+	for i := 0; i < len(b); {
+		key, n := binary.Uvarint(b[i:])
+		if n <= 0 {
+			return nil
+		}
+		i += n
+		switch key & 7 {
+		case 0:
+			if _, n = binary.Uvarint(b[i:]); n <= 0 {
+				return nil
+			}
+			i += n
+		case 1:
+			i += 8
+		case 5:
+			i += 4
+		case 2:
+			l, n := binary.Uvarint(b[i:])
+			if n <= 0 || l > uint64(len(b)-i-n) {
+				return nil
+			}
+			i += n
+			if key>>3 == num {
+				return b[i : i+int(l)]
+			}
+			i += int(l)
+		default:
+			return nil
+		}
+	}
+	return nil
 }

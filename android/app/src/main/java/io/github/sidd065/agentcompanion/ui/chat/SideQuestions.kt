@@ -207,7 +207,7 @@ fun SideQuestionsScreen(sessionId: String) {
                 if (asides.isEmpty()) {
                     EmptyState(
                         Icons.Outlined.QuestionAnswer, "Ask on the side",
-                        "$label answers from this conversation without adding to it, and without using tools — even while it's working. " +
+                        "$label answers from this conversation without adding to it or changing any files, even while it's working. " +
                             "Answers are kept here.",
                     )
                 } else {

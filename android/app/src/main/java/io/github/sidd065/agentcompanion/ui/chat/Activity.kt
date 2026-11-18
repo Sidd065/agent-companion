@@ -1,5 +1,6 @@
 package io.github.sidd065.agentcompanion.ui.chat
 
+import io.github.sidd065.agentcompanion.ui.components.AppSheet
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
@@ -72,6 +73,9 @@ import io.github.sidd065.agentcompanion.net.HostConnection
 import io.github.sidd065.agentcompanion.net.decode
 import io.github.sidd065.agentcompanion.net.params
 import io.github.sidd065.agentcompanion.ui.components.MarkdownText
+import androidx.compose.material.icons.outlined.Person
+import androidx.compose.material.icons.outlined.Info
+import io.github.sidd065.agentcompanion.ui.components.sheetScrollGuard
 import io.github.sidd065.agentcompanion.ui.components.relTime
 import io.github.sidd065.agentcompanion.ui.theme.LocalExtra
 import kotlinx.coroutines.delay
@@ -146,7 +150,7 @@ fun ActivitySheet(
     var tab by remember { mutableStateOf(tabs.indexOfFirst { it.first == initialTab }.coerceAtLeast(0)) }
     var task by remember { mutableStateOf(live.tasks.firstOrNull { it.id == initialTaskId }) }
     var agent by remember { mutableStateOf<LiveSubagent?>(null) }
-    ModalBottomSheet(onDismissRequest = onDismiss, sheetState = state) {
+    AppSheet(onDismissRequest = onDismiss, sheetState = state) {
         Column(Modifier.fillMaxWidth().fillMaxHeight(0.92f)) {
             when {
                 task != null -> TaskOutputView(conn, sessionId, task!!, stillRunning = live.tasks.any { it.id == task!!.id }) { task = null }
@@ -160,7 +164,13 @@ fun ActivitySheet(
                                 "artifacts" -> live.artifacts.size
                                 else -> live.messages.size
                             }
-                            Tab(selected = tab == i, onClick = { tab = i }, text = { Text(if (n > 0) "$l ($n)" else l, maxLines = 1) })
+                            // The count goes on its own line: "Messages (14)" doesn't fit a quarter of a phone.
+                            Tab(selected = tab == i, onClick = { tab = i }, text = {
+                                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                                    Text(l, maxLines = 1, softWrap = false)
+                                    if (n > 0) Text("$n", style = MaterialTheme.typography.labelSmall)
+                                }
+                            })
                         }
                     }
                     when (tabs[tab].first) {
@@ -186,26 +196,53 @@ fun ActivitySheet(
                             }
                         }
                         else -> ListOrEmpty(live.messages.isEmpty(), "Messages from subagents and finished background tasks show up here.") {
-                            items(live.messages.asReversed(), key = { it.id }) { m ->
-                                var open by remember { mutableStateOf(false) }
-                                Column(Modifier.fillMaxWidth().clickable { open = !open }.padding(horizontal = 16.dp, vertical = 10.dp)) {
-                                    Row(verticalAlignment = Alignment.CenterVertically) {
-                                        Icon(Icons.Outlined.Email, null, Modifier.size(18.dp), tint = MaterialTheme.colorScheme.primary)
-                                        Spacer(Modifier.width(10.dp))
-                                        Text(m.title.ifBlank { "Message" }, style = MaterialTheme.typography.titleSmall, modifier = Modifier.weight(1f), maxLines = 1, overflow = TextOverflow.Ellipsis)
-                                        Text(relTime(m.ts), style = MaterialTheme.typography.labelSmall, color = LocalExtra.current.muted)
-                                    }
-                                    Spacer(Modifier.size(4.dp))
-                                    if (open) MarkdownText(m.content) else Text(m.content, style = MaterialTheme.typography.bodySmall, maxLines = 4, overflow = TextOverflow.Ellipsis)
-                                }
-                                HorizontalDivider()
-                            }
+                            items(live.messages.asReversed(), key = { it.id }) { m -> MessageRow(m) }
                         }
                     }
                 }
             }
         }
     }
+}
+
+/** A message to the agent: a task's result (console output), your queued message, a notice or a subagent's report. */
+@Composable
+private fun MessageRow(m: io.github.sidd065.agentcompanion.core.LiveMessage) {
+    val ex = LocalExtra.current
+    var open by remember { mutableStateOf(false) }
+    val kind = m.effectiveKind
+    val (icon, fallback) = when (kind) {
+        "task" -> Icons.Outlined.Terminal to "Background task"
+        "user" -> Icons.Outlined.Person to "Your message"
+        "notice" -> Icons.Outlined.Info to "Notice"
+        else -> Icons.Outlined.Email to "Message"
+    }
+    Column(Modifier.fillMaxWidth().clickable { open = !open }.padding(horizontal = 16.dp, vertical = 10.dp)) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Icon(icon, null, Modifier.size(18.dp), tint = if (kind == "notice") ex.muted else MaterialTheme.colorScheme.primary)
+            Spacer(Modifier.width(10.dp))
+            Text(m.title.ifBlank { fallback }, style = MaterialTheme.typography.titleSmall, modifier = Modifier.weight(1f), maxLines = 1, overflow = TextOverflow.Ellipsis)
+            Text(relTime(m.ts), style = MaterialTheme.typography.labelSmall, color = ex.muted)
+        }
+        Spacer(Modifier.size(4.dp))
+        when {
+            kind == "task" -> {
+                // Console output: monospace, scrolls sideways instead of wrapping when open.
+                if (open) {
+                    SelectionContainer {
+                        Text(m.content, style = MaterialTheme.typography.bodySmall, fontFamily = FontFamily.Monospace,
+                            modifier = Modifier.fillMaxWidth().background(ex.codeBg, RoundedCornerShape(8.dp)).horizontalScroll(rememberScrollState()).padding(8.dp))
+                    }
+                } else {
+                    Text(m.content, style = MaterialTheme.typography.bodySmall, fontFamily = FontFamily.Monospace, maxLines = 4, overflow = TextOverflow.Ellipsis)
+                }
+            }
+            open -> MarkdownText(m.content)
+            else -> Text(m.content, style = MaterialTheme.typography.bodySmall, maxLines = 4, overflow = TextOverflow.Ellipsis,
+                color = if (kind == "notice") ex.muted else androidx.compose.ui.graphics.Color.Unspecified)
+        }
+    }
+    HorizontalDivider()
 }
 
 @Composable
@@ -215,7 +252,7 @@ private fun ListOrEmpty(empty: Boolean, emptyText: String, content: androidx.com
             Text(emptyText, style = MaterialTheme.typography.bodyMedium, color = LocalExtra.current.muted)
         }
     } else {
-        LazyColumn(Modifier.fillMaxWidth(), contentPadding = PaddingValues(bottom = 24.dp), content = content)
+        LazyColumn(Modifier.fillMaxWidth().sheetScrollGuard(), contentPadding = PaddingValues(bottom = 24.dp), content = content)
     }
 }
 
@@ -305,7 +342,7 @@ fun TaskOutputView(conn: HostConnection, sessionId: String, task: LiveTask, stil
                 Text(
                     cleanTerminalText(text).ifEmpty { "(no output yet)" },
                     style = MaterialTheme.typography.bodySmall, fontFamily = FontFamily.Monospace,
-                    modifier = Modifier.fillMaxWidth().heightIn(min = 120.dp).verticalScroll(scroll).padding(10.dp),
+                    modifier = Modifier.fillMaxWidth().heightIn(min = 120.dp).sheetScrollGuard().verticalScroll(scroll).padding(10.dp),
                 )
             }
         }
@@ -350,7 +387,7 @@ fun SubagentView(conn: HostConnection, sessionId: String, agent: LiveSubagent, o
         }
         error?.let { Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(horizontal = 16.dp)) }
         if (steps == null) Text("Loading…", Modifier.padding(16.dp), color = ex.muted)
-        LazyColumn(state = list, modifier = Modifier.fillMaxWidth(), contentPadding = PaddingValues(start = 12.dp, end = 12.dp, bottom = 24.dp),
+        LazyColumn(state = list, modifier = Modifier.fillMaxWidth().sheetScrollGuard(), contentPadding = PaddingValues(start = 12.dp, end = 12.dp, bottom = 24.dp),
             verticalArrangement = Arrangement.spacedBy(8.dp)) {
             items(visible, key = { it.i }) { st -> SubStepRow(st) }
         }

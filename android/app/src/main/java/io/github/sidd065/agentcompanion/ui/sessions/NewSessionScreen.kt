@@ -1,5 +1,6 @@
 package io.github.sidd065.agentcompanion.ui.sessions
 
+import io.github.sidd065.agentcompanion.ui.components.AppSheet
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
@@ -338,7 +339,7 @@ fun DirectoryPicker(conn: HostConnection, start: String, onDismiss: () -> Unit, 
         runCatching { listing = conn.rpc.call("fs.list", params { put("path", path); put("hidden", showHidden) }).decode(FsList.serializer()) }
             .onFailure { error = it.message }
     }
-    ModalBottomSheet(onDismissRequest = onDismiss, sheetState = sheet) {
+    AppSheet(onDismissRequest = onDismiss, sheetState = sheet) {
         Column(Modifier.fillMaxWidth().heightIn(max = 640.dp)) {
             Row(Modifier.padding(horizontal = 16.dp), verticalAlignment = Alignment.CenterVertically) {
                 Text("Choose a directory", style = MaterialTheme.typography.titleMedium, modifier = Modifier.weight(1f))

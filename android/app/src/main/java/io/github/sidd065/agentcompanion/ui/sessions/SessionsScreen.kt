@@ -1,5 +1,6 @@
 package io.github.sidd065.agentcompanion.ui.sessions
 
+import io.github.sidd065.agentcompanion.ui.components.AppSheet
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.combinedClickable
@@ -420,7 +421,7 @@ fun SessionActionsSheet(conn: HostConnection, s: SessionSummary, onDismiss: () -
     val nav = LocalNav.current
     var renaming by remember { mutableStateOf(false) }
     var deleting by remember { mutableStateOf(false) }
-    ModalBottomSheet(onDismissRequest = onDismiss) {
+    AppSheet(onDismissRequest = onDismiss) {
         Column(Modifier.padding(bottom = 24.dp)) {
             Text(s.displayTitle, style = MaterialTheme.typography.titleMedium, modifier = Modifier.padding(horizontal = 20.dp), maxLines = 2)
             Text(s.cwd, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.padding(horizontal = 20.dp, vertical = 4.dp))

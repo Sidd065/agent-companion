@@ -1,5 +1,6 @@
 package io.github.sidd065.agentcompanion.ui.chat
 
+import io.github.sidd065.agentcompanion.ui.components.AppSheet
 import android.content.Intent
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.PickVisualMediaRequest
@@ -196,10 +197,13 @@ fun ChatScreen(sessionId: String, prefill: String) {
         }
     }
     val busy = s?.state == "running" || s?.state == "starting" || s?.state == "waiting"
+    val agents by conn.agents.collectAsState()
+    // Side questions: Claude Code always; agy when this computer's agentc does them.
+    val sideQuestions = isClaude || agents.firstOrNull { it.id == s?.agent }?.features?.contains("asides") == true
     val asides by store.asides.collectAsState()
     val asideCount = asides.size
     val unseenAside by store.unseenAside.collectAsState()
-    LaunchedEffect(store, isClaude) { if (isClaude) runCatching { store.refreshAsides() } }
+    LaunchedEffect(store, sideQuestions) { if (sideQuestions) runCatching { store.refreshAsides() } }
     val rows by remember(settings.showThoughts) { derivedStateOf { buildRows(items.toList(), settings.showThoughts) } }
     val activeId by remember { derivedStateOf { activeAttentionId(items.toList(), store.summary.value?.attention) } }
 
@@ -214,7 +218,7 @@ fun ChatScreen(sessionId: String, prefill: String) {
 
     fun send(text: String, attachments: List<Pending>, delivery: String?) {
         val t = text.trim()
-        if (s?.isClaude == true && (t == "/btw" || t.startsWith("/btw ") || t.startsWith("/btw\n"))) {
+        if (sideQuestions && (t == "/btw" || t.startsWith("/btw ") || t.startsWith("/btw\n"))) {
             // A side question: answered on its own screen, never sent to the conversation.
             val q = t.removePrefix("/btw").trim()
             composer.clear()
@@ -231,7 +235,7 @@ fun ChatScreen(sessionId: String, prefill: String) {
             val name = t.drop(1)
             if (localCommands.any { it.name == name } && extras.commands.none { it.name == name }) {
                 composer.clear(); runLocal(name, ctx = ctx, conn = conn, sessionId = sessionId, summary = s, items = items.toList(), setSheet = { sheet = it },
-                    setRenaming = { renaming = true }, nav = { nav.navigate(it) }, rpc = ::rpc, snack = { m -> scope.launch { snack.showSnackbar(m) } })
+                    setRenaming = { renaming = true }, nav = { nav.navigate(it) }, rpc = ::rpc, sideQuestions = sideQuestions, snack = { m -> scope.launch { snack.showSnackbar(m) } })
                 return
             }
         }
@@ -321,7 +325,7 @@ fun ChatScreen(sessionId: String, prefill: String) {
                             MenuRow(Icons.Outlined.Inventory2, "Artifacts") { menu = false; activityTab = "artifacts" }
                             MenuRow(Icons.Outlined.Terminal, "Background shells & agents") { menu = false; activityTab = if (live?.subagents?.isNotEmpty() == true && live?.tasks.isNullOrEmpty()) "agents" else "tasks" }
                             MenuRow(Icons.Outlined.FolderOpen, "Browse folder") { menu = false; s?.cwd?.let { nav.navigate(Routes.files(it)) } }
-                            if (isClaude) MenuRow(Icons.Outlined.QuestionAnswer, "Side questions" + (asideCount.takeIf { it > 0 }?.let { " ($it)" } ?: "")) {
+                            if (sideQuestions) MenuRow(Icons.Outlined.QuestionAnswer, "Side questions" + (asideCount.takeIf { it > 0 }?.let { " ($it)" } ?: "")) {
                                 menu = false; nav.navigate(Routes.asides(sessionId))
                             }
                             if (isClaude) MenuRow(Icons.Outlined.DataUsage, "Context usage") { menu = false; sheet = "context" }
@@ -359,7 +363,7 @@ fun ChatScreen(sessionId: String, prefill: String) {
                     LazyColumn(state = listState, reverseLayout = true, modifier = Modifier.fillMaxSize(), contentPadding = PaddingValues(top = 8.dp, bottom = 12.dp)) {
                         item(key = "end") { Spacer(Modifier.height(4.dp)) }
                         if (s?.state == "running" || s?.state == "starting") {
-                            item(key = "working") { WorkingIndicator(items.lastOrNull { it.kind == "user" }?.ts ?: 0, s.status) }
+                            item(key = "working") { WorkingIndicator(s.turnStart.takeIf { it > 0 } ?: items.lastOrNull { it.kind == "user" }?.ts ?: 0, s.status) }
                         }
                         items(rows.asReversed(), key = { it.key }) { row ->
                             TranscriptRow(row, actions, isLast = row === rows.lastOrNull(), activeId = activeId, wrap = settings.codeWrap, cwd = s?.cwd ?: "")
@@ -395,7 +399,7 @@ fun ChatScreen(sessionId: String, prefill: String) {
                 onThinking = { sheet = "effort" },
                 onMode = { sheet = "mode" },
                 onLocalCommand = { name ->
-                    runLocal(name, ctx, conn, sessionId, s, items.toList(), { sheet = it }, { renaming = true }, { nav.navigate(it) }, ::rpc) { m -> scope.launch { snack.showSnackbar(m) } }
+                    runLocal(name, ctx, conn, sessionId, s, items.toList(), { sheet = it }, { renaming = true }, { nav.navigate(it) }, ::rpc, sideQuestions) { m -> scope.launch { snack.showSnackbar(m) } }
                 },
                 complete = { q ->
                     conn.rpc.call("fs.complete", params { put("cwd", s?.cwd ?: ""); put("query", q); put("max", 30) }).decode(ListSerializer(CompleteHit.serializer()))
@@ -423,6 +427,10 @@ fun ChatScreen(sessionId: String, prefill: String) {
         "context" -> ContextUsageSheet(conn, sessionId, onDismiss = { sheet = null }, onCompact = { send("/compact", emptyList(), null) })
         "mcp" -> McpStatusSheet(conn, sessionId, onDismiss = { sheet = null })
         "artifacts" -> activityTab = "artifacts"
+        "tasks" -> { sheet = null; activityTab = if (live?.tasks.isNullOrEmpty() && live?.subagents?.isNotEmpty() == true) "agents" else "tasks" }
+        "status" -> StatusSheet(s, extras, agents.firstOrNull { it.id == s?.agent }?.version, conn.config.label, onDismiss = { sheet = null })
+        "permissions" -> PermissionRulesSheet(conn, sessionId, onDismiss = { sheet = null })
+        "memory" -> MemorySheet(conn, s?.cwd ?: "", home, onOpen = { p -> sheet = null; nav.navigate(Routes.file(p, edit = true)) }, onDismiss = { sheet = null })
         "help" -> HelpSheet(cmds, label, onDismiss = { sheet = null }) { c -> sheet = null; composer.setText("/$c ") }
         "rewind" -> RewindPickerSheet(items.toList(), onDismiss = { sheet = null }) { rewindTarget = it; sheet = null }
     }
@@ -541,8 +549,10 @@ private fun runLocal(
     setRenaming: () -> Unit,
     nav: (String) -> Unit,
     rpc: (String, suspend () -> Unit) -> Any,
+    sideQuestions: Boolean,
     snack: (String) -> Unit,
 ) {
+    val claude = summary?.isClaude == true
     when (name) {
         "model" -> setSheet("model")
         "effort" -> setSheet("effort")
@@ -551,8 +561,12 @@ private fun runLocal(
         "artifacts" -> setSheet("artifacts")
         "help" -> setSheet("help")
         "rewind" -> setSheet("rewind")
-        "btw" -> if (summary?.isClaude == true) nav(Routes.asides(sessionId)) else snack("Side questions are a Claude Code feature")
-        "mcp" -> if (summary?.isClaude == true) setSheet("mcp") else snack("Open Host → MCP servers for agy")
+        "btw" -> if (sideQuestions) nav(Routes.asides(sessionId)) else snack("Side questions for agy need agentc 0.3.2 or newer on this computer")
+        "mcp" -> if (claude) setSheet("mcp") else nav(Routes.MANAGE) // agy's MCP servers are on the Host screen
+        "tasks" -> setSheet("tasks")
+        "status" -> setSheet("status")
+        "permissions" -> if (claude) setSheet("permissions") else snack("agy asks for permission per action; set its rules in agy's settings.json")
+        "memory" -> if (claude) setSheet("memory") else snack("/memory is a Claude Code feature")
         "rename" -> setRenaming()
         "new", "clear" -> nav(Routes.newSession(summary?.cwd ?: ""))
         "fork" -> fork(conn, sessionId, null, nav, rpc, null)
@@ -607,7 +621,7 @@ private fun export(ctx: android.content.Context, conn: HostConnection, sessionId
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun PickerSheet(title: String, options: List<Pair<String, String>>, current: String?, onDismiss: () -> Unit, agentName: String = "agy", onPick: (String) -> Unit) {
-    ModalBottomSheet(onDismissRequest = onDismiss) {
+    AppSheet(onDismissRequest = onDismiss) {
         Text(title, style = MaterialTheme.typography.titleMedium, modifier = Modifier.padding(horizontal = 20.dp, vertical = 8.dp))
         if (options.isEmpty()) {
             Text("Not available yet — send a message first so $agentName reports its options.", style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(20.dp))
@@ -627,7 +641,7 @@ private fun PickerSheet(title: String, options: List<Pair<String, String>>, curr
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun UsageSheet(s: SessionSummary?, onDismiss: () -> Unit, onCompact: () -> Unit, onContext: (() -> Unit)? = null) {
-    ModalBottomSheet(onDismissRequest = onDismiss) {
+    AppSheet(onDismissRequest = onDismiss) {
         Column(Modifier.padding(horizontal = 20.dp).padding(bottom = 28.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
             Text("Context & usage", style = MaterialTheme.typography.titleMedium)
             if (s != null && s.contextSize > 0) {
@@ -659,7 +673,7 @@ private fun ArtifactsSheet(conn: HostConnection, sessionId: String, onDismiss: (
         runCatching { list = conn.rpc.call("session.artifacts", params { put("id", sessionId) }).decode(ListSerializer(Artifact.serializer())) }
             .onFailure { err = it.message }
     }
-    ModalBottomSheet(onDismissRequest = onDismiss) {
+    AppSheet(onDismissRequest = onDismiss) {
         Text("Artifacts", style = MaterialTheme.typography.titleMedium, modifier = Modifier.padding(horizontal = 20.dp, vertical = 8.dp))
         Text("Plans, task lists, walkthroughs and media the agent saved for this conversation.", style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.padding(horizontal = 20.dp))
@@ -680,7 +694,7 @@ private fun ArtifactsSheet(conn: HostConnection, sessionId: String, onDismiss: (
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun HelpSheet(cmds: List<CmdEntry>, agentName: String, onDismiss: () -> Unit, onPick: (String) -> Unit) {
-    ModalBottomSheet(onDismissRequest = onDismiss) {
+    AppSheet(onDismissRequest = onDismiss) {
         Text("Commands", style = MaterialTheme.typography.titleMedium, modifier = Modifier.padding(horizontal = 20.dp, vertical = 8.dp))
         LazyColumn(Modifier.padding(bottom = 24.dp)) {
             items(cmds) { c ->
@@ -695,7 +709,7 @@ private fun HelpSheet(cmds: List<CmdEntry>, agentName: String, onDismiss: () -> 
 @Composable
 private fun RewindPickerSheet(items: List<Item>, onDismiss: () -> Unit, onPick: (Item) -> Unit) {
     val users = items.filter { it.kind == "user" && it.state.isNullOrEmpty() }.drop(1).reversed()
-    ModalBottomSheet(onDismissRequest = onDismiss) {
+    AppSheet(onDismissRequest = onDismiss) {
         Text("Rewind to before…", style = MaterialTheme.typography.titleMedium, modifier = Modifier.padding(horizontal = 20.dp, vertical = 8.dp))
         if (users.isEmpty()) Text("Nothing to rewind yet.", modifier = Modifier.padding(20.dp))
         LazyColumn(Modifier.padding(bottom = 24.dp)) {
@@ -720,7 +734,7 @@ private fun MessageActionSheet(
     onRewind: () -> Unit,
     onShare: (() -> Unit)? = null,
 ) {
-    ModalBottomSheet(onDismissRequest = onDismiss, sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)) {
+    AppSheet(onDismissRequest = onDismiss, sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)) {
         Column(Modifier.padding(bottom = 24.dp)) {
             Text(item.text.orEmpty().take(160), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
                 maxLines = 3, overflow = TextOverflow.Ellipsis, modifier = Modifier.padding(horizontal = 20.dp, vertical = 8.dp))
@@ -798,7 +812,7 @@ private fun HostFilePicker(conn: HostConnection, start: String, onDismiss: () ->
     LaunchedEffect(path) {
         runCatching { entries = conn.rpc.call("fs.list", params { put("path", path) }).decode(io.github.sidd065.agentcompanion.core.FsList.serializer()) }
     }
-    ModalBottomSheet(onDismissRequest = onDismiss) {
+    AppSheet(onDismissRequest = onDismiss) {
         Text("Attach a file from ${conn.config.label}", style = MaterialTheme.typography.titleMedium, modifier = Modifier.padding(horizontal = 20.dp))
         Text(entries?.path ?: path, style = MaterialTheme.typography.bodySmall, fontFamily = FontFamily.Monospace, modifier = Modifier.padding(horizontal = 20.dp, vertical = 4.dp))
         LazyColumn(Modifier.padding(bottom = 24.dp)) {

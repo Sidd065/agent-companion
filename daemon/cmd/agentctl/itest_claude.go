@@ -396,17 +396,23 @@ func (t *tester) scClaudeControl() {
 	t.check(info != nil && info["available"] == true, "claude.info available (%v)", info["version"])
 }
 
-// checkAside asks a side question the way the app does: the daemon answers
-// in the background, reports it with a session.aside event and keeps it.
-func (t *tester) checkAside(id, question, want string) {
+// askAside asks a side question and waits for the daemon's answer event.
+func (t *tester) askAside(id, question string) map[string]any {
 	a := t.call("session.aside", map[string]any{"id": id, "question": question})
 	aid, _ := a["id"].(string)
 	t.check(aid != "" && a["state"] == "pending", "side question accepted (%v)", a["state"])
 	if _, err := t.callErr("session.aside", map[string]any{"id": id, "question": "And 1+1?"}); err == nil {
 		t.check(false, "a second side question waits for the first")
 	}
-	t.pump(3*time.Minute, func() bool { x := t.asides[aid]; return x != nil && x["state"] != "pending" })
-	x := t.asides[aid]
+	t.pump(4*time.Minute, func() bool { x := t.asides[aid]; return x != nil && x["state"] != "pending" })
+	return t.asides[aid]
+}
+
+// checkAside asks a side question the way the app does: the daemon answers
+// in the background, reports it with a session.aside event and keeps it.
+func (t *tester) checkAside(id, question, want string) {
+	x := t.askAside(id, question)
+	aid, _ := x["id"].(string)
 	ans, _ := x["answer"].(string)
 	t.check(x != nil && x["state"] == "done" && strings.Contains(ans, want), "side answer arrives as an event (%v %q %v)", x["state"], ans, x["error"])
 	raw, _ := t.callErr("session.asides", map[string]any{"id": id})

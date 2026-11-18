@@ -105,6 +105,7 @@ type Summary struct {
 	Status      string    `json:"status,omitempty"`     // transient agent status (e.g. compacting)
 	Suggestion  string    `json:"suggestion,omitempty"` // predicted next prompt (Claude)
 	LiveElse    string    `json:"liveElsewhere,omitempty"`
+	TurnStart   int64     `json:"turnStart,omitempty"` // when the running turn began (ms)
 }
 
 // Detail is the full view sent when a client opens a session.
@@ -166,8 +167,12 @@ type Session struct {
 	tasks      []claude.Task
 	status     string
 	suggestion string
-	replaying  bool // replaying stored history: not new activity
-	autoTurn   bool // Claude is working on a turn it started itself
+	replaying  bool        // replaying stored history: not new activity
+	autoTurn   bool        // the agent is working on a turn it started itself
+	agy        agyRunState // agy's run state from its agent state stream
+	autoFrom   int         // transcript length when the agent started its own turn
+	autoCancel bool        // the user stopped the agent's own turn
+	saveMu     sync.Mutex  // serializes saves of this session
 	// Following a Claude transcript that another process (a terminal) writes:
 	// the replayer, the last entry shown and the file's last seen stamp.
 	follow      *claude.Replayer
@@ -212,6 +217,9 @@ func (s *Session) summaryLocked() Summary {
 		CreatedAt: m.CreatedAt, UpdatedAt: m.UpdatedAt, LastText: m.LastText, ContextUsed: m.ContextUsed,
 		ContextSize: m.ContextSize, Usage: m.Usage, Turns: m.Turns, Archived: m.Archived, Pinned: m.Pinned,
 		ForkedFrom: m.ForkedFrom, Origin: m.Origin, Error: m.LastError, Status: s.status, Suggestion: s.suggestion,
+	}
+	if s.inflight > 0 && !s.turnStart.IsZero() {
+		sum.TurnStart = s.turnStart.UnixMilli()
 	}
 	if len(s.perms) > 0 {
 		sum.Attention = "permission"
@@ -905,6 +913,9 @@ func (s *Session) start(ctx context.Context, mode string) error {
 	s.lastActivity = time.Now()
 	s.mu.Unlock()
 	go s.watchProc(p)
+	if ap, ok := p.(*agyproc.Proc); ok {
+		go s.watchAgyState(ap)
+	}
 	if !isClaude {
 		// Apply desired configuration (model, thinking level, mode). Claude
 		// got them as command-line flags.
@@ -1261,6 +1272,7 @@ func (s *Session) finishPrompt(itemID string, res *acp.PromptResult, err error) 
 		}
 	}
 	sid, title, label := s.meta.ID, s.meta.Title, s.agentLabelLocked()
+	agyPrompt := !s.isClaude() && itemID != "" && s.inflight == 0
 	s.mu.Unlock()
 	s.emit()
 	s.m.saveSession(s)
@@ -1269,6 +1281,8 @@ func (s *Session) finishPrompt(itemID string, res *acp.PromptResult, err error) 
 	}
 	if next != nil {
 		go s.runPrompt(next.ItemID, next.Ref, next.Blocks)
+	} else if agyPrompt {
+		s.agyStillRunning()
 	}
 }
 
@@ -1327,6 +1341,9 @@ func (s *Session) Cancel() error {
 	s.mu.Lock()
 	p := s.proc
 	id := s.meta.ID
+	if s.autoTurn {
+		s.autoCancel = true
+	}
 	perms := s.cancelPermsLocked()
 	s.mu.Unlock()
 	replyCancelled(perms)

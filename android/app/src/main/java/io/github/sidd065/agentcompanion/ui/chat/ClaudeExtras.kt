@@ -1,5 +1,6 @@
 package io.github.sidd065.agentcompanion.ui.chat
 
+import io.github.sidd065.agentcompanion.ui.components.AppSheet
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -128,7 +129,7 @@ fun ContextUsageSheet(conn: HostConnection, sessionId: String, onDismiss: () -> 
             data = conn.rpc.call("session.control", params { put("id", sessionId); put("subtype", "get_context_usage") }, timeoutMs = 120_000).jsonObject
         }.onFailure { err = it.message }
     }
-    ModalBottomSheet(onDismissRequest = onDismiss) {
+    AppSheet(onDismissRequest = onDismiss) {
         Column(Modifier.fillMaxWidth().verticalScroll(rememberScrollState()).padding(horizontal = 20.dp).padding(bottom = 28.dp),
             verticalArrangement = Arrangement.spacedBy(10.dp)) {
             Text("Context usage", style = MaterialTheme.typography.titleMedium)
@@ -229,7 +230,7 @@ fun McpStatusSheet(conn: HostConnection, sessionId: String, onDismiss: () -> Uni
             reload++
         }
     }
-    ModalBottomSheet(onDismissRequest = onDismiss) {
+    AppSheet(onDismissRequest = onDismiss) {
         Column(Modifier.fillMaxWidth().verticalScroll(rememberScrollState()).padding(horizontal = 20.dp).padding(bottom = 28.dp),
             verticalArrangement = Arrangement.spacedBy(10.dp)) {
             Text("MCP servers", style = MaterialTheme.typography.titleMedium)

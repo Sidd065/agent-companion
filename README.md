@@ -31,7 +31,11 @@ and terminals of all your computers together.
 - **Approvals**: allow or deny tool calls (optionally with a comment), answer questions and approve plans,
   including straight from notifications.
 - **Ongoing work**: background shells with live output, subagents with their transcripts, and Stop
-  buttons for both.
+  buttons for both. When the agent picks work back up by itself (a background task reported back), the
+  session shows as working and you're notified when it's done.
+- **Side questions** (`/btw`): ask about the conversation without adding to it, even while the agent works.
+  Answers open full screen, with copyable code blocks and readable tables. You can select any part,
+  share it, quote it into your next message or ask a follow-up. Answers wait for you if you leave.
 - **Artifacts and plans**, rendered, with comments on any paragraph, step or code block. You can also
   comment on single lines in the diff viewer.
 - **History**: every conversation on each computer, with fork, rewind (previewing what it undoes), rename,
@@ -41,6 +45,9 @@ and terminals of all your computers together.
   Terminals keep running when you leave, and the laptop can attach to the same session (`claudr`, `agyr`).
 - **Launch flags** per agent (skip permissions, model, effort, permission mode, extra folders, …), saved on
   the phone and reused for new sessions and terminals.
+- **Commands**: the agent's own slash commands, plus `/status`, `/tasks`, `/btw`, `/model`, `/effort`,
+  `/mode`, `/rewind`, `/fork`, `/diff`, `/export` and more; for Claude Code also `/permissions` and
+  `/memory`.
 
 **Claude Code**
 
@@ -49,9 +56,6 @@ and terminals of all your computers together.
 - **Questions** on a card with options, multi-select and *Other*. **Plans** on a card: approve with
   auto-accepted or manual edits, send them back with feedback, or comment on the plan file.
 - **Steering**: messages sent while Claude works arrive mid-turn, as in the terminal.
-- **Side questions** (`/btw`): ask about the conversation without adding to it, even while Claude works.
-  Answers open full screen, with copyable code blocks and readable tables. You can select any part,
-  share it, quote it into your next message or ask a follow-up. Answers wait for you if you leave.
 - **Modes and effort**: ask, accept edits, plan, auto, don't ask and bypass, and effort from low to max.
   Every model Claude Code lists is available, and the app shows cost per turn, a context meter and the full
   `/context` breakdown.

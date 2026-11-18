@@ -148,7 +148,7 @@ fun ClaudeFlagsSheet(conn: HostConnection?, onDismiss: () -> Unit) {
         }
     }
     val modelLabel = models.firstOrNull { it.value == f.model }?.name ?: f.model.ifBlank { "Claude's default (settings.json)" }
-    ModalBottomSheet(onDismissRequest = onDismiss, sheetState = sheet) {
+    AppSheet(onDismissRequest = onDismiss, sheetState = sheet) {
         Column(
             Modifier.fillMaxWidth().imePadding().verticalScroll(rememberScrollState()).padding(horizontal = 20.dp).padding(bottom = 32.dp),
             verticalArrangement = Arrangement.spacedBy(10.dp),

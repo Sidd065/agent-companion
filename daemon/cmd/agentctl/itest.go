@@ -269,6 +269,10 @@ func itest(c *Client, cr *Creds, scenarios []string) int {
 			t.scFlags()
 		case "live":
 			t.scLive()
+		case "agy-auto":
+			t.scAgyAuto()
+		case "agy-aside":
+			t.scAgyAside()
 		case "claude-basic":
 			t.scClaudeBasic()
 		case "claude-question":

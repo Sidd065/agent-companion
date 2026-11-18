@@ -1454,8 +1454,9 @@ func (s *Session) onAutoTurn(params json.RawMessage) {
 	}
 }
 
-// Aside is a side question (/btw) about a Claude conversation: answered from
-// the conversation's context without becoming part of it.
+// Aside is a side question (/btw) about a conversation: answered from the
+// conversation's context without becoming part of it (Claude Code answers it
+// itself; for agy, see asideAgy).
 type Aside struct {
 	ID       string `json:"id"`
 	Question string `json:"question"`
@@ -1531,9 +1532,7 @@ func (m *Manager) AskAside(ctx context.Context, id, question, followUp string) (
 			return nil, err
 		}
 	}
-	if !s.isClaudeSafe() {
-		return nil, errors.New("side questions are a Claude Code feature")
-	}
+	isClaude := s.isClaudeSafe()
 	s.mu.Lock()
 	for _, a := range s.meta.Asides {
 		if a.State == "pending" {
@@ -1556,27 +1555,13 @@ func (m *Manager) AskAside(ctx context.Context, id, question, followUp string) (
 	go func() {
 		cctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 		defer cancel()
-		var raw json.RawMessage
-		var err error
-		if m.claudeLiveElsewhere(id) != nil {
-			raw, err = m.asideElsewhere(cctx, s, prompt)
-		} else {
-			raw, err = m.ClaudeControl(cctx, id, "side_question", map[string]any{"question": prompt})
-		}
+		answer, err := m.answerAside(cctx, s, id, prompt, isClaude)
 		done := a
 		done.DoneTs = now()
-		if err == nil {
-			var r struct {
-				Response string `json:"response"`
-			}
-			if json.Unmarshal(raw, &r) == nil && strings.TrimSpace(r.Response) != "" {
-				done.State, done.Answer = "done", r.Response
-			} else {
-				err = errors.New("Claude returned no answer")
-			}
-		}
 		if err != nil {
 			done.State, done.Error = "failed", err.Error()
+		} else {
+			done.State, done.Answer = "done", answer
 		}
 		s.mu.Lock()
 		found := false
@@ -1587,7 +1572,7 @@ func (m *Manager) AskAside(ctx context.Context, id, question, followUp string) (
 			}
 		}
 		s.scheduleSaveLocked()
-		title := firstNonEmpty(s.meta.Title, "Claude session")
+		title := firstNonEmpty(s.meta.Title, s.agentLabelLocked()+" session")
 		removed := s.removed
 		s.mu.Unlock()
 		if found && !removed {
@@ -1602,6 +1587,30 @@ func (m *Manager) AskAside(ctx context.Context, id, question, followUp string) (
 		}
 	}()
 	return &a, nil
+}
+
+// answerAside gets the answer to a side question from the right place.
+func (m *Manager) answerAside(ctx context.Context, s *Session, id, prompt string, isClaude bool) (string, error) {
+	if !isClaude {
+		return m.asideAgy(ctx, s, prompt)
+	}
+	var raw json.RawMessage
+	var err error
+	if m.claudeLiveElsewhere(id) != nil {
+		raw, err = m.asideElsewhere(ctx, s, prompt)
+	} else {
+		raw, err = m.ClaudeControl(ctx, id, "side_question", map[string]any{"question": prompt})
+	}
+	if err != nil {
+		return "", err
+	}
+	var r struct {
+		Response string `json:"response"`
+	}
+	if json.Unmarshal(raw, &r) != nil || strings.TrimSpace(r.Response) == "" {
+		return "", errors.New("Claude returned no answer")
+	}
+	return r.Response, nil
 }
 
 // asideElsewhere answers a side question about a conversation that another

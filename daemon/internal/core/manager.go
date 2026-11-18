@@ -154,6 +154,10 @@ func (m *Manager) loadSessions() {
 }
 
 func (m *Manager) saveSession(s *Session) {
+	// One save at a time per session, so an older snapshot can't land on top
+	// of a newer one.
+	s.saveMu.Lock()
+	defer s.saveMu.Unlock()
 	s.mu.Lock()
 	if s.removed || s.meta.ID == "" {
 		s.mu.Unlock()
@@ -172,12 +176,26 @@ func (m *Manager) saveSession(s *Session) {
 	}
 }
 
+// writeFileAtomic replaces path with b. Each write gets its own temporary
+// file, so concurrent writers can't interleave or lose the file mid-rename.
 func writeFileAtomic(path string, b []byte) error {
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, b, 0o600); err != nil {
+	f, err := os.CreateTemp(filepath.Dir(path), filepath.Base(path)+".tmp*")
+	if err != nil {
 		return err
 	}
-	return os.Rename(tmp, path)
+	tmp := f.Name()
+	if _, err = f.Write(b); err == nil {
+		err = f.Close()
+	} else {
+		_ = f.Close()
+	}
+	if err == nil {
+		err = os.Rename(tmp, path)
+	}
+	if err != nil {
+		_ = os.Remove(tmp)
+	}
+	return err
 }
 
 // SaveAll persists every session (used at shutdown).
@@ -1021,6 +1039,9 @@ func (m *Manager) idleFor(s *Session) time.Duration {
 		if t.Status == "running" {
 			return 0 // a background command or subagent is still working
 		}
+	}
+	if s.agyBusyLocked() {
+		return 0 // agy's background tasks or subagents are still working
 	}
 	n := len(s.tr.Items)
 	for i := n - 1; i >= 0 && i >= n-80; i-- {

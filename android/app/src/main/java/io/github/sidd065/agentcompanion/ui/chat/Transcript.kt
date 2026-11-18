@@ -440,14 +440,16 @@ fun ThoughtBlock(item: Item) {
         Row(Modifier.clip(RoundedCornerShape(8.dp)).clickable { open = !open }.padding(vertical = 4.dp), verticalAlignment = Alignment.CenterVertically) {
             Icon(Icons.Outlined.Lightbulb, null, Modifier.size(15.dp), tint = ex.muted)
             Spacer(Modifier.width(6.dp))
-            val head = item.text.orEmpty().lineSequence().firstOrNull { it.isNotBlank() }?.trim()?.trim('*')?.take(80) ?: "Thinking"
+            val head = item.text.orEmpty().lineSequence().firstOrNull { it.isNotBlank() }?.let { plainPreview(it) }?.take(80)?.ifBlank { null } ?: "Thinking"
             Text(head, style = MaterialTheme.typography.bodySmall, color = ex.muted, fontStyle = FontStyle.Italic, maxLines = 1, overflow = TextOverflow.Ellipsis,
                 modifier = Modifier.weight(1f, fill = false))
             Icon(if (open) Icons.Outlined.ExpandLess else Icons.Outlined.ExpandMore, null, Modifier.size(16.dp), tint = ex.muted)
         }
         AnimatedVisibility(open) {
             Box(Modifier.padding(start = 21.dp, bottom = 6.dp)) {
-                Text(item.text.orEmpty().trim(), style = MaterialTheme.typography.bodySmall, color = ex.muted, fontStyle = FontStyle.Italic)
+                // Thoughts are Markdown too (bold section titles, `code`, lists).
+                MarkdownText(item.text.orEmpty().trim(), style = MaterialTheme.typography.bodySmall.copy(fontStyle = FontStyle.Italic),
+                    color = ex.muted, selectable = false)
             }
         }
     }

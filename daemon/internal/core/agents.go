@@ -48,7 +48,7 @@ func (m *Manager) Agents() []AgentProfile {
 		return agentsList
 	}
 	agy := AgentProfile{ID: "agy", Name: "Antigravity (agy)", Command: m.cfg.AgyPath,
-		Features: []string{"history", "fork", "rewind", "rename", "archive", "pin", "delete", "export", "changes", "artifacts", "quota", "terminal", "manage"}}
+		Features: []string{"history", "fork", "rewind", "rename", "archive", "pin", "delete", "export", "changes", "artifacts", "quota", "terminal", "manage", "asides", "autoTurns"}}
 	if v := versionOf(m.cfg.AgyPath, "--version"); v != "" {
 		agy.Available, agy.Version = true, v
 	} else {

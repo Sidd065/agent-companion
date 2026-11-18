@@ -406,7 +406,8 @@ class SessionStore(val id: String, private val conn: HostConnection) {
     var asidesLoaded = false
         private set
     private val keepsAsides: Boolean
-        get() = conn.agents.value.firstOrNull { it.id == "claude" }?.features?.contains("asides") == true
+        get() = conn.agents.value.firstOrNull { it.id == (summary.value?.agent ?: "agy") }?.features?.contains("asides") == true
+    private val isClaude: Boolean get() = summary.value?.agent == "claude"
 
     fun onAside(a: Aside, fromEvent: Boolean = false) {
         val cur = asides.value
@@ -439,6 +440,7 @@ class SessionStore(val id: String, private val conn: HostConnection) {
             return
         }
         // agentc 0.3.0: answer directly; the result stays on this phone.
+        if (!isClaude) throw RpcException("Side questions for agy need agentc 0.3.2 or newer on this computer")
         if (asides.value.any { it.state == "pending" }) throw RpcException("Claude is still answering the previous side question")
         val a = Aside("local-" + System.nanoTime(), question, ts = System.currentTimeMillis(), followUp = followUp.orEmpty())
         withContext(Dispatchers.Main) { onAside(a) }

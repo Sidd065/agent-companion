@@ -1,5 +1,6 @@
 package io.github.sidd065.agentcompanion.ui.chat
 
+import io.github.sidd065.agentcompanion.ui.components.AppSheet
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -413,7 +414,7 @@ fun CommentSheet(
     var text by remember { mutableStateOf(initial) }
     val focus = remember { FocusRequester() }
     LaunchedEffect(Unit) { runCatching { focus.requestFocus() } }
-    ModalBottomSheet(onDismissRequest = onDismiss, sheetState = state) {
+    AppSheet(onDismissRequest = onDismiss, sheetState = state) {
         Column(Modifier.fillMaxWidth().imePadding().padding(horizontal = 16.dp).padding(bottom = 16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
             Text(title, style = MaterialTheme.typography.titleMedium)
             Surface(color = LocalExtra.current.codeBg, shape = RoundedCornerShape(8.dp)) {

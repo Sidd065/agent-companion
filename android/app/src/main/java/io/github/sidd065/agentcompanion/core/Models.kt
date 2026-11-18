@@ -80,6 +80,8 @@ data class SessionSummary(
     val suggestion: String? = null,
     /** Set when another Claude Code process on the computer has this conversation open (its status). */
     val liveElsewhere: String? = null,
+    /** When the running turn began (ms); also set for turns the agent started on its own. */
+    val turnStart: Long = 0,
 ) {
     val busy: Boolean get() = state == "running" || state == "starting" || state == "waiting"
     val needsInput: Boolean get() = !attention.isNullOrEmpty() || state == "waiting"

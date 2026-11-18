@@ -65,7 +65,19 @@ data class LiveSubagent(
 }
 
 @Serializable
-data class LiveMessage(val id: String, val sender: String = "", val title: String = "", val content: String = "", val ts: Long = 0, val read: Boolean = false)
+data class LiveMessage(
+    val id: String,
+    val sender: String = "",
+    val title: String = "",
+    val content: String = "",
+    val ts: Long = 0,
+    val read: Boolean = false,
+    /** task (a background command's result), user (your queued message), notice (from agy) or "" (a subagent). */
+    val kind: String = "",
+) {
+    /** What this message is, also for agentc versions that don't say. */
+    val effectiveKind: String get() = kind.ifBlank { if (content.startsWith("Task id ")) "task" else "" }
+}
 
 /** One step of a subagent transcript. */
 @Serializable
