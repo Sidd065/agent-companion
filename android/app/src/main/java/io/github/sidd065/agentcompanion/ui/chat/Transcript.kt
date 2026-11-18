@@ -75,6 +75,7 @@ import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.unit.dp
 import coil3.compose.AsyncImage
 import io.github.sidd065.agentcompanion.core.AppJson
@@ -83,6 +84,7 @@ import io.github.sidd065.agentcompanion.core.Tool
 import io.github.sidd065.agentcompanion.net.HostConnection
 import io.github.sidd065.agentcompanion.net.decode
 import io.github.sidd065.agentcompanion.net.params
+import io.github.sidd065.agentcompanion.ui.components.markdownToPlain
 import io.github.sidd065.agentcompanion.ui.components.CodeBox
 import io.github.sidd065.agentcompanion.ui.components.DiffView
 import io.github.sidd065.agentcompanion.ui.components.LineDiff
@@ -342,12 +344,10 @@ fun activeAttentionId(items: List<Item>, attention: String?): String? {
     return null
 }
 
-private val mdLink = Regex("""\[([^\]]*)]\([^)]*\)""")
-private val mdMarks = Regex("[`*_#>]+")
 private val spaces = Regex("\\s+")
 
 /** Markdown-ish text flattened for one-line previews. */
-fun plainPreview(s: String): String = s.replace(mdLink, "$1").replace(mdMarks, "").replace(spaces, " ").trim()
+fun plainPreview(s: String): String = markdownToPlain(s).replace(spaces, " ").trim()
 
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
@@ -385,7 +385,18 @@ fun UserBubble(item: Item, actions: TranscriptActions) {
                         }
                     }
                 } else if (!item.text.isNullOrBlank()) {
-                    SelectionContainer { Text(item.text, style = MaterialTheme.typography.bodyMedium, color = ex.onUserBubble) }
+                    // A pasted log or review can run for screens: show the start until asked.
+                    val long = item.text.length > 1500 || item.text.count { it == '\n' } > 24
+                    var expanded by rememberSaveable(item.id) { mutableStateOf(false) }
+                    SelectionContainer {
+                        Text(item.text, style = MaterialTheme.typography.bodyMedium, color = ex.onUserBubble,
+                            maxLines = if (long && !expanded) 14 else Int.MAX_VALUE, overflow = TextOverflow.Ellipsis)
+                    }
+                    if (long) Text(
+                        if (expanded) "Show less" else "Show all ${item.text.length / 1000}k characters",
+                        style = MaterialTheme.typography.labelLarge, color = ex.onUserBubble.copy(alpha = 0.8f),
+                        modifier = Modifier.padding(top = 6.dp).clip(RoundedCornerShape(6.dp)).clickable { expanded = !expanded }.padding(vertical = 2.dp),
+                    )
                 }
                 item.blocks?.filter { it.type != "image" }?.forEach { b ->
                     Row(

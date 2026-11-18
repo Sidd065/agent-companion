@@ -164,8 +164,10 @@ private fun NewSessionContent(initialCwd: String, textState: androidx.compose.ru
     LaunchedEffect(conn) {
         if (cwd.isBlank()) {
             runCatching {
+                // The folder this phone last started a session in, else the most active one.
+                val mine = runCatching { ctx.getSharedPreferences("ui", android.content.Context.MODE_PRIVATE).getString("lastCwd:${conn.config.id}", null) }.getOrNull()
                 val h = conn.rpc.call("fs.home").jsonObject
-                cwd = h["recent"]?.jsonArray?.firstOrNull()?.jsonPrimitive?.content ?: h["home"]?.jsonPrimitive?.content ?: ""
+                cwd = mine?.takeIf { it.isNotBlank() } ?: h["recent"]?.jsonArray?.firstOrNull()?.jsonPrimitive?.content ?: h["home"]?.jsonPrimitive?.content ?: ""
             }
         }
     }
@@ -202,6 +204,7 @@ private fun NewSessionContent(initialCwd: String, textState: androidx.compose.ru
                 }, timeoutMs = 180_000).jsonObject
                 res["warning"]?.jsonPrimitive?.content?.let { snack.showSnackbar(it) }
                 val id = res["session"]!!.jsonObject["id"]!!.jsonPrimitive.content
+                runCatching { ctx.getSharedPreferences("ui", android.content.Context.MODE_PRIVATE).edit().putString("lastCwd:${conn.config.id}", cwd).apply() }
                 nav.navigate(Routes.chat(id)) { popUpTo(Routes.SESSIONS) }
             } catch (e: Exception) {
                 snack.showSnackbar("Couldn't start session: ${e.message}")
@@ -248,8 +251,9 @@ private fun NewSessionContent(initialCwd: String, textState: androidx.compose.ru
                 }
             }
             // Prompt
+            // A long pasted prompt scrolls inside the field, so the flags and Start stay near.
             OutlinedTextField(
-                text, { text = it }, modifier = Modifier.fillMaxWidth().heightIn(min = 120.dp),
+                text, { text = it }, modifier = Modifier.fillMaxWidth().heightIn(min = 120.dp, max = 280.dp),
                 placeholder = { Text("Describe a task or ask a question…") },
             )
             if (attachments.isNotEmpty()) {
@@ -357,9 +361,10 @@ fun DirectoryPicker(conn: HostConnection, start: String, onDismiss: () -> Unit, 
             }
             error?.let { Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(16.dp)) }
             LazyColumn(Modifier.fillMaxWidth()) {
-                if (recent.isNotEmpty() && path == home) {
+                // Recent folders where the picker opens and at home, before browsing away.
+                if (recent.isNotEmpty() && (path == home || path == start)) {
                     item { Text("Recent", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.primary, modifier = Modifier.padding(start = 16.dp, top = 8.dp)) }
-                    items(recent) { r ->
+                    items(recent.filter { it != path }) { r ->
                         ListItem(headlineContent = { Text(baseName(r)) }, supportingContent = { Text(shortPath(r, home), fontFamily = FontFamily.Monospace) },
                             leadingContent = { Icon(Icons.Outlined.History, null) }, modifier = Modifier.clickable { path = r })
                     }

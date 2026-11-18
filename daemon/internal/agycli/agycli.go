@@ -124,10 +124,26 @@ func (c *CLI) Version(ctx context.Context) string {
 	return v.(string)
 }
 
-// Model is one `agy models` row.
+// Model is one `agy models` row. Default marks the model agy's settings.json
+// picks when no --model is given.
 type Model struct {
-	ID   string `json:"id"`
-	Name string `json:"name"`
+	ID      string `json:"id"`
+	Name    string `json:"name"`
+	Default bool   `json:"default,omitempty"`
+}
+
+// DefaultModel is the "model" in agy's settings.json (a display name or an
+// id), "" when unset.
+func (c *CLI) DefaultModel() string {
+	b, err := os.ReadFile(filepath.Join(c.DataDir, "settings.json"))
+	if err != nil {
+		return ""
+	}
+	var s struct {
+		Model string `json:"model"`
+	}
+	_ = json.Unmarshal(b, &s)
+	return strings.TrimSpace(s.Model)
 }
 
 // Models lists models available to the account.
@@ -155,7 +171,13 @@ func (c *CLI) Models(ctx context.Context, force bool) ([]Model, error) {
 	if err != nil {
 		return nil, err
 	}
-	return v.([]Model), nil
+	// Mark the default on a copy: the setting can change between cached runs.
+	def := c.DefaultModel()
+	out := append([]Model(nil), v.([]Model)...)
+	for i := range out {
+		out[i].Default = def != "" && (out[i].Name == def || out[i].ID == def)
+	}
+	return out, nil
 }
 
 // Changelog returns the release notes.

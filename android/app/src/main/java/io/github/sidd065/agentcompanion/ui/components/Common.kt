@@ -160,6 +160,21 @@ fun StatusDot(state: String, attention: String?, modifier: Modifier = Modifier, 
     Box(modifier.size(size.dp).alpha(alpha).clip(CircleShape).background(color))
 }
 
+private val backticked = Regex("`([^`]+)`")
+
+/** UI copy with `commands` in backticks shown in monospace, without the backticks. */
+fun codeSpans(s: String): androidx.compose.ui.text.AnnotatedString = androidx.compose.ui.text.buildAnnotatedString {
+    var last = 0
+    backticked.findAll(s).forEach { m ->
+        append(s.substring(last, m.range.first))
+        pushStyle(androidx.compose.ui.text.SpanStyle(fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace))
+        append(m.groupValues[1])
+        pop()
+        last = m.range.last + 1
+    }
+    append(s.substring(last))
+}
+
 @Composable
 fun EmptyState(icon: ImageVector, title: String, body: String? = null, modifier: Modifier = Modifier, action: (@Composable () -> Unit)? = null) {
     Column(
@@ -172,7 +187,7 @@ fun EmptyState(icon: ImageVector, title: String, body: String? = null, modifier:
         Text(title, style = MaterialTheme.typography.titleMedium, textAlign = TextAlign.Center)
         if (body != null) {
             Spacer(Modifier.height(6.dp))
-            Text(body, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant, textAlign = TextAlign.Center)
+            Text(codeSpans(body), style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant, textAlign = TextAlign.Center)
         }
         if (action != null) {
             Spacer(Modifier.height(20.dp))

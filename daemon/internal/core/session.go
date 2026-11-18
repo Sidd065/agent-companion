@@ -62,6 +62,9 @@ type SessionMeta struct {
 	// Asides are side questions (/btw) asked about the conversation; kept
 	// here, not in the transcript, because they aren't part of it.
 	Asides []Aside `json:"asides,omitempty"`
+	// LastPrompt is when the user last sent the agent a message from here
+	// (ms). It settles review requests made before it.
+	LastPrompt int64 `json:"lastPrompt,omitempty"`
 }
 
 // QueuedPrompt is a message waiting for the current turn to end.
@@ -172,6 +175,7 @@ type Session struct {
 	agy        agyRunState // agy's run state from its agent state stream
 	autoFrom   int         // transcript length when the agent started its own turn
 	autoCancel bool        // the user stopped the agent's own turn
+	awaitAck   bool        // a prompt went to agy, which hasn't produced output since
 	saveMu     sync.Mutex  // serializes saves of this session
 	// Following a Claude transcript that another process (a terminal) writes:
 	// the replayer, the last entry shown and the file's last seen stamp.
@@ -427,6 +431,7 @@ func (s *Session) onUpdate(raw json.RawMessage) {
 			s.queueOpsLocked(s.tr.UserChunkRef(b, s.blockForLocked, ref, ts)...)
 		}
 	case "agent_message_chunk", "agent_thought_chunk":
+		s.ackSentLocked()
 		kind := "agent"
 		if h.SessionUpdate == "agent_thought_chunk" {
 			kind = "thought"
@@ -441,9 +446,11 @@ func (s *Session) onUpdate(raw json.RawMessage) {
 			}
 		}
 	case "tool_call", "tool_call_update":
+		s.ackSentLocked()
 		ops, _ := s.tr.ToolCall(raw, h.SessionUpdate == "tool_call")
 		s.queueOpsLocked(ops...)
 	case "plan":
+		s.ackSentLocked()
 		var p struct {
 			Entries json.RawMessage `json:"entries"`
 		}
@@ -874,7 +881,7 @@ func (s *Session) start(ctx context.Context, mode string) error {
 		s.mu.Lock()
 		var keep []*Item
 		for _, it := range s.tr.Items {
-			if it.Kind == "user" && (it.State == "queued" || it.State == "sent") {
+			if it.Kind == "user" && (it.State == "queued" || it.State == "sent" || it.State == "delivered") {
 				keep = append(keep, it)
 			}
 		}
@@ -1154,12 +1161,36 @@ func (s *Session) Prompt(in PromptInput) (map[string]any, error) {
 	it, op := s.tr.AddUser(in.Text, shown, "sent")
 	it.Ref = ref
 	s.queueOpsLocked(op)
+	s.promptSentLocked()
 	s.beginTurnLocked()
 	s.suggestion = ""
 	s.mu.Unlock()
 	s.emit()
 	go s.runPrompt(it.ID, ref, blocks)
 	return map[string]any{"queued": false, "itemId": it.ID}, nil
+}
+
+// promptSentLocked notes a prompt on its way to the agent.
+func (s *Session) promptSentLocked() {
+	s.awaitAck = true
+	s.meta.LastPrompt = now()
+}
+
+// ackSentLocked marks prompts agy has started on as delivered. agy doesn't echo
+// a prompt while it runs, so its first output is the receipt. Claude Code
+// confirms each prompt itself (ExtUserMessage).
+func (s *Session) ackSentLocked() {
+	if !s.awaitAck || s.isClaude() {
+		return
+	}
+	s.awaitAck = false
+	for i := len(s.tr.Items) - 1; i >= 0 && i >= len(s.tr.Items)-200; i-- {
+		if it := s.tr.Items[i]; it.Kind == "user" && it.State == "sent" {
+			if op, ok := s.tr.SetUserState(it.ID, "delivered"); ok {
+				s.queueOpsLocked(op)
+			}
+		}
+	}
 }
 
 func (s *Session) beginTurnLocked() {
@@ -1201,7 +1232,7 @@ func (s *Session) finishPrompt(itemID string, res *acp.PromptResult, err error) 
 	if s.inflight < 0 {
 		s.inflight = 0
 	}
-	if it := s.tr.Get(itemID); it != nil && it.State == "sent" {
+	if it := s.tr.Get(itemID); it != nil && (it.State == "sent" || it.State == "delivered") {
 		st := ""
 		if err != nil {
 			st = "failed"
@@ -1267,6 +1298,7 @@ func (s *Session) finishPrompt(itemID string, res *acp.PromptResult, err error) 
 			if op, ok := s.tr.SetUserState(q.ItemID, "sent"); ok {
 				s.queueOpsLocked(op)
 			}
+			s.promptSentLocked()
 			s.beginTurnLocked()
 			notifyKind = "" // the agent continues with the queued message
 		}
@@ -1394,6 +1426,7 @@ func (s *Session) QueueAction(itemID, action, text string) error {
 		if op, ok := s.tr.SetUserState(itemID, "sent"); ok {
 			s.queueOpsLocked(op)
 		}
+		s.promptSentLocked()
 		s.beginTurnLocked()
 		s.mu.Unlock()
 		s.emit()

@@ -47,9 +47,11 @@ data class LiveArtifact(
     val userFacing: Boolean = false,
     val review: String? = null,
     val url: String? = null,
+    /** The user wrote to the agent after this version (agentc 0.3.3+). */
+    val answered: Boolean = false,
 ) {
-    /** agy asked for feedback and nobody has approved it yet. */
-    val needsReview: Boolean get() = requestFeedback && review != "APPROVED" && review != "ACCEPTED"
+    /** agy asked for feedback and nobody has answered or approved it yet. */
+    val needsReview: Boolean get() = requestFeedback && !answered && review != "APPROVED" && review != "ACCEPTED"
 }
 
 @Serializable

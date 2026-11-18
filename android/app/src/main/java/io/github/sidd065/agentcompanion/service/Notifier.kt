@@ -137,7 +137,15 @@ class Notifier(private val ctx: Context) {
                     "aside" -> "Your side question has an answer"
                     else -> known?.lastText ?: "Turn finished"
                 }
-            }.let { if (n0.kind == "aside") io.github.sidd065.agentcompanion.ui.chat.plainPreview(it) else it },
+            }.let { body ->
+                when (n0.kind) {
+                    // Agent text is Markdown; commands and terminal output are not.
+                    "done", "question", "plan", "error", "aside" -> io.github.sidd065.agentcompanion.ui.components.markdownToPlain(body)
+                    // The title already names the session: "<tool> — <session>" → "<tool>".
+                    "permission" -> listOfNotNull(known?.title, known?.displayTitle).fold(body) { b, t -> b.removeSuffix(" — $t") }
+                    else -> body
+                }
+            },
         )
         val hostId = conn.config.id
         val hostLabel = conn.config.label

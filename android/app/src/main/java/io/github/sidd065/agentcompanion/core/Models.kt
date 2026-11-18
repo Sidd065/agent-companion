@@ -374,7 +374,7 @@ data class ConfigFileInfo(
 data class SkillInfo(val name: String, val description: String = "", val path: String = "", val source: String = "")
 
 @Serializable
-data class AgyModel(val id: String, val name: String = "")
+data class AgyModel(val id: String, val name: String = "", val default: Boolean = false)
 
 /**
  * agy launch flags chosen on the phone. Saved in app settings and applied to

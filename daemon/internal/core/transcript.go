@@ -357,7 +357,7 @@ func (t *Transcript) UserChunk(b acp.ContentBlock, blockFor func(acp.ContentBloc
 	if b.Type == "text" {
 		want := normText(b.Text)
 		for _, it := range t.Items {
-			if it.Kind == "user" && it.State == "sent" {
+			if it.Kind == "user" && (it.State == "sent" || it.State == "delivered") {
 				have := normText(it.Text)
 				if have == want || strings.HasSuffix(want, have) || strings.HasPrefix(want, have) {
 					it.State = ""

@@ -114,6 +114,8 @@ fun AgyFlagsSheet(conn: HostConnection?, onDismiss: () -> Unit) {
     val ex = LocalExtra.current
     val sheet = rememberModalBottomSheetState(skipPartiallyExpanded = true)
     var models by remember { mutableStateOf<List<AgyModel>>(emptyList()) }
+    // agentc 0.3.3+ marks the model agy's settings.json picks.
+    val defaultLabel = models.firstOrNull { it.default }?.let { "agy default · ${it.name}" } ?: "agy default (settings.json)"
     var agents by remember { mutableStateOf<List<String>>(emptyList()) }
     var modelMenu by remember { mutableStateOf(false) }
     var picking by remember { mutableStateOf(false) }
@@ -168,10 +170,10 @@ fun AgyFlagsSheet(conn: HostConnection?, onDismiss: () -> Unit) {
             Text("--model", style = MaterialTheme.typography.labelLarge, fontFamily = FontFamily.Monospace)
             Box {
                 OutlinedButton(onClick = { modelMenu = true }, modifier = Modifier.fillMaxWidth()) {
-                    Text(models.firstOrNull { it.id == f.model }?.name ?: f.model.ifBlank { "agy default (settings.json)" }, modifier = Modifier.weight(1f))
+                    Text(models.firstOrNull { it.id == f.model }?.name ?: f.model.ifBlank { defaultLabel }, modifier = Modifier.weight(1f))
                 }
                 DropdownMenu(modelMenu, { modelMenu = false }) {
-                    DropdownMenuItem(text = { Text("agy default (settings.json)") }, onClick = { modelMenu = false; upd { it.copy(model = "") } })
+                    DropdownMenuItem(text = { Text(defaultLabel) }, onClick = { modelMenu = false; upd { it.copy(model = "") } })
                     models.forEach { m -> DropdownMenuItem(text = { Text(m.name) }, onClick = { modelMenu = false; upd { it.copy(model = m.id) } }) }
                     if (models.isEmpty()) DropdownMenuItem(text = { Text("Connect to a machine to list models") }, onClick = { modelMenu = false })
                 }

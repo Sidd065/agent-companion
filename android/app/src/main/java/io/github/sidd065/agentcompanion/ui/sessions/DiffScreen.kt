@@ -11,9 +11,11 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.automirrored.outlined.WrapText
 import androidx.compose.material.icons.outlined.ExpandLess
 import androidx.compose.material.icons.outlined.ExpandMore
 import androidx.compose.material.icons.outlined.Refresh
@@ -107,6 +109,10 @@ fun DiffScreen(sessionId: String?, path: String) {
                 actions = {
                     if (sessionId != null) IconButton(onClick = { commenting = !commenting }) {
                         Icon(if (commenting) Icons.Outlined.Close else Icons.Outlined.AddComment, if (commenting) "Stop commenting" else "Comment on lines")
+                    }
+                    IconButton(onClick = { scope.launch { g.prefs.update { it.copy(codeWrap = !it.codeWrap) } } }) {
+                        Icon(Icons.AutoMirrored.Outlined.WrapText, if (settings.codeWrap) "Don't wrap lines" else "Wrap lines",
+                            tint = if (settings.codeWrap) MaterialTheme.colorScheme.primary else androidx.compose.ui.graphics.Color.Unspecified)
                     }
                     IconButton(onClick = { reload++ }) { Icon(Icons.Outlined.Refresh, "Refresh") }
                 },
@@ -206,15 +212,21 @@ private fun FileDiffList(
 ) {
     val ex = LocalExtra.current
     val open = remember { mutableStateMapOf<String, Boolean>() }
-    LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(12.dp)) {
+    val list = androidx.compose.foundation.lazy.rememberLazyListState()
+    val scope = androidx.compose.runtime.rememberCoroutineScope()
+    LazyColumn(Modifier.fillMaxSize(), state = list, contentPadding = PaddingValues(12.dp)) {
         item { Text(header, style = MaterialTheme.typography.labelLarge, color = ex.muted, modifier = Modifier.padding(4.dp)) }
-        items(files, key = { it.first }) { (path, lines, binary) ->
+        itemsIndexed(files, key = { _, f -> f.first }) { index, (path, lines, binary) ->
             val isOpen = open[path] ?: (files.size <= 3)
             val added = lines.count { it.type == '+' }
             val removed = lines.count { it.type == '-' }
             Column(Modifier.fillMaxWidth().padding(vertical = 4.dp).clip(RoundedCornerShape(10.dp))) {
                 Row(
-                    Modifier.fillMaxWidth().clickable { open[path] = !isOpen }.padding(horizontal = 6.dp, vertical = 8.dp),
+                    Modifier.fillMaxWidth().clickable {
+                        open[path] = !isOpen
+                        // An opened file's diff starts at the top of the screen, not below the fold.
+                        if (!isOpen) scope.launch { list.animateScrollToItem(index + 1) }
+                    }.padding(horizontal = 6.dp, vertical = 8.dp),
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
                     Icon(if (isOpen) Icons.Outlined.ExpandLess else Icons.Outlined.ExpandMore, null)

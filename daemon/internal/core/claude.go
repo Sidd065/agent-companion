@@ -253,7 +253,7 @@ func (s *Session) replayClaude() error {
 	s.mu.Lock()
 	var keep []*Item
 	for _, it := range s.tr.Items {
-		if it.Kind == "user" && (it.State == "queued" || it.State == "sent") {
+		if it.Kind == "user" && (it.State == "queued" || it.State == "sent" || it.State == "delivered") {
 			keep = append(keep, it)
 		}
 	}

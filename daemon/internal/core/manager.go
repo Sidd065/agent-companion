@@ -132,7 +132,7 @@ func (m *Manager) loadSessions() {
 			continue
 		}
 		for _, it := range ss.Items {
-			if it.Kind == "user" && it.State == "sent" {
+			if it.Kind == "user" && (it.State == "sent" || it.State == "delivered") {
 				it.State = ""
 			}
 			if it.Kind == "perm" && it.State == "pending" {

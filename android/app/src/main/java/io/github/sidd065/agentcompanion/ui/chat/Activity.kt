@@ -190,7 +190,14 @@ fun ActivitySheet(
                                 ActivityRow(
                                     when (a.kind) { "image", "video" -> Icons.Outlined.Image; "url" -> Icons.Outlined.Link; "markdown" -> Icons.Outlined.Article; else -> Icons.Outlined.InsertDriveFile },
                                     a.name, a.summary,
-                                    listOfNotNull(if (a.needsReview) "review requested" else a.review?.lowercase(), if (a.updated > 0) relTime(a.updated) else null).joinToString(" · "),
+                                    listOfNotNull(
+                                        when {
+                                            a.needsReview -> "review requested"
+                                            a.requestFeedback && a.answered && a.review == null -> "answered"
+                                            else -> a.review?.lowercase()
+                                        },
+                                        if (a.updated > 0) relTime(a.updated) else null,
+                                    ).joinToString(" · "),
                                     highlight = a.needsReview,
                                 ) { onOpenArtifact(a) }
                             }

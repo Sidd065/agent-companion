@@ -119,3 +119,69 @@ func TestAgyAutoTurns(t *testing.T) {
 		t.Fatalf("idleFor once fully idle = %v", d)
 	}
 }
+
+// agy doesn't echo a prompt while it runs: its first output marks it delivered,
+// so the phone stops saying "Sending…" while agy works on it.
+func TestAgyPromptDelivered(t *testing.T) {
+	s := newAgyTestSession(t)
+	s.mu.Lock()
+	it, op := s.tr.AddUser("plan the week", nil, "sent")
+	s.queueOpsLocked(op)
+	s.awaitAck = true
+	s.beginTurnLocked()
+	s.mu.Unlock()
+
+	s.onUpdate(json.RawMessage(`{"sessionUpdate":"agent_thought_chunk","content":{"type":"text","text":"Thinking"}}`))
+	if it.State != "delivered" {
+		t.Fatalf("after agy's first output: state %q", it.State)
+	}
+	// A later echo of the same prompt (a reload) doesn't duplicate it.
+	n := len(s.tr.Items)
+	s.onUpdate(json.RawMessage(`{"sessionUpdate":"user_message_chunk","content":{"type":"text","text":"plan the week"}}`))
+	if len(s.tr.Items) != n || it.State != "" {
+		t.Fatalf("echo: items %d→%d state %q", n, len(s.tr.Items), it.State)
+	}
+
+	// A prompt that fails after delivery is marked failed.
+	s.mu.Lock()
+	it2, op := s.tr.AddUser("and the next", nil, "sent")
+	s.queueOpsLocked(op)
+	s.awaitAck = true
+	s.beginTurnLocked()
+	s.mu.Unlock()
+	s.onUpdate(json.RawMessage(`{"sessionUpdate":"tool_call","toolCallId":"t1","title":"Read","status":"pending"}`))
+	if it2.State != "delivered" {
+		t.Fatalf("tool call: state %q", it2.State)
+	}
+	s.finishPrompt(it2.ID, &acp.PromptResult{}, os.ErrDeadlineExceeded)
+	if it2.State != "failed" {
+		t.Fatalf("failed prompt: state %q", it2.State)
+	}
+}
+
+// A review request is settled once the user writes to agy after the artifact
+// was last written, and stays settled across history reloads.
+func TestReviewAnswered(t *testing.T) {
+	s := newAgyTestSession(t)
+	arts := []ArtifactInfo{
+		{Name: "plan.md", RequestFeedback: true, Updated: 1000},
+		{Name: "walkthrough.md", RequestFeedback: false, Updated: 500},
+		{Name: "plan2.md", RequestFeedback: true, Updated: 3000},
+	}
+	s.mu.Lock()
+	s.promptSentLocked()
+	s.meta.LastPrompt = 2000
+	s.mu.Unlock()
+	markAnswered(arts, s.lastUserTs())
+	if !arts[0].Answered || arts[1].Answered || arts[2].Answered {
+		t.Fatalf("answered: %v %v %v", arts[0].Answered, arts[1].Answered, arts[2].Answered)
+	}
+	// A reload replays the history with fresh timestamps; that's no answer.
+	s.mu.Lock()
+	s.queueOpsLocked(s.tr.Reset())
+	s.mu.Unlock()
+	s.onUpdate(json.RawMessage(`{"sessionUpdate":"user_message_chunk","content":{"type":"text","text":"old prompt"}}`))
+	if got := s.lastUserTs(); got != 2000 {
+		t.Fatalf("after reload: last prompt %d", got)
+	}
+}

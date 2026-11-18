@@ -62,6 +62,9 @@ type ArtifactInfo struct {
 	UserFacing      bool   `json:"userFacing,omitempty"`
 	Review          string `json:"review,omitempty"`
 	URL             string `json:"url,omitempty"`
+	// Answered: the user wrote to the agent after this version was written
+	// (comments, Proceed or any message), so the review request is settled.
+	Answered bool `json:"answered,omitempty"`
 }
 
 // Subagent is a child agent spawned by the conversation.
@@ -330,7 +333,28 @@ func (m *Manager) ComputeLive(ctx context.Context, id string, ls *lsapi.Client) 
 			live.Messages = live.Messages[n-50:]
 		}
 	}
+	if s := m.Get(id); s != nil {
+		markAnswered(live.Artifacts, s.lastUserTs())
+	}
 	return live, nil
+}
+
+// markAnswered settles review requests the user replied to after the artifact's
+// last change.
+func markAnswered(arts []ArtifactInfo, lastUser int64) {
+	for i := range arts {
+		if a := &arts[i]; a.RequestFeedback && lastUser > a.Updated {
+			a.Answered = true
+		}
+	}
+}
+
+// lastUserTs is when the user last sent the agent a message from agentc (0 if
+// never). Transcript times can't tell: a reload replays agy's history as new.
+func (s *Session) lastUserTs() int64 {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.meta.LastPrompt
 }
 
 // liveLS returns the language server of a running session (nil if not running).

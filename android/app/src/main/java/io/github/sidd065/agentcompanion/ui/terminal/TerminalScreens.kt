@@ -292,10 +292,18 @@ fun TerminalScreen(termId: String) {
     val settings by g.prefs.flow.collectAsState()
     val terms by conn.terms.collectAsState()
     val term = terms.firstOrNull { it.id == termId }
+    // The terminal leaves the list when its program exits; keep showing its name.
+    var termName by remember(termId) { mutableStateOf("") }
+    LaunchedEffect(term?.name) { term?.name?.takeIf { it.isNotBlank() }?.let { termName = it } }
     var generation by remember { mutableIntStateOf(0) }
     val remote = remember(conn, termId, generation) { RemoteTerminal(ctx, conn, termId) }
     val mods = remember { Modifiers() }
     val state by remote.state.collectAsState()
+    val exited by remote.exited.collectAsState()
+    // A finished program needs no keyboard.
+    LaunchedEffect(exited) {
+        if (exited) remote.view?.let { v -> ctx.getSystemService(InputMethodManager::class.java)?.hideSoftInputFromWindow(v.windowToken, 0) }
+    }
     val ctrl by mods.ctrl.collectAsState()
     val alt by mods.alt.collectAsState()
     var fontSp by remember { mutableIntStateOf(settings.terminalFontSize) }
@@ -316,10 +324,10 @@ fun TerminalScreen(termId: String) {
             TopAppBar(
                 title = {
                     Column {
-                        Text(term?.name ?: "Terminal", maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        Text(term?.name ?: termName.ifBlank { "Terminal" }, maxLines = 1, overflow = TextOverflow.Ellipsis)
                         Text(
                             listOfNotNull(
-                                when (state) { "connecting" -> "connecting…"; "connected" -> "live"; "closed" -> "detached"; else -> remote.error ?: "error" },
+                                when (state) { "connecting" -> "connecting…"; "connected" -> "live"; "closed" -> if (exited) "exited" else "detached"; else -> remote.error ?: "error" },
                                 term?.state?.takeIf { it.isNotBlank() }?.let { termStateLabel(it) },
                                 term?.cwd?.let { shortPath(it, conn.homeDir()) },
                             ).joinToString(" · "),
@@ -385,9 +393,17 @@ fun TerminalScreen(termId: String) {
                 if (state == "closed" || state == "error") {
                     Surface(Modifier.align(Alignment.BottomCenter).padding(16.dp), shape = RoundedCornerShape(14.dp), color = MaterialTheme.colorScheme.surfaceContainerHigh) {
                         Row(Modifier.padding(horizontal = 14.dp, vertical = 8.dp), verticalAlignment = Alignment.CenterVertically) {
-                            Text(if (state == "error") (remote.error ?: "Disconnected") else "Detached", style = MaterialTheme.typography.bodySmall, modifier = Modifier.weight(1f, fill = false))
+                            Text(
+                                when {
+                                    state == "error" -> remote.error ?: "Disconnected"
+                                    exited -> "${termName.ifBlank { "The program" }} exited"
+                                    else -> "Detached"
+                                },
+                                style = MaterialTheme.typography.bodySmall, modifier = Modifier.weight(1f, fill = false),
+                            )
                             Spacer(Modifier.width(8.dp))
-                            if (term != null) TextButton(onClick = { generation++ }) { Text("Reconnect") }
+                            if (exited) TextButton(onClick = { nav.popBackStack() }) { Text("Close") }
+                            else if (term != null) TextButton(onClick = { generation++ }) { Text("Reconnect") }
                         }
                     }
                 }

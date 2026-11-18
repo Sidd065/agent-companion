@@ -24,6 +24,7 @@ import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.automirrored.outlined.WrapText
 import androidx.compose.material.icons.automirrored.outlined.Chat
 import androidx.compose.material.icons.outlined.Code
 import androidx.compose.material.icons.outlined.Delete
@@ -70,6 +71,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.em
 import coil3.compose.AsyncImage
 import io.github.sidd065.agentcompanion.core.FsEntry
 import io.github.sidd065.agentcompanion.core.ReadResult
@@ -178,6 +180,10 @@ fun FileScreen(path: String, startEditing: Boolean) {
                             IconButton(onClick = { save(false) }, enabled = dirty && !saving) { Icon(Icons.Outlined.Save, "Save") }
                         } else {
                             if (isMarkdown) IconButton(onClick = { preview = !preview }) { Icon(if (preview) Icons.Outlined.Code else Icons.Outlined.Preview, "Toggle preview") }
+                            if (!isMarkdown || !preview) IconButton(onClick = { scope.launch { ctx.graph.prefs.update { it.copy(codeWrap = !it.codeWrap) } } }) {
+                                Icon(Icons.AutoMirrored.Outlined.WrapText, if (settings.codeWrap) "Don't wrap lines" else "Wrap lines",
+                                    tint = if (settings.codeWrap) MaterialTheme.colorScheme.primary else androidx.compose.ui.graphics.Color.Unspecified)
+                            }
                             IconButton(onClick = { draft = content?.text ?: ""; editing = true }) { Icon(Icons.Outlined.Edit, "Edit") }
                         }
                     }
@@ -304,7 +310,9 @@ private fun CodeView(text: String, lang: String?, wrap: Boolean, truncated: Bool
             itemsIndexed(lines) { i, l ->
                 Row {
                     Text((i + 1).toString().padStart(5), style = codeStyle, color = ex.muted, modifier = Modifier.width(48.dp))
-                    Text(l.replace("\t", "    "), style = codeStyle, softWrap = wrap, modifier = Modifier.padding(end = 16.dp))
+                    val code = l.replace("\t", "    ")
+                    Text(code, softWrap = wrap, modifier = Modifier.padding(end = 16.dp),
+                        style = if (wrap) codeStyle.copy(textIndent = androidx.compose.ui.text.style.TextIndent(restLine = ((code.length - code.trimStart().length + 2) * 0.6).em)) else codeStyle)
                 }
             }
         }

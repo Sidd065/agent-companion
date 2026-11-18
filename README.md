@@ -27,6 +27,7 @@ and terminals of all your computers together.
 - **Chat sessions** in any folder on any computer. Send text, photos and files; stop a turn; queue
   follow-ups or send them while the agent works. Switch model, effort and mode, and run slash commands.
 - **Live transcript**: streaming answers and thinking, tool calls with diffs, plans, to-dos and usage.
+  Markdown renders with highlighted code, tables and math (`$…$` as readable formulas).
   Long-press a message to copy it, select part of it, fork or rewind from it.
 - **Approvals**: allow or deny tool calls (optionally with a comment), answer questions and approve plans,
   including straight from notifications.
@@ -36,8 +37,9 @@ and terminals of all your computers together.
 - **Side questions** (`/btw`): ask about the conversation without adding to it, even while the agent works.
   Answers open full screen, with copyable code blocks and readable tables. You can select any part,
   share it, quote it into your next message or ask a follow-up. Answers wait for you if you leave.
-- **Artifacts and plans**, rendered, with comments on any paragraph, step or code block. You can also
-  comment on single lines in the diff viewer.
+- **Artifacts and plans**, rendered, with comments on any paragraph, list item (nested ones too) or code
+  block: select text and pick Comment, or turn on commenting. Once you reply or approve, the review
+  request clears. You can also comment on single lines in the diff viewer, with line wrapping a tap away.
 - **History**: every conversation on each computer, with fork, rewind (previewing what it undoes), rename,
   pin, archive, delete, export and per-file diffs.
 - **Files**: browse, edit, upload, download, create, rename, move and delete files on any computer.

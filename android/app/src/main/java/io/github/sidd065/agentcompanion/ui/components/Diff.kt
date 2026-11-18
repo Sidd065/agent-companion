@@ -21,8 +21,10 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.text.style.TextIndent
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.em
 import io.github.sidd065.agentcompanion.ui.theme.LocalExtra
 import io.github.sidd065.agentcompanion.ui.theme.codeStyle
 
@@ -251,9 +253,12 @@ private fun DiffRow(l: DiffLine, wrap: Boolean, onClick: ((DiffLine) -> Unit)? =
                 (if (l.type == '-') "" else l.newNo.takeIf { it > 0 }?.toString() ?: "").padStart(4),
                 style = codeStyle, color = ex.muted, modifier = Modifier.width(36.dp),
             )
+            val code = l.text.replace("\t", "    ")
             Text(
-                (if (l.type == ' ') " " else l.type.toString()) + " " + l.text.replace("\t", "    "),
-                style = codeStyle, color = fg, softWrap = wrap, overflow = TextOverflow.Clip,
+                (if (l.type == ' ') " " else l.type.toString()) + " " + code,
+                // Wrapped lines continue under the code, past the marker and its indent.
+                style = if (wrap) codeStyle.copy(textIndent = TextIndent(restLine = ((2 + code.length - code.trimStart().length) * 0.6).em)) else codeStyle,
+                color = fg, softWrap = wrap, overflow = TextOverflow.Clip,
                 modifier = Modifier.padding(end = 12.dp),
             )
         } else {

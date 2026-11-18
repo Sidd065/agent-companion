@@ -3,6 +3,8 @@ package io.github.sidd065.agentcompanion.ui.chat
 import io.github.sidd065.agentcompanion.ui.components.AppSheet
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.foundation.text.contextmenu.builder.item
+import androidx.compose.foundation.text.contextmenu.modifier.appendTextContextMenuComponents
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -91,8 +93,8 @@ import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.longOrNull
 import kotlinx.serialization.json.put
 
-/** A commentable piece of an artifact (1-based source lines). */
-data class ArtifactBlock(val start: Int, val end: Int, val text: String, val kind: String)
+/** A commentable piece of an artifact (1-based source lines). [depth] nests list items. */
+data class ArtifactBlock(val start: Int, val end: Int, val text: String, val kind: String, val depth: Int = 0)
 
 private val listItem = Regex("^\\s*([-*+]|\\d+[.)])\\s+")
 private val imageOnly = Regex("^!\\[([^]]*)]\\(([^)\\s]+)(?:\\s+\"[^\"]*\")?\\)\\s*$")
@@ -102,9 +104,16 @@ fun parseMarkdownBlocks(src: String): List<ArtifactBlock> {
     val lines = src.replace("\r\n", "\n").split('\n')
     val out = mutableListOf<ArtifactBlock>()
     var i = 0
-    fun add(s: Int, e: Int, kind: String) {
-        val t = lines.subList(s, e + 1).joinToString("\n")
-        if (t.isNotBlank()) out += ArtifactBlock(s + 1, e + 1, t, kind)
+    // Indents of the list items enclosing the current one.
+    val listIndents = ArrayDeque<Int>()
+    fun add(s: Int, e: Int, kind: String, depth: Int = 0, dedent: Int = 0) {
+        val t = lines.subList(s, e + 1).joinToString("\n") { line ->
+            var k = 0
+            while (k < dedent && k < line.length && (line[k] == ' ' || line[k] == '\t')) k++
+            line.substring(k)
+        }
+        if (t.isNotBlank()) out += ArtifactBlock(s + 1, e + 1, t, kind, depth)
+        if (kind != "item") listIndents.clear()
     }
     while (i < lines.size) {
         val l = lines[i]
@@ -130,9 +139,12 @@ fun parseMarkdownBlocks(src: String): List<ArtifactBlock> {
                 add(i, j, "quote"); i = j + 1
             }
             listItem.containsMatchIn(l) -> {
-                // One block per item, with its indented continuation: nested items,
-                // paragraphs after blank lines and fenced code (blank lines included).
+                // One block per item, nested items included, each with its indented
+                // continuation: paragraphs after blank lines and fenced code.
                 val indent = l.length - t.length
+                while (listIndents.isNotEmpty() && listIndents.last() >= indent) listIndents.removeLast()
+                val depth = listIndents.size
+                listIndents.addLast(indent)
                 var j = i
                 var fence: String? = null
                 while (j + 1 < lines.size) {
@@ -147,14 +159,15 @@ fun parseMarkdownBlocks(src: String): List<ArtifactBlock> {
                     if (n.isBlank()) {
                         var k = j + 2
                         while (k < lines.size && lines[k].isBlank()) k++
-                        if (k < lines.size && lines[k].length - lines[k].trimStart().length > indent) { j++; continue }
+                        if (k < lines.size && lines[k].length - lines[k].trimStart().length > indent && !listItem.containsMatchIn(lines[k])) { j++; continue }
                         break
                     }
                     if (nIndent <= indent) break // a sibling item or dedented text
+                    if (listItem.containsMatchIn(n)) break // a nested item: its own block
                     if (nt.startsWith("```") || nt.startsWith("~~~")) fence = nt.take(3)
                     j++
                 }
-                add(i, j, "item"); i = j + 1
+                add(i, j, "item", depth, indent); i = j + 1
             }
             imageOnly.matches(t) -> { add(i, i, "image"); i++ }
             else -> {
@@ -344,7 +357,8 @@ fun ArtifactScreen(sessionId: String, path: String) {
     editing?.let { b ->
         val existing = drafts.firstOrNull { it.startLine == b.start && it.endLine == b.end }
         CommentSheet(
-            quote = b.text, initial = existing?.comment.orEmpty(), existing = existing != null,
+            quote = if (kind == "markdown") io.github.sidd065.agentcompanion.ui.components.markdownToPlain(b.text) else b.text,
+            initial = existing?.comment.orEmpty(), existing = existing != null,
             onDismiss = { editing = null },
             onDelete = { drafts.remove(existing); editing = null },
         ) { text ->
@@ -354,6 +368,8 @@ fun ArtifactScreen(sessionId: String, path: String) {
         }
     }
 }
+
+private object CommentMenuKey
 
 @Composable
 private fun BlockView(hostId: String, artifactPath: String, b: ArtifactBlock, plain: Boolean, commenting: Boolean, draft: DraftComment?, onTap: () -> Unit) {
@@ -386,7 +402,12 @@ private fun BlockView(hostId: String, artifactPath: String, b: ArtifactBlock, pl
                     modifier = Modifier.fillMaxWidth().heightIn(max = 480.dp),
                 )
             }
-            else -> MarkdownText(b.text, selectable = !commenting)
+            // Selecting text offers "Comment" (on this block) next to Copy.
+            else -> Box(if (commenting) Modifier else Modifier.appendTextContextMenuComponents {
+                item(key = CommentMenuKey, label = "Comment") { close(); onTap() }
+            }) {
+                MarkdownText(b.text, Modifier.padding(start = (b.depth * 18).dp), selectable = !commenting, compact = b.kind == "item")
+            }
         }
         draft?.let { d ->
             Row(Modifier.padding(top = 4.dp), verticalAlignment = Alignment.Top) {
@@ -416,18 +437,18 @@ fun CommentSheet(
     LaunchedEffect(Unit) { runCatching { focus.requestFocus() } }
     AppSheet(onDismissRequest = onDismiss, sheetState = state) {
         Column(Modifier.fillMaxWidth().imePadding().padding(horizontal = 16.dp).padding(bottom = 16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-            Text(title, style = MaterialTheme.typography.titleMedium)
+            // The actions sit in the header, so the keyboard never covers them.
+            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                Text(title, style = MaterialTheme.typography.titleMedium, modifier = Modifier.weight(1f))
+                if (existing) TextButton(onClick = onDelete) { Text("Remove") }
+                Button(enabled = text.isNotBlank(), onClick = { onSave(text.trim()) }) { Text("Save") }
+            }
             Surface(color = LocalExtra.current.codeBg, shape = RoundedCornerShape(8.dp)) {
-                Text(quote.trim(), style = MaterialTheme.typography.bodySmall, fontFamily = FontFamily.Monospace, maxLines = 8,
+                Text(quote.trim(), style = MaterialTheme.typography.bodySmall, fontFamily = FontFamily.Monospace, maxLines = 4,
                     overflow = TextOverflow.Ellipsis, modifier = Modifier.fillMaxWidth().padding(10.dp))
             }
-            OutlinedTextField(text, { text = it }, Modifier.fillMaxWidth().focusRequester(focus), placeholder = { Text("What should change?") }, minLines = 3)
-            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
-                if (existing) TextButton(onClick = onDelete) { Text("Remove") }
-                Spacer(Modifier.weight(1f))
-                TextButton(onClick = onDismiss) { Text("Cancel") }
-                Button(enabled = text.isNotBlank(), onClick = { onSave(text.trim()) }) { Text("Save comment") }
-            }
+            OutlinedTextField(text, { text = it }, Modifier.fillMaxWidth().focusRequester(focus), placeholder = { Text("What should change?") },
+                minLines = 3, maxLines = 8)
             HorizontalDivider(color = Color.Transparent)
         }
     }

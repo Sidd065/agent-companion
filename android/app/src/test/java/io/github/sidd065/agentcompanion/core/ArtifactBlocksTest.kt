@@ -45,4 +45,23 @@ class ArtifactBlocksTest {
         assertTrue(b[6].text.contains("more of the same item"))
         assertEquals(3, b[1].start); assertEquals(4, b[1].end)
     }
+
+    @Test fun nestedItemsAreTheirOwnBlocks() {
+        val md = """
+            - **MealPlanner.kt**:
+              - Accept `estimator`.
+              - When `team` is non-empty, run the estimator
+                and keep going on this line.
+                1. a numbered sub-step
+            - Next top item
+
+            After the list.
+        """.trimIndent()
+        val b = parseMarkdownBlocks(md)
+        assertEquals(listOf("item", "item", "item", "item", "item", "para"), b.map { it.kind })
+        assertEquals(listOf(0, 1, 1, 2, 0, 0), b.map { it.depth })
+        assertEquals("- When `team` is non-empty, run the estimator\n  and keep going on this line.", b[2].text)
+        assertEquals(3, b[2].start); assertEquals(4, b[2].end)
+        assertEquals("1. a numbered sub-step", b[3].text)
+    }
 }

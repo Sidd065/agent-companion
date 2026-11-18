@@ -24,6 +24,8 @@ import kotlinx.serialization.json.put
 class RemoteTerminal(private val ctx: Context, private val conn: HostConnection, val termId: String) : TerminalSession.RemoteIO, TerminalSessionClient {
     val session = TerminalSession(4000, this, this)
     val state = MutableStateFlow("connecting") // connecting|connected|closed|error
+    /** The program in the terminal ended (not just our connection). */
+    val exited = MutableStateFlow(false)
     val title = MutableStateFlow<String?>(null)
     var error: String? = null
     var view: TerminalView? = null
@@ -52,6 +54,7 @@ class RemoteTerminal(private val ctx: Context, private val conn: HostConnection,
 
             override fun onText(text: String) {
                 if (text.contains("\"exit\"")) {
+                    exited.value = true
                     state.value = "closed"
                     session.remoteExited(0)
                 } else if (text.contains("\"error\"")) {
