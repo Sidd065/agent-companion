@@ -216,7 +216,7 @@ func main() {
 	case "term", "terms":
 		os.Exit(termCmd(args[1:]))
 	case "status":
-		os.Exit(status())
+		os.Exit(status(true))
 	case "pair", "qr":
 		os.Exit(pairCmd(args[1:]))
 	case "devices", "device":
@@ -617,7 +617,8 @@ func notRunning(err error) int {
 	return 1
 }
 
-func status() int {
+// status prints the daemon state; pairHint adds how to pair when no phone is.
+func status(pairHint bool) int {
 	var info map[string]any
 	if err := localGet("/local/status", &info); err != nil {
 		return notRunning(err)
@@ -626,8 +627,11 @@ func status() int {
 	fmt.Printf("  host id:     %v   fingerprint %v\n", info["hostId"], info["fingerprint"])
 	if t, ok := info["tunnel"].(map[string]any); ok {
 		st := fmt.Sprint(t["status"])
-		if st == "<nil>" {
+		switch st {
+		case "<nil>":
 			st = "configured"
+		case "":
+			st = "starting"
 		}
 		fmt.Printf("  public URL:  %v  (%v, %v)\n", firstNonEmpty(fmt.Sprint(info["publicUrl"]), "(starting…)"), t["mode"], st)
 	}
@@ -644,7 +648,7 @@ func status() int {
 	}
 	devs, _ := info["deviceList"].([]any)
 	fmt.Printf("  devices:     %d paired", len(devs))
-	if len(devs) == 0 {
+	if len(devs) == 0 && pairHint {
 		fmt.Print(" — run `agentc pair` and scan the QR code with the app")
 	}
 	fmt.Println()
@@ -740,7 +744,7 @@ func tunnelCmd(args []string) int {
 	p := getPaths()
 	cfg := loadConfig(p)
 	if len(args) == 0 || args[0] == "status" {
-		return status()
+		return status(true)
 	}
 	if args[0] == "stop" {
 		m := &tunnel.Manager{Target: "http://" + cfg.listenAddr(), MetricsAddr: cfg.metricsAddr(), StateFile: p.tunnelState()}
@@ -914,7 +918,7 @@ Wants=network-online.target
 [Service]
 Type=exec
 ExecStart=%s serve
-Environment=PATH=%%h/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/snap/bin
+Environment=PATH=%%h/.local/bin:` + unitSystemPath + `
 WorkingDirectory=%%h
 Restart=always
 RestartSec=3
@@ -1012,7 +1016,12 @@ func install(args []string) int {
 			fmt.Fprintln(os.Stderr, "config:", err)
 		}
 	}
-	if _, err := exec.LookPath(firstNonEmpty(cfg.Cloudflared, "cloudflared")); err != nil && cfg.PublicURL == "" {
+	// The service runs with its own PATH (~/.local/bin first), which a
+	// non-login shell such as `ssh host cmd` may not have.
+	cf := firstNonEmpty(cfg.Cloudflared, "cloudflared")
+	_, errHere := exec.LookPath(cf)
+	_, errService := lookPathIn(cf, servicePath(p.home))
+	if errHere != nil && errService != nil && cfg.PublicURL == "" {
 		fmt.Println("warning: cloudflared is not installed; the daemon needs it for its public URL")
 		fmt.Println("         see https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/downloads/")
 	}
@@ -1037,19 +1046,79 @@ func install(args []string) int {
 	if out, err := exec.Command("loginctl", "show-user", os.Getenv("USER"), "-p", "Linger").Output(); err == nil && strings.TrimSpace(string(out)) == "Linger=no" {
 		fmt.Println("tip: run `loginctl enable-linger` so agentc keeps running when you log out")
 	}
-	time.Sleep(2 * time.Second)
-	if status() != 0 {
-		return 1
-	}
-	// Upgrades keep their paired phones; only a fresh install needs pairing.
+	// A fresh quick tunnel takes a few seconds; show its URL rather than
+	// "starting" (an upgrade adopts the running tunnel and returns at once).
 	var info map[string]any
-	if localGet("/local/status", &info) == nil {
-		if devs, _ := info["deviceList"].([]any); len(devs) > 0 {
-			return 0
+	for deadline := time.Now().Add(20 * time.Second); time.Now().Before(deadline); time.Sleep(500 * time.Millisecond) {
+		info = nil
+		if localGet("/local/status", &info) == nil && tunnelSettled(info) {
+			break
 		}
 	}
-	fmt.Println("\nNext: run `agentc pair` and scan the QR code with the Agent Companion app.")
+	if status(false) != 0 { // install says how to pair itself, below
+		return 1
+	}
+	cmd := "agentc"
+	if !onPath(bin) {
+		cmd = dst
+		fmt.Printf("\nnote: %s isn't on this shell's PATH (a new login shell usually has it), so use %s\n", bin, dst)
+	}
+	// Upgrades keep their paired phones; only a fresh install needs pairing.
+	if devs, _ := info["deviceList"].([]any); len(devs) > 0 {
+		return 0
+	}
+	fmt.Printf("\nNext: run `%s pair` and scan the QR code with the Agent Companion app.\n", cmd)
 	return 0
+}
+
+// tunnelSettled reports whether `agentc status` would show the tunnel's final
+// state: a URL, an error, or no tunnel at all.
+func tunnelSettled(info map[string]any) bool {
+	if info == nil {
+		return false
+	}
+	if u, _ := info["publicUrl"].(string); u != "" {
+		return true
+	}
+	t, _ := info["tunnel"].(map[string]any)
+	mode, _ := t["mode"].(string)
+	st, _ := t["status"].(string)
+	return mode != "cloudflare-quick" || strings.HasPrefix(st, "error")
+}
+
+// unitSystemPath follows ~/.local/bin in the PATH the systemd unit gives the
+// daemon, and so the agents and cloudflared it starts.
+const unitSystemPath = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/snap/bin"
+
+func servicePath(home string) string {
+	return filepath.Join(home, ".local", "bin") + string(filepath.ListSeparator) + unitSystemPath
+}
+
+// lookPathIn is exec.LookPath against the given PATH instead of $PATH.
+func lookPathIn(name, path string) (string, error) {
+	if strings.Contains(name, "/") {
+		return exec.LookPath(name)
+	}
+	for _, dir := range filepath.SplitList(path) {
+		if dir == "" {
+			continue
+		}
+		f := filepath.Join(dir, name)
+		if fi, err := os.Stat(f); err == nil && fi.Mode().IsRegular() && fi.Mode().Perm()&0o111 != 0 {
+			return f, nil
+		}
+	}
+	return "", exec.ErrNotFound
+}
+
+// onPath reports whether dir is one of the directories in $PATH.
+func onPath(dir string) bool {
+	for _, d := range filepath.SplitList(os.Getenv("PATH")) {
+		if d != "" && filepath.Clean(d) == filepath.Clean(dir) {
+			return true
+		}
+	}
+	return false
 }
 
 func copyExe(src, dst string) error {
