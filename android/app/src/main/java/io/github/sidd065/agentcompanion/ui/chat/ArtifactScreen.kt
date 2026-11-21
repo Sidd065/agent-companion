@@ -29,6 +29,7 @@ import androidx.compose.material.icons.outlined.AddComment
 import androidx.compose.material.icons.outlined.ChatBubbleOutline
 import androidx.compose.material.icons.outlined.CheckCircle
 import androidx.compose.material.icons.outlined.Close
+import androidx.compose.material.icons.outlined.Download
 import androidx.compose.material.icons.outlined.MoreVert
 import androidx.compose.material.icons.outlined.OpenInNew
 import androidx.compose.material.icons.outlined.Refresh
@@ -280,9 +281,26 @@ fun ArtifactScreen(sessionId: String, path: String) {
                             Icon(if (commenting) Icons.Outlined.Close else Icons.Outlined.AddComment, if (commenting) "Stop commenting" else "Comment")
                         }
                     }
+                    IconButton(onClick = {
+                        FileTransfer.enqueueDownload(ctx, conn, path) { res ->
+                            scope.launch {
+                                res.onSuccess { snack.showSnackbar("Saved to ${it.displayPath}") }
+                                    .onFailure { snack.showSnackbar("Download failed: ${it.message}") }
+                            }
+                        }
+                    }) { Icon(Icons.Outlined.Download, "Download to phone") }
                     Box {
                         IconButton(onClick = { menu = true }) { Icon(Icons.Outlined.MoreVert, "More") }
                         DropdownMenu(menu, { menu = false }) {
+                            DropdownMenuItem(text = { Text("Download to phone") }, leadingIcon = { Icon(Icons.Outlined.Download, null) }, onClick = {
+                                menu = false
+                                FileTransfer.enqueueDownload(ctx, conn, path) { res ->
+                                    scope.launch {
+                                        res.onSuccess { snack.showSnackbar("Saved to ${it.displayPath}") }
+                                            .onFailure { snack.showSnackbar("Download failed: ${it.message}") }
+                                    }
+                                }
+                            })
                             DropdownMenuItem(text = { Text("Reload") }, leadingIcon = { Icon(Icons.Outlined.Refresh, null) }, onClick = { menu = false; reload++ })
                             DropdownMenuItem(text = { Text("Open with…") }, leadingIcon = { Icon(Icons.Outlined.OpenInNew, null) }, onClick = {
                                 menu = false

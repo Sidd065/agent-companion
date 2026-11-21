@@ -4,6 +4,10 @@ import android.content.Intent
 import android.net.Uri
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.imePadding
+import androidx.compose.foundation.layout.navigationBarsPadding
+import androidx.compose.foundation.layout.padding
+import androidx.compose.ui.unit.dp
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.outlined.Chat
 import androidx.compose.material.icons.outlined.Folder
@@ -145,7 +149,7 @@ fun AppRoot() {
                 MainNav(nav, settings)
             }
             io.github.sidd065.agentcompanion.ui.settings.PendingPairing()
-            Box(Modifier.fillMaxSize(), contentAlignment = Alignment.BottomCenter) { SnackbarHost(snack) }
+            Box(Modifier.fillMaxSize().navigationBarsPadding().imePadding().padding(bottom = 12.dp), contentAlignment = Alignment.BottomCenter) { SnackbarHost(snack) }
         }
     }
 }

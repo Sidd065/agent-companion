@@ -15,6 +15,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.itemsIndexed
@@ -26,6 +27,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.outlined.WrapText
 import androidx.compose.material.icons.automirrored.outlined.Chat
+import androidx.compose.material.icons.outlined.Close
 import androidx.compose.material.icons.outlined.Code
 import androidx.compose.material.icons.outlined.Delete
 import androidx.compose.material.icons.outlined.Download
@@ -41,6 +43,9 @@ import androidx.compose.material.icons.outlined.Save
 import androidx.compose.material.icons.outlined.Share
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
+import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.LinearProgressIndicator
+import androidx.compose.material3.Surface
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -115,7 +120,10 @@ fun FileScreen(path: String, startEditing: Boolean) {
     val settings by ctx.graph.prefs.flow.collectAsState()
     var stat by remember { mutableStateOf<FsEntry?>(null) }
     var content by remember { mutableStateOf<ReadResult?>(null) }
+    var loading by remember { mutableStateOf(true) }
     var error by remember { mutableStateOf<String?>(null) }
+    val allDownloads by FileTransfer.downloads.collectAsState()
+    val activeDownload = allDownloads.firstOrNull { it.hostId == conn.config.id && it.remotePath == path }
     var editing by remember { mutableStateOf(startEditing) }
     var draft by remember { mutableStateOf("") }
     var preview by remember { mutableStateOf(true) }
@@ -133,6 +141,7 @@ fun FileScreen(path: String, startEditing: Boolean) {
 
     LaunchedEffect(path, reload) {
         error = null
+        loading = true
         runCatching {
             val st = conn.rpc.call("fs.stat", params { put("path", path) }).decode(FsEntry.serializer())
             stat = st
@@ -142,6 +151,20 @@ fun FileScreen(path: String, startEditing: Boolean) {
                 if (r.text != null && (editing || draft.isEmpty())) draft = r.text
             }
         }.onFailure { error = it.message }
+        loading = false
+    }
+
+    fun startDownload() {
+        FileTransfer.enqueueDownload(ctx, conn, path) { res ->
+            scope.launch {
+                res.onSuccess { snack.showSnackbar("Saved to ${it.displayPath}") }
+                    .onFailure {
+                        if (it !is kotlinx.coroutines.CancellationException) {
+                            snack.showSnackbar("Download failed: ${it.message}")
+                        }
+                    }
+            }
+        }
     }
     val dirty = editing && content?.text != null && draft != content?.text
     BackHandler(enabled = dirty) { discard = true }
@@ -187,12 +210,24 @@ fun FileScreen(path: String, startEditing: Boolean) {
                             IconButton(onClick = { draft = content?.text ?: ""; editing = true }) { Icon(Icons.Outlined.Edit, "Edit") }
                         }
                     }
+                    if (stat != null && !editing) {
+                        IconButton(
+                            onClick = { startDownload() },
+                            enabled = activeDownload?.status != DownloadStatus.Running,
+                        ) {
+                            if (activeDownload?.status == DownloadStatus.Running) {
+                                CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp)
+                            } else {
+                                Icon(Icons.Outlined.Download, "Download to phone")
+                            }
+                        }
+                    }
                     Box {
                         IconButton(onClick = { menu = true }) { Icon(Icons.Outlined.MoreVert, null) }
                         DropdownMenu(menu, { menu = false }) {
                             DropdownMenuItem(text = { Text("Download to phone") }, leadingIcon = { Icon(Icons.Outlined.Download, null) }, onClick = {
                                 menu = false
-                                scope.launch { runCatching { FileTransfer.toDownloads(ctx, conn, path) }.onSuccess { snack.showSnackbar("Saved to $it") }.onFailure { snack.showSnackbar("${it.message}") } }
+                                startDownload()
                             })
                             DropdownMenuItem(text = { Text("Share") }, leadingIcon = { Icon(Icons.Outlined.Share, null) }, onClick = {
                                 menu = false; scope.launch { runCatching { FileTransfer.share(ctx, conn, path) }.onFailure { snack.showSnackbar("${it.message}") } }
@@ -216,23 +251,44 @@ fun FileScreen(path: String, startEditing: Boolean) {
             )
         },
     ) { pad ->
-        Box(Modifier.padding(pad).fillMaxSize().imePadding()) {
+        Column(Modifier.padding(pad).fillMaxSize().imePadding()) {
+            activeDownload?.let { dl ->
+                DownloadStatusBanner(
+                    task = dl,
+                    onCancel = { FileTransfer.cancelDownload(dl.id) },
+                    onOpen = {
+                        if (!FileTransfer.openDownloaded(ctx, dl)) {
+                            scope.launch { snack.showSnackbar("Saved to ${dl.displayPath ?: "Downloads"}") }
+                        }
+                    },
+                    onDismiss = { FileTransfer.dismissDownload(dl.id) },
+                )
+            }
+            Box(Modifier.weight(1f).fillMaxWidth()) {
             when {
                 error != null -> ErrorBox(error!!) { reload++ }
-                stat == null -> LoadingBox()
+                stat == null || loading -> LoadingBox()
                 isImage -> ZoomableImage(io.github.sidd065.agentcompanion.net.RemoteImage(conn.config.id, path = path))
-                content == null -> BinaryInfo(stat!!, onDownload = {
-                    scope.launch { runCatching { FileTransfer.toDownloads(ctx, conn, path) }.onSuccess { snack.showSnackbar("Saved to $it") }.onFailure { snack.showSnackbar("${it.message}") } }
-                }, onOpen = { scope.launch { runCatching { FileTransfer.openWith(ctx, conn, path) }.onFailure { snack.showSnackbar("${it.message}") } } })
-                content!!.binary -> BinaryInfo(stat!!, onDownload = {
-                    scope.launch { runCatching { FileTransfer.toDownloads(ctx, conn, path) }.onSuccess { snack.showSnackbar("Saved to $it") }.onFailure { snack.showSnackbar("${it.message}") } }
-                }, onOpen = { scope.launch { runCatching { FileTransfer.openWith(ctx, conn, path) }.onFailure { snack.showSnackbar("${it.message}") } } })
+                content == null || content!!.binary -> BinaryInfo(
+                    e = stat!!,
+                    download = activeDownload,
+                    onDownload = { startDownload() },
+                    onOpenDownloaded = {
+                        activeDownload?.let { dl ->
+                            if (!FileTransfer.openDownloaded(ctx, dl)) {
+                                scope.launch { snack.showSnackbar("Saved to ${dl.displayPath ?: "Downloads"}") }
+                            }
+                        }
+                    },
+                    onOpen = { scope.launch { runCatching { FileTransfer.openWith(ctx, conn, path) }.onFailure { snack.showSnackbar("${it.message}") } } },
+                )
                 editing -> Editor(draft, onChange = { draft = it })
                 isMarkdown && preview -> Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp)) {
                     MarkdownText(content!!.text.orEmpty())
                     Spacer(Modifier.height(40.dp))
                 }
                 else -> CodeView(content!!.text.orEmpty(), langByExt[ext], settings.codeWrap, truncated = content!!.truncated)
+            }
             }
         }
     }
@@ -336,15 +392,101 @@ private fun ZoomableImage(url: Any) {
 }
 
 @Composable
-private fun BinaryInfo(e: FsEntry, onDownload: () -> Unit, onOpen: () -> Unit) {
+internal fun DownloadStatusBanner(
+    task: DownloadTask,
+    onCancel: () -> Unit,
+    onOpen: () -> Unit,
+    onDismiss: () -> Unit,
+) {
+    val ex = LocalExtra.current
+    val bg = when (task.status) {
+        DownloadStatus.Failed -> ex.danger.copy(alpha = 0.14f)
+        DownloadStatus.Done -> ex.success.copy(alpha = 0.14f)
+        else -> MaterialTheme.colorScheme.secondaryContainer
+    }
+    Surface(color = bg, modifier = Modifier.fillMaxWidth()) {
+        Column(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp)) {
+            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                Column(Modifier.weight(1f)) {
+                    val title = when (task.status) {
+                        DownloadStatus.Running -> {
+                            val pct = task.fraction?.let { "${(it * 100).toInt()}%" }
+                            listOfNotNull("Downloading ${task.fileName}", pct).joinToString(" · ")
+                        }
+                        DownloadStatus.Done -> "Saved ${task.fileName}"
+                        DownloadStatus.Failed -> "Download failed: ${task.fileName}"
+                        DownloadStatus.Cancelled -> "Cancelled ${task.fileName}"
+                    }
+                    Text(title, style = MaterialTheme.typography.bodySmall, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    val sub = when (task.status) {
+                        DownloadStatus.Running -> if (task.totalBytes > 0L) "${fmtBytes(task.doneBytes)} / ${fmtBytes(task.totalBytes)}" else "Starting…"
+                        DownloadStatus.Done -> task.displayPath ?: "Downloads/AgentCompanion"
+                        DownloadStatus.Failed -> task.error ?: "Unknown error"
+                        DownloadStatus.Cancelled -> "Removed partial file"
+                    }
+                    Text(sub, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                }
+                when (task.status) {
+                    DownloadStatus.Running -> TextButton(onClick = onCancel) { Text("Cancel") }
+                    DownloadStatus.Done -> {
+                        if (task.uri != null) TextButton(onClick = onOpen) { Text("Open") }
+                        IconButton(onClick = onDismiss) { Icon(Icons.Outlined.Close, "Dismiss", Modifier.size(18.dp)) }
+                    }
+                    DownloadStatus.Failed, DownloadStatus.Cancelled -> {
+                        IconButton(onClick = onDismiss) { Icon(Icons.Outlined.Close, "Dismiss", Modifier.size(18.dp)) }
+                    }
+                }
+            }
+            if (task.status == DownloadStatus.Running) {
+                Spacer(Modifier.height(4.dp))
+                val frac = task.fraction
+                if (frac != null) {
+                    LinearProgressIndicator(progress = { frac }, modifier = Modifier.fillMaxWidth())
+                } else {
+                    LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun BinaryInfo(
+    e: FsEntry,
+    download: DownloadTask?,
+    onDownload: () -> Unit,
+    onOpenDownloaded: () -> Unit,
+    onOpen: () -> Unit,
+) {
+    val running = download?.status == DownloadStatus.Running
+    val done = download?.status == DownloadStatus.Done
     Column(Modifier.fillMaxSize().padding(32.dp), horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.Center) {
         Icon(entryIcon(e), null, Modifier.padding(8.dp))
         Text(e.name, style = MaterialTheme.typography.titleMedium)
         Text("${fmtBytes(e.size)} · ${e.mime ?: "binary"} · ${e.mode}", style = MaterialTheme.typography.bodySmall, fontFamily = FontFamily.Monospace)
         Spacer(Modifier.height(20.dp))
+        if (running && download != null) {
+            val frac = download.fraction
+            if (frac != null) {
+                LinearProgressIndicator(progress = { frac }, modifier = Modifier.fillMaxWidth(0.75f))
+                Spacer(Modifier.height(8.dp))
+                Text("${fmtBytes(download.doneBytes)} / ${fmtBytes(download.totalBytes)} (${(frac * 100).toInt()}%)", style = MaterialTheme.typography.bodySmall)
+            } else {
+                CircularProgressIndicator(Modifier.size(28.dp), strokeWidth = 2.5.dp)
+                Spacer(Modifier.height(8.dp))
+                Text("Downloading…", style = MaterialTheme.typography.bodySmall)
+            }
+            Spacer(Modifier.height(14.dp))
+        }
         Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-            Button(onClick = onDownload) { Text("Download") }
-            OutlinedButton(onClick = onOpen) { Text("Open with…") }
+            Button(onClick = onDownload, enabled = !running) {
+                Text(if (running) "Downloading…" else if (done) "Download again" else "Download")
+            }
+            if (done && download != null && download.uri != null) {
+                OutlinedButton(onClick = onOpenDownloaded) { Text("Open saved") }
+            } else {
+                OutlinedButton(onClick = onOpen) { Text("Open with…") }
+            }
         }
     }
 }

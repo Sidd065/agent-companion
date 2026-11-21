@@ -204,9 +204,28 @@ fun FilesScreen(initialPath: String, standalone: Boolean = false) {
                             DropdownMenu(menu, { menu = false }) {
                                 DropdownMenuItem(text = { Text("Download to phone") }, leadingIcon = { Icon(Icons.Outlined.Download, null) }, onClick = {
                                     menu = false
+                                    val entriesByPath = (results ?: listing?.entries.orEmpty()).associateBy { it.path }
                                     val paths = selected.toList(); selected.clear()
-                                    scope.launch {
-                                        paths.forEach { p -> runCatching { FileTransfer.toDownloads(ctx, conn, p) }.onSuccess { snack.showSnackbar("Saved to $it") }.onFailure { snack.showSnackbar("${it.message}") } }
+                                    val filesOnly = paths.filter { entriesByPath[it]?.isDir != true }
+                                    val skippedDirs = paths.size - filesOnly.size
+                                    if (filesOnly.isEmpty()) {
+                                        scope.launch { snack.showSnackbar("Folders cannot be downloaded directly — open a folder and pick files inside") }
+                                    } else {
+                                        if (skippedDirs > 0) {
+                                            scope.launch { snack.showSnackbar("Skipped $skippedDirs folder(s); downloading ${filesOnly.size} file(s)") }
+                                        }
+                                        filesOnly.forEach { fp ->
+                                            FileTransfer.enqueueDownload(ctx, conn, fp) { res ->
+                                                scope.launch {
+                                                    res.onSuccess { snack.showSnackbar("Saved to ${it.displayPath}") }
+                                                        .onFailure {
+                                                            if (it !is kotlinx.coroutines.CancellationException) {
+                                                                snack.showSnackbar("Download failed: ${it.message}")
+                                                            }
+                                                        }
+                                                }
+                                            }
+                                        }
                                     }
                                 })
                                 if (selected.size == 1) DropdownMenuItem(text = { Text("Share") }, leadingIcon = { Icon(Icons.Outlined.Share, null) }, onClick = {
@@ -321,6 +340,19 @@ fun FilesScreen(initialPath: String, standalone: Boolean = false) {
     ) { pad ->
         Column(Modifier.padding(pad).fillMaxSize()) {
             ConnectionBanner(conn)
+            val activeDownloads by FileTransfer.downloads.collectAsState()
+            activeDownloads.firstOrNull { it.hostId == conn.config.id }?.let { dl ->
+                DownloadStatusBanner(
+                    task = dl,
+                    onCancel = { FileTransfer.cancelDownload(dl.id) },
+                    onOpen = {
+                        if (!FileTransfer.openDownloaded(ctx, dl)) {
+                            scope.launch { snack.showSnackbar("Saved to ${dl.displayPath ?: "Downloads"}") }
+                        }
+                    },
+                    onDismiss = { FileTransfer.dismissDownload(dl.id) },
+                )
+            }
             Breadcrumbs(cur, home) { path = it }
             clipboard?.let { (op, paths) ->
                 Surface(color = MaterialTheme.colorScheme.secondaryContainer) {

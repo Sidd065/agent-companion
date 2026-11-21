@@ -26,6 +26,7 @@ class Notifier(private val ctx: Context) {
         const val CH_QUESTIONS = "questions"
         const val CH_TERMINALS = "terminals"
         const val CH_CONNECTION = "connection"
+        const val CH_DOWNLOADS = "downloads"
         const val KEY_REPLY = "reply"
         const val EXTRA_HOST = "host"
         const val EXTRA_SESSION = "session"
@@ -61,6 +62,10 @@ class Notifier(private val ctx: Context) {
                 },
                 NotificationChannel(CH_CONNECTION, "Background connection", NotificationManager.IMPORTANCE_MIN).apply {
                     description = "Keeps an encrypted connection to your computers open"
+                    setShowBadge(false)
+                },
+                NotificationChannel(CH_DOWNLOADS, "File downloads", NotificationManager.IMPORTANCE_LOW).apply {
+                    description = "Progress and completion alerts for files downloaded from your computers"
                     setShowBadge(false)
                 },
             ),
@@ -243,4 +248,59 @@ class Notifier(private val ctx: Context) {
     }
 
     fun cancel(id: Int) = nm.cancel(id)
+
+    private fun downloadNotifId(id: Long): Int = 40_000 + (id % 10_000).toInt()
+
+    fun showDownloadProgress(id: Long, fileName: String, doneBytes: Long, totalBytes: Long) {
+        if (!allowed()) return
+        val indeterminate = totalBytes <= 0L
+        val pct = if (totalBytes > 0L) ((doneBytes * 100L) / totalBytes).toInt().coerceIn(0, 100) else 0
+        val b = NotificationCompat.Builder(ctx, CH_DOWNLOADS)
+            .setSmallIcon(R.drawable.ic_stat_agent)
+            .setContentTitle("Downloading $fileName")
+            .setContentText(if (indeterminate) "Starting…" else "$pct%")
+            .setOngoing(true)
+            .setOnlyAlertOnce(true)
+            .setSilent(true)
+            .setProgress(100, pct, indeterminate)
+        runCatching { nm.notify(downloadNotifId(id), b.build()) }
+    }
+
+    fun showDownloadComplete(id: Long, fileName: String, displayPath: String, uri: android.net.Uri?, mime: String) {
+        if (!allowed()) return
+        val b = NotificationCompat.Builder(ctx, CH_DOWNLOADS)
+            .setSmallIcon(R.drawable.ic_stat_agent)
+            .setContentTitle("Downloaded $fileName")
+            .setContentText("Saved to $displayPath")
+            .setAutoCancel(true)
+            .setOngoing(false)
+        if (uri != null) {
+            val open = Intent(Intent.ACTION_VIEW)
+                .setDataAndType(uri, mime)
+                .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_ACTIVITY_NEW_TASK)
+            val pi = PendingIntent.getActivity(
+                ctx,
+                downloadNotifId(id),
+                open,
+                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+            )
+            b.setContentIntent(pi)
+        }
+        runCatching { nm.notify(downloadNotifId(id), b.build()) }
+    }
+
+    fun showDownloadError(id: Long, fileName: String, error: String) {
+        if (!allowed()) return
+        val b = NotificationCompat.Builder(ctx, CH_DOWNLOADS)
+            .setSmallIcon(R.drawable.ic_stat_agent)
+            .setContentTitle("Download failed: $fileName")
+            .setContentText(error)
+            .setAutoCancel(true)
+            .setOngoing(false)
+        runCatching { nm.notify(downloadNotifId(id), b.build()) }
+    }
+
+    fun cancelDownloadNotification(id: Long) {
+        runCatching { nm.cancel(downloadNotifId(id)) }
+    }
 }

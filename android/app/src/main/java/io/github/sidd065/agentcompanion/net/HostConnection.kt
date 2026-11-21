@@ -231,20 +231,10 @@ class HostConnection(
         return bos.toByteArray()
     }
 
-    private suspend fun readChunks(method: String, key: String, value: String, out: java.io.OutputStream, onProgress: (Long, Long) -> Unit): Long {
-        var off = 0L
-        var size = 0L
-        while (true) {
-            val r = rpc.call(method, params { put(key, value); put("offset", off); put("length", 1L shl 20) }).jsonObject
-            val data = android.util.Base64.decode(r["data"]?.jsonPrimitive?.content ?: "", android.util.Base64.DEFAULT)
-            out.write(data)
-            off += data.size
-            size = r["size"]?.jsonPrimitive?.longOrNull ?: off
-            onProgress(off, size)
-            if (r["eof"]?.jsonPrimitive?.content == "true" || data.isEmpty()) break
+    private suspend fun readChunks(method: String, key: String, value: String, out: java.io.OutputStream, onProgress: (Long, Long) -> Unit): Long =
+        ChunkTransfer.readChunks(out = out, onProgress = onProgress) { offset, length ->
+            rpc.call(method, params { put(key, value); put("offset", offset); put("length", length) }, timeoutMs = 120_000).jsonObject
         }
-        return size
-    }
 
     /** Uploads [input] to [path] in chunks (atomic: the file appears when complete). */
     suspend fun upload(path: String, input: java.io.InputStream, overwrite: Boolean, onProgress: (Long) -> Unit = {}): JsonObject {

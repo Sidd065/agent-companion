@@ -1,4 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
 <paths>
     <cache-path name="shared" path="shared/" />
+    <external-path name="public_downloads" path="Download/" />
+    <external-files-path name="downloads" path="Download/" />
+    <files-path name="internal_downloads" path="AgentCompanion/" />
 </paths>
