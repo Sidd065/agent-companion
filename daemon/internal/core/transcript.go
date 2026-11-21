@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"agentc/internal/acp"
+	"agentc/internal/checkpoints"
 )
 
 // Item is one entry of a session transcript, as rendered by the app.
@@ -74,10 +75,12 @@ type Perm struct {
 
 // Turn marks the end of a prompt turn.
 type Turn struct {
-	StopReason string     `json:"stopReason"`
-	Usage      *acp.Usage `json:"usage,omitempty"`
-	DurationMs int64      `json:"durationMs"`
-	Error      string     `json:"error,omitempty"`
+	TurnIndex  int                         `json:"turnIndex,omitempty"`
+	StopReason string                      `json:"stopReason"`
+	Usage      *acp.Usage                  `json:"usage,omitempty"`
+	DurationMs int64                       `json:"durationMs"`
+	Error      string                      `json:"error,omitempty"`
+	Checkpoint *checkpoints.TurnCheckpoint `json:"checkpoint,omitempty"`
 }
 
 // Op is a transcript mutation streamed to subscribers.

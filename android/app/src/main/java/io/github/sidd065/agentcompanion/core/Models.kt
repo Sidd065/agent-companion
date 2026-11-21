@@ -82,6 +82,13 @@ data class SessionSummary(
     val liveElsewhere: String? = null,
     /** When the running turn began (ms); also set for turns the agent started on its own. */
     val turnStart: Long = 0,
+    val projectId: String? = null,
+    val worktreePath: String? = null,
+    val branch: String? = null,
+    val settled: Boolean = false,
+    val snoozedUntil: Long = 0,
+    val draft: String? = null,
+    val lastCheckpoint: TurnCheckpoint? = null,
 ) {
     val busy: Boolean get() = state == "running" || state == "starting" || state == "waiting"
     val needsInput: Boolean get() = !attention.isNullOrEmpty() || state == "waiting"
@@ -91,16 +98,18 @@ data class SessionSummary(
     val agentLabel: String get() = agentLabel(agent)
 }
 
-fun agentLabel(agent: String?): String = when (agent) {
-    "claude" -> "Claude"
-    "codex" -> "Codex"
-    else -> "agy"
+fun agentLabel(agent: String?): String = when {
+    agent.isNullOrBlank() || agent == "agy" -> "agy"
+    agent == "claude" -> "Claude"
+    agent == "codex" -> "Codex"
+    else -> agent.replaceFirstChar { it.uppercase() }
 }
 
-fun agentProduct(agent: String?): String = when (agent) {
-    "claude" -> "Claude Code"
-    "codex" -> "Codex"
-    else -> "agy"
+fun agentProduct(agent: String?): String = when {
+    agent.isNullOrBlank() || agent == "agy" -> "agy"
+    agent == "claude" -> "Claude Code"
+    agent == "codex" -> "OpenAI Codex"
+    else -> agent.replaceFirstChar { it.uppercase() }
 }
 
 @Serializable
@@ -141,6 +150,7 @@ data class SessionExtras(
     /** Agent details (Claude Code: plan, version, output style, agents). */
     val info: JsonElement? = null,
     val resumeAt: String? = null,
+    val checkpoints: List<TurnCheckpoint> = emptyList(),
 )
 
 @Serializable
@@ -190,10 +200,12 @@ data class Perm(
 
 @Serializable
 data class Turn(
+    val turnIndex: Int = 0,
     val stopReason: String = "",
     val usage: Usage? = null,
     val durationMs: Long = 0,
     val error: String? = null,
+    val checkpoint: TurnCheckpoint? = null,
 )
 
 @Serializable
@@ -299,10 +311,12 @@ data class ReadResult(
 data class AgentProfile(
     val id: String,
     val name: String = "",
+    val driver: String? = null,
     val command: String = "",
     val version: String? = null,
     val available: Boolean = false,
     val planned: Boolean = false,
+    val builtin: Boolean = false,
     val reason: String? = null,
     val features: List<String> = emptyList(),
 )

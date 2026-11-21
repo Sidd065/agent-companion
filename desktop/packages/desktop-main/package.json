@@ -1,0 +1,13 @@
+{
+  "name": "@agentc/desktop-main",
+  "version": "0.4.0",
+  "type": "module",
+  "scripts": {
+    "build": "node build.mjs",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@agentc/client-core": "*",
+    "@agentc/protocol": "*"
+  }
+}

@@ -64,6 +64,9 @@ func (s *Server) registerMethods() {
 		}
 		info := s.info(ctx)
 		info["sessions"] = s.Mgr.List(ctx, false)
+		if s.Mgr.Projects != nil {
+			info["projects"] = s.Mgr.Projects.List()
+		}
 		info["client"] = map[string]any{"id": c.ID, "deviceId": c.Peer, "deviceName": c.Device}
 		return info, nil
 	}
@@ -1071,6 +1074,7 @@ func (s *Server) registerMethods() {
 		}
 		return s.CLI.Run(ctx, t, in.Args...)
 	}
+	s.registerParityMethods()
 }
 
 func firstNonEmpty(v ...string) string {

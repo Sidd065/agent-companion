@@ -310,6 +310,10 @@ class TranscriptActions(
     val agent: String = "agy",
     /** The tool call a permission request is about (for its diff). */
     val toolFor: (String) -> io.github.sidd065.agentcompanion.core.Tool? = { null },
+    /** Open a turn-scoped checkpoint diff dialog. */
+    val onCheckpointDiff: ((Int) -> Unit)? = null,
+    /** Revert workspace to before a turn checkpoint. */
+    val onCheckpointRevert: ((Int) -> Unit)? = null,
 ) {
     val label: String get() = io.github.sidd065.agentcompanion.core.agentLabel(agent)
     val isClaude: Boolean get() = agent == "claude"
@@ -340,7 +344,7 @@ fun TranscriptRow(row: Row, actions: TranscriptActions, isLast: Boolean, activeI
                 }
                 "plan" -> TodoCard(it)
                 "notice" -> NoticeRow(it)
-                "turn" -> TurnRow(it)
+                "turn" -> TurnRow(it, actions)
             }
         }
     }
@@ -979,7 +983,7 @@ fun NoticeRow(item: Item) {
 }
 
 @Composable
-fun TurnRow(item: Item) {
+fun TurnRow(item: Item, actions: TranscriptActions? = null) {
     val ex = LocalExtra.current
     val t = item.turn ?: return
     val label = when (t.stopReason) {
@@ -992,8 +996,40 @@ fun TurnRow(item: Item) {
     }
     val parts = listOfNotNull(label, fmtDuration(t.durationMs).takeIf { t.durationMs > 0 }, t.usage?.totalTokens?.takeIf { it > 0 }?.let { "${fmtTokens(it)} tokens" },
         t.usage?.costUsd?.takeIf { it > 0 }?.let { fmtUsd(it) })
-    Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 2.dp), horizontalArrangement = Arrangement.End) {
-        Text(parts.joinToString(" · "), style = MaterialTheme.typography.labelSmall, color = if (t.stopReason == "cancelled") ex.warning else ex.muted)
+    Column(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 2.dp)) {
+        val cp = t.checkpoint
+        if (cp != null && (cp.files.isNotEmpty() || cp.totalAdd > 0 || cp.totalDel > 0)) {
+            Surface(
+                color = MaterialTheme.colorScheme.surfaceContainer,
+                shape = RoundedCornerShape(10.dp),
+                modifier = Modifier.fillMaxWidth().padding(bottom = 4.dp),
+            ) {
+                Row(
+                    Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 6.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                ) {
+                    Text(
+                        "${cp.files.size} file${if (cp.files.size == 1) "" else "s"}  +${cp.totalAdd} -${cp.totalDel}",
+                        style = MaterialTheme.typography.labelMedium,
+                        fontFamily = FontFamily.Monospace,
+                    )
+                    Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                        actions?.onCheckpointDiff?.let { cb ->
+                            androidx.compose.material3.TextButton(onClick = { cb(cp.turnIndex) }) { Text("Diff") }
+                        }
+                        actions?.onCheckpointRevert?.let { cb ->
+                            androidx.compose.material3.TextButton(onClick = { cb(cp.turnIndex) }) {
+                                Text("Revert", color = ex.danger)
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
+            Text(parts.joinToString(" · "), style = MaterialTheme.typography.labelSmall, color = if (t.stopReason == "cancelled") ex.warning else ex.muted)
+        }
     }
 }
 

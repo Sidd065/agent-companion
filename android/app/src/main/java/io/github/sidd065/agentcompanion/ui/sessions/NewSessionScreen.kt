@@ -146,8 +146,12 @@ private fun NewSessionContent(initialCwd: String, textState: androidx.compose.ru
     val conn = activeConnection() ?: return
     val settings by g.prefs.flow.collectAsState()
     val agents by conn.agents.collectAsState()
+    val projects by conn.projects.collectAsState()
     val home = conn.homeDir()
     var cwd by remember { mutableStateOf(initialCwd) }
+    var projectId by remember { mutableStateOf<String?>(null) }
+    var useWorktree by remember { mutableStateOf(false) }
+    var branchName by remember { mutableStateOf("") }
     var text by textState
     var agent by remember { mutableStateOf(settings.defaultAgent) }
     LaunchedEffect(agents) {
@@ -194,6 +198,11 @@ private fun NewSessionContent(initialCwd: String, textState: androidx.compose.ru
                     settings.flagsJson(agent).forEach { (k, v) -> put(k, v) }
                     put("agent", agent)
                     put("cwd", cwd)
+                    projectId?.takeIf { it.isNotBlank() }?.let { put("projectId", it) }
+                    if (useWorktree) {
+                        put("useWorktree", true)
+                        branchName.trim().takeIf { it.isNotBlank() }?.let { put("branchName", it) }
+                    }
                     val dirs = (flagDirs + addDirs).distinct()
                     if (dirs.isNotEmpty()) put("addDirs", JsonArray(dirs.map { JsonPrimitive(it) }))
                     if (text.isNotBlank() || attachments.isNotEmpty()) {
@@ -237,6 +246,26 @@ private fun NewSessionContent(initialCwd: String, textState: androidx.compose.ru
                     )
                 }
             }
+            // Projects quick-pick (Protocol v2)
+            if (projects.isNotEmpty()) {
+                Text("Project", style = MaterialTheme.typography.labelLarge)
+                Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    projects.forEach { pr ->
+                        FilterChip(
+                            selected = projectId == pr.id || cwd == pr.path,
+                            onClick = {
+                                projectId = pr.id
+                                cwd = pr.path
+                                pr.defaultAgent?.takeIf { it.isNotBlank() }?.let { da ->
+                                    if (agents.any { it.id == da && it.available }) agent = da
+                                }
+                                if (pr.defaultCheckout == "worktree") useWorktree = true
+                            },
+                            label = { Text(pr.name.ifBlank { baseName(pr.path) }) },
+                        )
+                    }
+                }
+            }
             // Folder
             Text("Folder on ${conn.config.label}", style = MaterialTheme.typography.labelLarge)
             Card(Modifier.fillMaxWidth().clickable { picking = "cwd" }, colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainer)) {
@@ -250,6 +279,22 @@ private fun NewSessionContent(initialCwd: String, textState: androidx.compose.ru
                     }
                     Text("Change", color = MaterialTheme.colorScheme.primary, style = MaterialTheme.typography.labelLarge)
                 }
+            }
+            // Isolated Git Worktree toggle (Protocol v2)
+            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.SpaceBetween) {
+                Column(Modifier.weight(1f)) {
+                    Text("New Git Worktree", style = MaterialTheme.typography.labelLarge)
+                    Text("Isolate edits on a fresh branch", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+                Switch(checked = useWorktree, onCheckedChange = { useWorktree = it })
+            }
+            if (useWorktree) {
+                OutlinedTextField(
+                    branchName, { branchName = it },
+                    modifier = Modifier.fillMaxWidth(),
+                    singleLine = true,
+                    placeholder = { Text("Branch name (optional, auto-generated if blank)") },
+                )
             }
             // Prompt
             // A long pasted prompt scrolls inside the field, so the flags and Start stay near.

@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"agentc/internal/acp"
+	"agentc/internal/checkpoints"
 	"agentc/internal/lsapi"
 )
 
@@ -334,8 +335,10 @@ func (m *Manager) Rename(ctx context.Context, id, title string) error {
 			return err
 		}
 		m.invalidateHistory()
-	} else if err := m.annotate(ctx, id, map[string]any{"title": title}); err != nil {
-		return err
+	} else if m.isAgyID(id) {
+		if err := m.annotate(ctx, id, map[string]any{"title": title}); err != nil {
+			return err
+		}
 	}
 	if s := m.Get(id); s != nil {
 		s.mu.Lock()
@@ -362,8 +365,10 @@ func (m *Manager) SetFlag(ctx context.Context, id, flag string, on bool) error {
 			return err
 		}
 		m.invalidateHistory()
-	} else if err := m.annotate(ctx, id, ann); err != nil {
-		return err
+	} else if m.isAgyID(id) {
+		if err := m.annotate(ctx, id, ann); err != nil {
+			return err
+		}
 	}
 	if s := m.Get(id); s != nil {
 		s.mu.Lock()
@@ -388,9 +393,12 @@ func (m *Manager) Delete(ctx context.Context, id string) error {
 	if m.isClaudeID(id) {
 		return m.deleteClaude(id)
 	}
+	wasAgy := m.isAgyID(id)
+	var cwd string
 	if s := m.Get(id); s != nil {
 		s.Hibernate()
 		s.mu.Lock()
+		cwd = s.meta.Cwd
 		s.removed = true
 		s.mu.Unlock()
 		m.mu.Lock()
@@ -399,12 +407,17 @@ func (m *Manager) Delete(ctx context.Context, id string) error {
 		_ = os.Remove(m.sessionFile(id))
 		_ = os.RemoveAll(m.attachmentDir(id))
 	}
-	ls, err := m.UtilityLS(ctx)
-	if err != nil {
-		return err
+	if cwd != "" {
+		checkpoints.Cleanup(ctx, cwd, id)
 	}
-	if err := ls.Call(ctx, "DeleteCascadeTrajectory", map[string]any{"cascadeId": id}, nil); err != nil {
-		return err
+	if wasAgy {
+		ls, err := m.UtilityLS(ctx)
+		if err != nil {
+			return err
+		}
+		if err := ls.Call(ctx, "DeleteCascadeTrajectory", map[string]any{"cascadeId": id}, nil); err != nil {
+			return err
+		}
 	}
 	m.invalidateHistory()
 	m.hub.Broadcast("session.removed", map[string]any{"id": id})
@@ -413,7 +426,7 @@ func (m *Manager) Delete(ctx context.Context, id string) error {
 
 // Export renders a conversation as Markdown.
 func (m *Manager) Export(ctx context.Context, id string) (string, error) {
-	if m.isClaudeID(id) {
+	if m.isClaudeID(id) || !m.isAgyID(id) {
 		s, err := m.Open(ctx, id)
 		if err != nil {
 			return "", err
@@ -444,6 +457,14 @@ func (m *Manager) AgentChanges(ctx context.Context, id string) (json.RawMessage,
 			return nil, err
 		}
 		return m.claudeFileDiffs(s)
+	}
+	if !m.isAgyID(id) {
+		diff, err := m.TurnDiff(ctx, id, "session", 0)
+		if err != nil {
+			return json.RawMessage(`{"diffs":[]}`), nil
+		}
+		b, _ := json.Marshal(map[string]any{"diffs": diff.Files})
+		return b, nil
 	}
 	ls, err := m.LS(ctx, id)
 	if err != nil {
@@ -514,6 +535,9 @@ func (m *Manager) Artifacts(id string) ([]Artifact, error) {
 			out = append(out, Artifact{Name: a.Name, Path: a.Path, Size: a.Size, Mtime: a.Updated})
 		}
 		return out, nil
+	}
+	if !m.isAgyID(id) {
+		return []Artifact{}, nil
 	}
 	root := filepath.Join(m.cfg.AgyDataDir, "brain", id)
 	var out []Artifact

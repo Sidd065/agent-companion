@@ -302,7 +302,7 @@ func serve(args []string) int {
 	}
 	hub := core.NewHub()
 	mgr := core.NewManager(core.Config{
-		AgyPath: cfg.AgyPath, ClaudePath: findClaude(p.home, cfg.ClaudePath), StateDir: p.state, HomeDir: p.home,
+		AgyPath: cfg.AgyPath, ClaudePath: findClaude(p.home, cfg.ClaudePath), StateDir: p.state, ConfigDir: p.config, WorktreeDir: filepath.Join(p.share, "worktrees"), HomeDir: p.home,
 		AgyDataDir: filepath.Join(p.home, ".gemini", "antigravity-cli"), IdleHibernate: time.Duration(cfg.IdleHibernateMinutes) * time.Minute,
 		MaxLive: cfg.MaxLive, DefaultSkip: skip,
 	}, hub)
@@ -704,8 +704,8 @@ func pairCmd(args []string) int {
 		}
 	}
 	exp := time.UnixMilli(int64(toF(out["expires"])))
-	fmt.Printf("\nScan with Agent Companion (Hosts → Add host), or open this link on the phone:\n%s\n", link)
-	fmt.Printf("\nHost %v · fingerprint %v · single use · expires %s\n", out["host"], out["fingerprint"], exp.Format("15:04:05"))
+	fmt.Printf("\nScan with Agent Companion (Android) or paste this link into the Desktop app (Hosts → Add host):\n%s\n", link)
+	fmt.Printf("\nHost %v · fingerprint %v · single use · expires %s\n", out["host"], out["fingerprint"], exp.Format("15:04:05 MST"))
 	fmt.Println("Anyone with this code can pair, so don't share it.")
 	return 0
 }

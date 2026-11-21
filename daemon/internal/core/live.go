@@ -381,6 +381,9 @@ func (m *Manager) LiveState(ctx context.Context, id string) (*Live, error) {
 	if s := m.Get(id); s != nil && s.isClaudeSafe() {
 		return m.claudeLive(s), nil
 	}
+	if !m.isAgyID(id) {
+		return &Live{}, nil
+	}
 	live, err := m.ComputeLive(ctx, id, m.liveLS(ctx, id))
 	if err == nil {
 		live.Hook = m.hookFor(id)

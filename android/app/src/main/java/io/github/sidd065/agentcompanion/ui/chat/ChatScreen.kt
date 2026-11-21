@@ -252,6 +252,17 @@ fun ChatScreen(sessionId: String, prefill: String) {
             }
             return
         }
+        // Inline !command execution (Protocol v2)
+        if (text.trim().startsWith("!") && text.trim().length > 1 && attachments.isEmpty()) {
+            val cmd = text.trim().removePrefix("!").trim()
+            composer.clear()
+            follow = true
+            scope.launch {
+                runCatching { conn.rpc.call("session.exec", params { put("id", sessionId); put("command", cmd) }) }
+                    .onFailure { snack.showSnackbar("Shell exec failed: ${it.message}") }
+            }
+            return
+        }
         val effDelivery = delivery ?: settings.delivery.ifBlank { null }
         composer.clear()
         follow = true
@@ -299,6 +310,28 @@ fun ChatScreen(sessionId: String, prefill: String) {
                 rpc("Approve") {
                     if (switch) conn.rpc.call("session.setMode", params { put("id", sessionId); put("mode", "accept-edits") })
                     conn.rpc.call("session.prompt", params { put("id", sessionId); put("text", "The plan looks good. Proceed with the implementation.") })
+                }
+            },
+            onCheckpointDiff = { turnIdx ->
+                scope.launch {
+                    runCatching {
+                        val d = conn.rpc.call("session.turnDiff", params {
+                            put("id", sessionId); put("scope", "turn"); put("turnIndex", turnIdx)
+                        }).decode(io.github.sidd065.agentcompanion.core.ScopedDiffResult.serializer())
+                        val txt = d.files.joinToString("\n\n") { f -> "=== ${f.path} (+${f.additions} -${f.deletions}) ===\n${f.patch}" }
+                            .ifBlank { d.rawDiff ?: "No diff in turn #$turnIdx" }
+                        nav.navigate(Routes.text(io.github.sidd065.agentcompanion.ui.TextHolder.put("Turn #$turnIdx Diff", txt)))
+                    }.onFailure { snack.showSnackbar("Turn diff failed: ${it.message}") }
+                }
+            },
+            onCheckpointRevert = { turnIdx ->
+                scope.launch {
+                    runCatching {
+                        conn.rpc.call("session.checkpointRevert", params {
+                            put("id", sessionId); put("turnIndex", turnIdx); put("toPre", true)
+                        })
+                        snack.showSnackbar("Reverted workspace to before turn #$turnIdx")
+                    }.onFailure { snack.showSnackbar("Revert failed: ${it.message}") }
                 }
             },
         )

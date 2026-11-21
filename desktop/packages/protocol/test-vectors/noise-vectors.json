@@ -1,0 +1,95 @@
+[
+  {
+    "name": "Noise_IK_25519_ChaChaPoly_SHA256",
+    "prologue": "6167656e74632f3120636f6e6e0a",
+    "initStaticPriv": "0101010101010101010101010101010101010101010101010101010101010101",
+    "initEphemeralPriv": "0202020202020202020202020202020202020202020202020202020202020202",
+    "respStaticPub": "5dfedd3b6bd47f6fa28ee15d969d5bb0ea53774d488bdaf9df1c6e0124b3ef22",
+    "respStaticPriv": "0303030303030303030303030303030303030303030303030303030303030303",
+    "respEphemeralPriv": "0404040404040404040404040404040404040404040404040404040404040404",
+    "msg1Payload": "7b2276223a312c22707572706f7365223a22727063222c226e616d65223a22506978656c227d",
+    "msg1": "ce8d3ad1ccb633ec7b70c17814a5c76ecd029685050d344745ba05870e587d59d5ea48b87c259312e4124f5b8ab09dbabfeeac5b1a722c5a59f272aaf50460061dcf8a722347da3be8978fc74242bd4150fdbf3ab6b5d3e342239e42048ac4a3877986d9f0dbe276609e145f6027e2212f39c934bb90ada997ca30ddb94350480980fc67cec9",
+    "msg2Payload": "7b2276223a312c22686f7374223a226465762d626f78227d",
+    "msg2": "ac01b2209e86354fb853237b5de0f4fab13c7fcbf433a61c019369617fecf10bac34dc4f989380d925942ae3664415e51ab096305e6364218d08334917f4526c946f1ee24075f40e",
+    "transport": [
+      {
+        "dir": "i2r",
+        "plain": "016869",
+        "cipher": "0fe1637f21d25c711910b78eb17751262641f7"
+      },
+      {
+        "dir": "r2i",
+        "plain": "016869",
+        "cipher": "b5cf929832e222a3a55febf6d5c8d122c584b5"
+      },
+      {
+        "dir": "i2r",
+        "plain": "03000102",
+        "cipher": "0e412ebf170f84a2d4aed37673e983d85b31a196"
+      },
+      {
+        "dir": "r2i",
+        "plain": "03000102",
+        "cipher": "6f029252b186d28fd49200b07a6ad66f636d7843"
+      },
+      {
+        "dir": "i2r",
+        "plain": "01",
+        "cipher": "e6c463a68709ae8fef90dc5bda6cd8da7b"
+      },
+      {
+        "dir": "r2i",
+        "plain": "01",
+        "cipher": "fb3194348c76b7cb229eb779c28202d9f1"
+      }
+    ],
+    "handshakeHash": "784f3ab40a239209582cc6671b6658b805855bbd608381d3cc73cdee1382725c"
+  },
+  {
+    "name": "Noise_IKpsk1_25519_ChaChaPoly_SHA256",
+    "prologue": "6167656e74632f3120706169720a504149524944",
+    "psk": "0505050505050505050505050505050505050505050505050505050505050505",
+    "initStaticPriv": "0101010101010101010101010101010101010101010101010101010101010101",
+    "initEphemeralPriv": "0202020202020202020202020202020202020202020202020202020202020202",
+    "respStaticPub": "5dfedd3b6bd47f6fa28ee15d969d5bb0ea53774d488bdaf9df1c6e0124b3ef22",
+    "respStaticPriv": "0303030303030303030303030303030303030303030303030303030303030303",
+    "respEphemeralPriv": "0404040404040404040404040404040404040404040404040404040404040404",
+    "msg1Payload": "7b2276223a312c22707572706f7365223a22727063222c226e616d65223a22506978656c227d",
+    "msg1": "ce8d3ad1ccb633ec7b70c17814a5c76ecd029685050d344745ba05870e587d5979ff28913ace953f9c2710ab486a4d3c645cf5e5e917a2ed31671986505d6ea1ec46e490634b463de1f4e2f925e4a45dc825d216842e233d72215436b7d2de9b979e91ed7b7a5302e4a49877e1647eaa39d5ef7181b6e1fc6251dd61ed94b17adebfce169d4e",
+    "msg2Payload": "7b2276223a312c22686f7374223a226465762d626f78227d",
+    "msg2": "ac01b2209e86354fb853237b5de0f4fab13c7fcbf433a61c019369617fecf10b3eaae230e886abdf214955eeb2c4ae034ccdabd1ac1c70930e5ca71c651e8b64a4f0bf7eb2f2dcbb",
+    "transport": [
+      {
+        "dir": "i2r",
+        "plain": "016869",
+        "cipher": "f0e758a1684c97f5932b5d014368ec7d286fc3"
+      },
+      {
+        "dir": "r2i",
+        "plain": "016869",
+        "cipher": "8f9bf011b823e768325e5aaaeed7876ebc7602"
+      },
+      {
+        "dir": "i2r",
+        "plain": "03000102",
+        "cipher": "4374979f44a06ca9b4de5e7d8c609fa1b67c78cc"
+      },
+      {
+        "dir": "r2i",
+        "plain": "03000102",
+        "cipher": "546cd8a15137801888ab6f1a2c5e03f2635d4fbe"
+      },
+      {
+        "dir": "i2r",
+        "plain": "01",
+        "cipher": "d6146cd8eb67612c2a7a56ab02cc122e9d"
+      },
+      {
+        "dir": "r2i",
+        "plain": "01",
+        "cipher": "30ab0ce39fd94dde1200867bea4db74f2e"
+      }
+    ],
+    "handshakeHash": "ed8e1405a2ca140c30d990dd89c676e27489ba5d9ee4163e30c6a81815fda5bf"
+  }
+]

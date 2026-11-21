@@ -101,7 +101,7 @@ func (s *Server) publicURL() string {
 
 func (s *Server) info(ctx context.Context) map[string]any {
 	m := map[string]any{
-		"name": "agentc", "version": Version, "host": s.hostName(), "home": fsops.Home, "uptimeSec": int(time.Since(s.Started).Seconds()),
+		"name": "agentc", "version": Version, "protocolVersion": ProtocolVersion, "capabilities": Capabilities, "host": s.hostName(), "home": fsops.Home, "uptimeSec": int(time.Since(s.Started).Seconds()),
 		"agents": s.Mgr.Agents(), "stats": s.Mgr.Stats(), "apk": s.apkInfo(),
 		"hostId": s.Identity.ID(), "fingerprint": secure.Fingerprint(s.Identity.Key.Public), "publicUrl": s.publicURL(),
 		"devices": len(s.Devices.List()),
@@ -176,7 +176,7 @@ func (s *Server) handleSecure(w http.ResponseWriter, r *http.Request) {
 	conn, err := secure.Accept(ws, mode, pairID, secure.ServerConfig{
 		Identity: s.Identity, Devices: s.Devices, Tokens: s.Tokens,
 		Reply: func(d *secure.Device, h secure.Hello) map[string]any {
-			return map[string]any{"v": 1, "host": s.hostName(), "hostId": s.Identity.ID(), "version": Version,
+			return map[string]any{"v": 1, "protocolVersion": ProtocolVersion, "capabilities": Capabilities, "host": s.hostName(), "hostId": s.Identity.ID(), "version": Version,
 				"deviceId": d.ID, "deviceName": d.Name, "publicUrl": s.publicURL()}
 		},
 		OnPaired: func(d secure.Device) {

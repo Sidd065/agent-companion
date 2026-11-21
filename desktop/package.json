@@ -1,0 +1,29 @@
+{
+  "name": "agent-companion-desktop",
+  "version": "0.4.0",
+  "private": true,
+  "workspaces": [
+    "packages/*"
+  ],
+  "scripts": {
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "typecheck": "npm --workspace=@agentc/protocol run typecheck && npm --workspace=@agentc/client-core run typecheck && npm --workspace=@agentc/web run typecheck && npm --workspace=@agentc/desktop-main run typecheck",
+    "build:web": "npm --workspace=@agentc/web run build",
+    "build:main": "npm --workspace=@agentc/desktop-main run build",
+    "build": "npm run build:web && npm run build:main",
+    "dev": "npm --workspace=@agentc/web run dev",
+    "test:e2e": "playwright test",
+    "package:linux": "npm run build && node packaging/build-linux.mjs"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.52.0",
+    "@types/node": "^22.15.0",
+    "electron": "^35.2.0",
+    "electron-builder": "^26.0.12",
+    "esbuild": "^0.25.2",
+    "tsx": "^4.19.3",
+    "typescript": "^5.8.3",
+    "vitest": "^3.1.2"
+  }
+}

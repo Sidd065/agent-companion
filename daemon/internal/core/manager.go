@@ -20,7 +20,12 @@ import (
 	"agentc/internal/acp"
 	"agentc/internal/agyproc"
 	"agentc/internal/claude"
+	"agentc/internal/gitops"
 	"agentc/internal/lsapi"
+	"agentc/internal/projects"
+	"agentc/internal/providers"
+	"agentc/internal/scheduler"
+	"agentc/internal/usage"
 )
 
 // Config configures the session manager.
@@ -28,6 +33,8 @@ type Config struct {
 	AgyPath       string
 	ClaudePath    string // claude executable ("" = ~/.local/bin/claude or PATH)
 	StateDir      string
+	ConfigDir     string
+	WorktreeDir   string
 	HomeDir       string
 	AgyDataDir    string // ~/.gemini/antigravity-cli
 	IdleHibernate time.Duration
@@ -79,6 +86,13 @@ type Manager struct {
 	notifs      []Notification
 	notSeq      int64
 	stopCh      chan struct{}
+	// Parity subsystems (Projects, Git/Worktrees, Providers, Usage, Scheduler).
+	Projects          *projects.Store
+	Git               *gitops.Service
+	Providers         *providers.Store
+	Usage             *usage.Log
+	Scheduler         *scheduler.Engine
+	OnWorktreeCreated func(ctx context.Context, projectID, sessionID, wtPath string)
 	// Sink receives every notification (e.g. Firebase push delivery).
 	Sink func(Notification)
 }
@@ -91,9 +105,35 @@ func NewManager(cfg Config, hub *Hub) *Manager {
 	if cfg.MaxLive == 0 {
 		cfg.MaxLive = 8
 	}
-	m := &Manager{cfg: cfg, hub: hub, sessions: map[string]*Session{}, stopCh: make(chan struct{}), liveWatches: map[string]*liveWatch{}}
+	m := &Manager{cfg: cfg, hub: hub, sessions: map[string]*Session{}, stopCh: make(chan struct{}), liveWatches: map[string]*liveWatch{}, Git: gitops.New()}
 	_ = os.MkdirAll(filepath.Join(cfg.StateDir, "sessions"), 0o700)
 	_ = os.MkdirAll(filepath.Join(cfg.StateDir, "attachments"), 0o700)
+	cfgDir := cfg.ConfigDir
+	if cfgDir == "" {
+		cfgDir = cfg.StateDir
+	}
+	if ps, err := projects.Open(filepath.Join(cfg.StateDir, "projects.json")); err == nil {
+		m.Projects = ps
+	} else {
+		log.Printf("projects store: %v", err)
+		m.Projects, _ = projects.Open("")
+	}
+	if prs, err := providers.Open(filepath.Join(cfgDir, "providers.json")); err == nil {
+		m.Providers = prs
+	} else {
+		log.Printf("providers store: %v", err)
+		m.Providers, _ = providers.Open("")
+	}
+	m.Usage = usage.Open(filepath.Join(cfg.StateDir, "usage.jsonl"))
+	if se, err := scheduler.Open(filepath.Join(cfg.StateDir, "schedules.json"), m.runScheduledTask, func() {
+		tasks, runs := m.Scheduler.List()
+		m.hub.Broadcast("schedules.changed", map[string]any{"tasks": tasks, "runs": runs})
+	}); err == nil {
+		m.Scheduler = se
+		m.Scheduler.Start()
+	} else {
+		log.Printf("scheduler: %v", err)
+	}
 	m.loadSessions()
 	go m.janitor()
 	go m.liveLoop()
@@ -215,6 +255,9 @@ func (m *Manager) SaveAll() {
 
 // Shutdown stops all agy processes gracefully.
 func (m *Manager) Shutdown() {
+	if m.Scheduler != nil {
+		m.Scheduler.Stop()
+	}
 	close(m.stopCh)
 	var wg sync.WaitGroup
 	for _, s := range m.all() {
@@ -773,9 +816,15 @@ type Flags struct {
 // CreateParams describe a new session.
 type CreateParams struct {
 	Flags
-	Agent  string       `json:"agent,omitempty"` // agy (claude, codex planned)
-	Cwd    string       `json:"cwd"`
-	Prompt *PromptInput `json:"prompt,omitempty"`
+	Agent        string       `json:"agent,omitempty"` // agy | claude | codex | <custom-acp>
+	Cwd          string       `json:"cwd"`
+	ProjectID    string       `json:"projectId,omitempty"`
+	UseWorktree  bool         `json:"useWorktree,omitempty"`
+	BaseBranch   string       `json:"baseBranch,omitempty"`
+	BranchName   string       `json:"branchName,omitempty"`
+	GroupedUnder string       `json:"groupedUnder,omitempty"`
+	Title        string       `json:"title,omitempty"`
+	Prompt       *PromptInput `json:"prompt,omitempty"`
 }
 
 func (m *Manager) applyFlags(meta *SessionMeta, f *Flags) {
@@ -833,9 +882,29 @@ func (m *Manager) Create(ctx context.Context, p CreateParams) (*Session, error) 
 	if err != nil || !st.IsDir() {
 		return nil, fmt.Errorf("directory %q does not exist", cwd)
 	}
+	projID := p.ProjectID
+	if projID == "" && m.Projects != nil {
+		if pr, ok := m.Projects.FindByPath(cwd); ok {
+			projID = pr.ID
+		}
+	}
+	var wtPath, branch string
+	if p.UseWorktree {
+		wt, werr := m.Git.WorktreeCreate(ctx, cwd, p.BaseBranch, p.BranchName, m.cfg.WorktreeDir)
+		if werr != nil {
+			return nil, fmt.Errorf("create worktree: %w", werr)
+		}
+		cwd = wt.Path
+		wtPath = wt.Path
+		branch = wt.Branch
+	} else if st, err := m.Git.Status(ctx, cwd, false); err == nil && st.IsRepo {
+		branch = st.Branch
+	}
 	ts := now()
-	meta := SessionMeta{Agent: agent, Cwd: cwd, SkipPerms: m.cfg.DefaultSkip, WantModel: m.defaultModel(agent),
-		CreatedAt: ts, UpdatedAt: ts, Origin: "app", Title: "New session"}
+	title := firstNonEmpty(p.Title, "New session")
+	meta := SessionMeta{Agent: agent, Cwd: cwd, ProjectID: projID, WorktreePath: wtPath, Branch: branch,
+		GroupedUnder: p.GroupedUnder, SkipPerms: m.cfg.DefaultSkip, WantModel: m.defaultModel(agent),
+		CreatedAt: ts, UpdatedAt: ts, Origin: "app", Title: title, TitleLocked: strings.TrimSpace(p.Title) != ""}
 	m.applyFlags(&meta, &p.Flags)
 	s := newSession(m, meta)
 	if err := s.ensureLive(ctx, "new"); err != nil {

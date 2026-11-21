@@ -149,6 +149,10 @@ fun SessionsScreen() {
     val sessions = hosted.map { it.second }
     var filter by remember { mutableStateOf("all") }
     var agentFilter by remember { mutableStateOf<String?>(null) }
+    var projectFilter by remember { mutableStateOf<String?>(null) }
+    val hostedProjects by remember(conns) {
+        kotlinx.coroutines.flow.combine(conns.map { c -> c.projects.map { l -> l.map { c to it } } }) { a -> a.flatMap { it.toList() } }
+    }.collectAsState(emptyList())
     var query by remember { mutableStateOf("") }
     var searching by remember { mutableStateOf(false) }
     var refreshing by remember { mutableStateOf(false) }
@@ -163,11 +167,13 @@ fun SessionsScreen() {
         val f = when (filter) {
             "working" -> s.busy && !s.needsInput
             "input" -> s.needsInput
-            "idle" -> !s.busy && !s.needsInput && !s.archived
+            "idle" -> !s.busy && !s.needsInput && !s.archived && !s.settled
+            "settled" -> s.settled && !s.archived
             "archived" -> s.archived
-            else -> !s.archived
+            else -> !s.archived && !s.settled
         }
         f && (agentFilter == null || s.agent == agentFilter) &&
+            (projectFilter == null || s.projectId == projectFilter) &&
             (query.isBlank() || s.title.contains(query, true) || s.cwd.contains(query, true) || (s.lastText?.contains(query, true) == true))
     }
     val agentsPresent = sessions.map { it.agent }.distinct().sorted()
@@ -238,10 +244,19 @@ fun SessionsScreen() {
         Column(Modifier.padding(pad).fillMaxSize()) {
             conns.forEach { ConnectionBanner(it) }
             LazyRow(contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                val chips = listOf("all" to "All", "working" to "Working", "input" to "Needs input", "idle" to "Idle", "archived" to "Archived")
+                val chips = listOf("all" to "Inbox", "working" to "Working", "input" to "Needs input", "idle" to "Idle", "settled" to "Settled", "archived" to "Archived")
                 items(chips) { (k, l) ->
                     val c = counts[k]
                     FilterChip(selected = filter == k, onClick = { filter = k }, label = { Text(if (c != null && c > 0) "$l · $c" else l) })
+                }
+                if (hostedProjects.isNotEmpty()) {
+                    items(hostedProjects, key = { (c, pr) -> "pr:${c.config.id}:${pr.id}" }) { (_, pr) ->
+                        FilterChip(
+                            selected = projectFilter == pr.id,
+                            onClick = { projectFilter = if (projectFilter == pr.id) null else pr.id },
+                            label = { Text(pr.name.ifBlank { baseName(pr.path) }) },
+                        )
+                    }
                 }
                 // With more than one agent on the computers, filter by agent too.
                 if (agentsPresent.size > 1) items(agentsPresent) { a ->
@@ -454,6 +469,9 @@ fun SessionActionsSheet(conn: HostConnection, s: SessionSummary, onDismiss: () -
                 SheetItem(Icons.Outlined.StopCircle, "Stop ${s.agentLabel} process") {
                     onDismiss(); rpc("Stop") { conn.rpc.call("session.stop", params { put("id", s.id) }) }
                 }
+            }
+            SheetItem(if (s.settled) Icons.Outlined.Unarchive else Icons.Outlined.Archive, if (s.settled) "Move to Inbox (Unsettle)" else "Settle (Mark done)") {
+                onDismiss(); rpc("Settle") { conn.rpc.call("session.settle", params { put("id", s.id); put("settled", !s.settled) }) }
             }
             SheetItem(if (s.archived) Icons.Outlined.Unarchive else Icons.Outlined.Archive, if (s.archived) "Unarchive" else "Archive") {
                 onDismiss(); rpc("Archive") { conn.rpc.call("session.archive", params { put("id", s.id); put("archived", !s.archived) }) }

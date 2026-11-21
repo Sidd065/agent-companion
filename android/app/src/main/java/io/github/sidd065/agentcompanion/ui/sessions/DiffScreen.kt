@@ -144,7 +144,7 @@ fun DiffScreen(sessionId: String?, path: String) {
         },
     ) { pad ->
         Column(Modifier.padding(pad).fillMaxSize()) {
-            val tabs = if (sessionId != null) listOf("Uncommitted", "Agent edits", "Commits") else listOf("Uncommitted", "Commits")
+            val tabs = if (sessionId != null) listOf("Uncommitted", "Agent edits", "Commits", "Git") else listOf("Uncommitted", "Commits", "Git")
             PrimaryTabRow(selectedTabIndex = tab.coerceAtMost(tabs.size - 1)) {
                 tabs.forEachIndexed { i, name ->
                     Tab(tab == i, { tab = i }, text = { Text(if (name == "Agent edits") "Agent edits${agent?.size?.let { " · $it" } ?: ""}" else name) })
@@ -152,7 +152,9 @@ fun DiffScreen(sessionId: String?, path: String) {
             }
             err?.let { ErrorBox(it) { reload++ } }
             val repoPath = git?.root ?: sessionId?.let { conn.session(it)?.cwd } ?: path
-            if (tabs.getOrNull(tab) == "Commits") {
+            if (tabs.getOrNull(tab) == "Git") {
+                GitWorkbenchTab(conn, repoPath, reload) { wtPath -> nav.navigate(Routes.newSession(cwd = wtPath)) }
+            } else if (tabs.getOrNull(tab) == "Commits") {
                 CommitsTab(conn, repoPath, settings.codeWrap, reload) { p -> nav.navigate(Routes.file(p)) }
             } else if (tab == 0) {
                 val d = git

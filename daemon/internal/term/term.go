@@ -59,8 +59,12 @@ type Term struct {
 	Msg      string `json:"msg,omitempty"`
 	Origin   string `json:"origin,omitempty"`
 	ConvID   string `json:"conversationId,omitempty"`
-	Current  string `json:"currentCommand,omitempty"`
-	Dead     bool   `json:"dead"`
+	Current      string `json:"currentCommand,omitempty"`
+	Dead         bool   `json:"dead"`
+	SessionID    string `json:"sessionId,omitempty"`
+	ScriptID     string `json:"scriptId,omitempty"`
+	RemainOnExit bool   `json:"remainOnExit,omitempty"`
+	DeadStatus   int    `json:"deadStatus,omitempty"`
 }
 
 const tmuxConf = `# agy companion private tmux server (generated)
@@ -141,7 +145,7 @@ func noServer(err error) bool {
 	return strings.Contains(s, "no server running") || strings.Contains(s, "error connecting") || strings.Contains(s, "No such file")
 }
 
-const listFmt = "#{session_name}\t#{session_created}\t#{session_attached}\t#{window_width}\t#{window_height}\t#{pane_current_path}\t#{pane_current_command}\t#{pane_dead}\t#{@agentc_name}\t#{@agentc_kind}\t#{@agentc_state}\t#{@agentc_msg}\t#{@agentc_origin}\t#{@agentc_conv}\t#{@agentc_cmd}"
+const listFmt = "#{session_name}\t#{session_created}\t#{session_attached}\t#{window_width}\t#{window_height}\t#{pane_current_path}\t#{pane_current_command}\t#{pane_dead}\t#{@agentc_name}\t#{@agentc_kind}\t#{@agentc_state}\t#{@agentc_msg}\t#{@agentc_origin}\t#{@agentc_conv}\t#{@agentc_cmd}\t#{@agentc_sess}\t#{@agentc_script}\t#{pane_dead_status}"
 
 // List returns all terminals.
 func (m *Manager) List(ctx context.Context) ([]Term, error) {
@@ -162,8 +166,16 @@ func (m *Manager) List(ctx context.Context) ([]Term, error) {
 		att, _ := strconv.Atoi(f[2])
 		w, _ := strconv.Atoi(f[3])
 		h, _ := strconv.Atoi(f[4])
+		deadStatus := 0
+		if len(f) >= 18 {
+			deadStatus, _ = strconv.Atoi(f[17])
+		}
 		t := Term{ID: f[0], Created: created * 1000, Attached: att, Width: w, Height: h, Cwd: f[5], Current: f[6], Dead: f[7] == "1",
-			Name: f[8], Kind: f[9], State: f[10], Msg: f[11], Origin: f[12], ConvID: f[13], Command: f[14]}
+			Name: f[8], Kind: f[9], State: f[10], Msg: f[11], Origin: f[12], ConvID: f[13], Command: f[14], DeadStatus: deadStatus}
+		if len(f) >= 17 {
+			t.SessionID = f[15]
+			t.ScriptID = f[16]
+		}
 		if t.Name == "" {
 			t.Name = t.ID
 		}
@@ -201,8 +213,11 @@ type CreateOpts struct {
 	Cols    int      `json:"cols"`
 	Rows    int      `json:"rows"`
 	Origin  string   `json:"origin"`
-	ConvID  string   `json:"conversationId"`
-	Skip    *bool    `json:"skipPermissions"`
+	ConvID       string   `json:"conversationId"`
+	SessionID    string   `json:"sessionId,omitempty"`
+	ScriptID     string   `json:"scriptId,omitempty"`
+	RemainOnExit bool     `json:"remainOnExit,omitempty"`
+	Skip         *bool    `json:"skipPermissions"`
 }
 
 var idRe = regexp.MustCompile(`^[A-Za-z0-9_-]+$`)
@@ -336,6 +351,15 @@ func (m *Manager) Create(ctx context.Context, o CreateOpts) (*Term, error) {
 		"set-option", "-t", id, "@agentc_cmd", command}
 	if o.ConvID != "" {
 		set = append(set, ";", "set-option", "-t", id, "@agentc_conv", o.ConvID)
+	}
+	if o.SessionID != "" {
+		set = append(set, ";", "set-option", "-t", id, "@agentc_sess", o.SessionID)
+	}
+	if o.ScriptID != "" {
+		set = append(set, ";", "set-option", "-t", id, "@agentc_script", o.ScriptID)
+	}
+	if o.RemainOnExit {
+		set = append(set, ";", "set-option", "-t", id, "remain-on-exit", "on")
 	}
 	if _, err := m.tmux(ctx, set...); err != nil {
 		return nil, err

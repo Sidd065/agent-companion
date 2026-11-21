@@ -1,0 +1,233 @@
+import React, { useEffect, useMemo, useRef, useState } from 'react';
+import {
+  Activity,
+  Clock,
+  FileDiff,
+  FolderGit2,
+  FolderPlus,
+  GitBranch,
+  MessageSquare,
+  Palette,
+  Plus,
+  Search,
+  Server,
+  Settings,
+  TerminalSquare,
+} from 'lucide-react';
+import type { SearchHit } from '@agentc/protocol';
+import { useApp } from '../../state/appStore.js';
+import { BUILTIN_THEMES } from '../../state/themes.js';
+
+interface PaletteAction {
+  id: string;
+  label: string;
+  detail?: string;
+  group: string;
+  icon: React.ReactNode;
+  run: () => void;
+}
+
+export const CommandPalette: React.FC = () => {
+  const {
+    commandPaletteOpen,
+    setCommandPaletteOpen,
+    allSessions,
+    allProjects,
+    activeHostId,
+    selectSession,
+    openDraft,
+    openRightTab,
+    setTerminalDrawerOpen,
+    setAddProjectModalOpen,
+    setPairModalOpen,
+    openSettingsTab,
+    setViewMode,
+    updateSettings,
+    callHost,
+  } = useApp();
+
+  const [query, setQuery] = useState('');
+  const [selectedIdx, setSelectedIdx] = useState(0);
+  const [remoteHits, setRemoteHits] = useState<SearchHit[]>([]);
+  const inputRef = useRef<HTMLInputElement>(null);
+
+  useEffect(() => {
+    if (commandPaletteOpen) {
+      setQuery('');
+      setSelectedIdx(0);
+      setRemoteHits([]);
+      setTimeout(() => inputRef.current?.focus(), 10);
+    }
+  }, [commandPaletteOpen]);
+
+  // Remote full-text search across transcripts when typing >= 2 chars
+  useEffect(() => {
+    if (!commandPaletteOpen || !activeHostId || query.trim().length < 2) {
+      setRemoteHits([]);
+      return;
+    }
+    const timer = setTimeout(() => {
+      void callHost<SearchHit[]>(activeHostId, 'search.query', { query: query.trim(), limit: 10 })
+        .then((hits) => setRemoteHits(Array.isArray(hits) ? hits : []))
+        .catch(() => setRemoteHits([]));
+    }, 180);
+    return () => clearTimeout(timer);
+  }, [commandPaletteOpen, activeHostId, query, callHost]);
+
+  const actions = useMemo<PaletteAction[]>(() => {
+    const close = () => setCommandPaletteOpen(false);
+    const list: PaletteAction[] = [
+      { id: 'new-thread', label: 'New Thread', group: 'Actions', icon: <Plus className="w-4 h-4" />, run: () => { openDraft(); close(); } },
+      { id: 'add-project', label: 'Add Project (Folder / Init / Clone)', group: 'Actions', icon: <FolderPlus className="w-4 h-4" />, run: () => { setAddProjectModalOpen(true); close(); } },
+      { id: 'pair-host', label: 'Pair / Manage Hosts', group: 'Actions', icon: <Server className="w-4 h-4" />, run: () => { setPairModalOpen(true); close(); } },
+      { id: 'open-diff', label: 'Open Diff Panel', group: 'Panels', icon: <FileDiff className="w-4 h-4" />, run: () => { openRightTab({ kind: 'diff', title: 'Diff', diffScope: 'uncommitted' }); close(); } },
+      { id: 'open-files', label: 'Open Files Explorer', group: 'Panels', icon: <FolderGit2 className="w-4 h-4" />, run: () => { openRightTab({ kind: 'files', title: 'Files' }); close(); } },
+      { id: 'open-side', label: 'Open Side Chat (/btw)', group: 'Panels', icon: <MessageSquare className="w-4 h-4" />, run: () => { openRightTab({ kind: 'side', title: 'Side Chat' }); close(); } },
+      { id: 'open-git', label: 'Open Source Control & Worktrees', group: 'Panels', icon: <GitBranch className="w-4 h-4" />, run: () => { openRightTab({ kind: 'git', title: 'Source Control' }); close(); } },
+      { id: 'open-pr', label: 'Open Pull Requests & Issues', group: 'Panels', icon: <GitBranch className="w-4 h-4" />, run: () => { openRightTab({ kind: 'pr', title: 'Pull Requests' }); close(); } },
+      { id: 'toggle-term', label: 'Toggle Terminal Drawer', group: 'Panels', icon: <TerminalSquare className="w-4 h-4" />, run: () => { setTerminalDrawerOpen((v) => !v); close(); } },
+      { id: 'open-usage', label: 'Usage & Cost Dashboard', group: 'Views', icon: <Activity className="w-4 h-4" />, run: () => { setViewMode('usage'); close(); } },
+      { id: 'open-schedules', label: 'Scheduled Tasks', group: 'Views', icon: <Clock className="w-4 h-4" />, run: () => { setViewMode('schedules'); close(); } },
+      { id: 'open-settings', label: 'Settings', group: 'Views', icon: <Settings className="w-4 h-4" />, run: () => { openSettingsTab('general'); close(); } },
+    ];
+
+    for (const th of BUILTIN_THEMES) {
+      list.push({
+        id: `theme-${th.id}`,
+        label: `Theme: ${th.name}`,
+        group: 'Appearance',
+        icon: <Palette className="w-4 h-4" />,
+        run: () => { updateSettings({ themeId: th.id }); close(); },
+      });
+    }
+
+    for (const p of allProjects) {
+      list.push({
+        id: `proj-${p.hostId}-${p.id}`,
+        label: `New thread in ${p.name}`,
+        detail: `${p.hostName} · ${p.path}`,
+        group: 'Projects',
+        icon: <FolderGit2 className="w-4 h-4" />,
+        run: () => { openDraft({ hostId: p.hostId, projectId: p.id, cwd: p.path }); close(); },
+      });
+    }
+
+    for (const s of allSessions.slice(0, 40)) {
+      list.push({
+        id: `sess-${s.hostId}-${s.id}`,
+        label: s.title || 'Untitled session',
+        detail: `${s.hostName} · ${s.agent}${s.branch ? ' · ' + s.branch : ''}`,
+        group: 'Threads',
+        icon: <MessageSquare className="w-4 h-4" />,
+        run: () => { selectSession(s.hostId, s.id); close(); },
+      });
+    }
+
+    const q = query.trim().toLowerCase();
+    const filtered = q
+      ? list.filter((a) => `${a.label} ${a.detail || ''} ${a.group}`.toLowerCase().includes(q))
+      : list.slice(0, 24);
+
+    // Append message search hits from daemon
+    for (const hit of remoteHits) {
+      if (hit.kind === 'message' && hit.sessionId) {
+        filtered.push({
+          id: `hit-${hit.sessionId}-${hit.updatedAt}`,
+          label: hit.title || hit.sessionId,
+          detail: hit.snippet,
+          group: 'Message Matches',
+          icon: <Search className="w-4 h-4 text-[var(--accent)]" />,
+          run: () => { selectSession(activeHostId, hit.sessionId!); close(); },
+        });
+      }
+    }
+    return filtered;
+  }, [
+    allProjects,
+    allSessions,
+    activeHostId,
+    openDraft,
+    openRightTab,
+    openSettingsTab,
+    query,
+    remoteHits,
+    selectSession,
+    setAddProjectModalOpen,
+    setCommandPaletteOpen,
+    setPairModalOpen,
+    setTerminalDrawerOpen,
+    setViewMode,
+    updateSettings,
+  ]);
+
+  if (!commandPaletteOpen) return null;
+
+  return (
+    <div
+      data-testid="command-palette"
+      className="fixed inset-0 z-50 flex items-start justify-center pt-[12vh] bg-black/55 backdrop-blur-xs p-4"
+      onClick={() => setCommandPaletteOpen(false)}
+    >
+      <div
+        className="w-full max-w-xl rounded-xl border border-[var(--border-strong)] bg-[var(--bg-surface)] shadow-2xl overflow-hidden"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="flex items-center gap-2 px-4 py-3 border-b border-[var(--border)]">
+          <Search className="w-4 h-4 text-[var(--text-muted)]" />
+          <input
+            ref={inputRef}
+            data-testid="command-palette-input"
+            value={query}
+            onChange={(e) => {
+              setQuery(e.target.value);
+              setSelectedIdx(0);
+            }}
+            onKeyDown={(e) => {
+              if (e.key === 'Escape') setCommandPaletteOpen(false);
+              else if (e.key === 'ArrowDown') {
+                e.preventDefault();
+                setSelectedIdx((i) => Math.min(actions.length - 1, i + 1));
+              } else if (e.key === 'ArrowUp') {
+                e.preventDefault();
+                setSelectedIdx((i) => Math.max(0, i - 1));
+              } else if (e.key === 'Enter' && actions[selectedIdx]) {
+                e.preventDefault();
+                actions[selectedIdx].run();
+              }
+            }}
+            placeholder="Jump to thread, project, panel, theme, or search messages…"
+            className="flex-1 bg-transparent text-sm text-[var(--text-primary)] placeholder:text-[var(--text-muted)] focus:outline-none"
+          />
+          <kbd className="text-[10px] px-1.5 py-0.5 rounded bg-[var(--bg-elevated)] text-[var(--text-muted)]">ESC</kbd>
+        </div>
+
+        <div className="max-h-[52vh] overflow-y-auto py-1.5">
+          {actions.length === 0 ? (
+            <div className="px-4 py-6 text-center text-xs text-[var(--text-muted)]">No matching commands or threads</div>
+          ) : (
+            actions.map((a, idx) => (
+              <button
+                key={a.id}
+                type="button"
+                onMouseEnter={() => setSelectedIdx(idx)}
+                onClick={() => a.run()}
+                className={`w-full flex items-center justify-between gap-3 px-4 py-2 text-left text-xs cursor-pointer ${
+                  idx === selectedIdx ? 'bg-[var(--accent-soft)] text-[var(--text-primary)]' : 'text-[var(--text-secondary)] hover:bg-[var(--bg-hover)]'
+                }`}
+              >
+                <div className="flex items-center gap-2.5 min-w-0">
+                  <span className="text-[var(--text-muted)] shrink-0">{a.icon}</span>
+                  <div className="min-w-0">
+                    <div className="font-medium text-[var(--text-primary)] truncate">{a.label}</div>
+                    {a.detail && <div className="text-[11px] text-[var(--text-muted)] truncate">{a.detail}</div>}
+                  </div>
+                </div>
+                <span className="shrink-0 text-[10px] uppercase tracking-wider text-[var(--text-muted)]">{a.group}</span>
+              </button>
+            ))
+          )}
+        </div>
+      </div>
+    </div>
+  );
+};

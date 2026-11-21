@@ -13,6 +13,7 @@ import io.github.sidd065.agentcompanion.core.SessionExtras
 import io.github.sidd065.agentcompanion.core.SessionSummary
 import io.github.sidd065.agentcompanion.BuildConfig
 import io.github.sidd065.agentcompanion.core.DeviceKeys
+import io.github.sidd065.agentcompanion.core.Project
 import io.github.sidd065.agentcompanion.core.Term
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -65,6 +66,8 @@ class HostConnection(
     val hello: StateFlow<JsonObject?> = _hello
     private val _agents = MutableStateFlow<List<AgentProfile>>(emptyList())
     val agents: StateFlow<List<AgentProfile>> = _agents
+    private val _projects = MutableStateFlow<List<Project>>(emptyList())
+    val projects: StateFlow<List<Project>> = _projects
     private val _notifications = MutableSharedFlow<AgentNotification>(extraBufferCapacity = 64)
     val notifications: SharedFlow<AgentNotification> = _notifications
 
@@ -101,6 +104,7 @@ class HostConnection(
             if (st.asidesLoaded) scope.launch { runCatching { st.refreshAsides() } }
         }
         scope.launch { refreshTerms() }
+        scope.launch { runCatching { refreshProjects() } }
         scope.launch { catchUpNotifications() }
         scope.launch { runCatching { onConnectedHook(this@HostConnection) } }
     }
@@ -158,6 +162,12 @@ class HostConnection(
             "terms.changed" -> {
                 runCatching { _terms.value = ev.data.decode(ListSerializer(Term.serializer())) }
             }
+            "projects.changed" -> {
+                runCatching { _projects.value = ev.data.decode(ListSerializer(Project.serializer())) }
+            }
+            "providers.changed" -> {
+                runCatching { _agents.value = ev.data.decode(ListSerializer(AgentProfile.serializer())) }
+            }
         }
     }
 
@@ -176,6 +186,19 @@ class HostConnection(
     suspend fun refreshTerms() {
         val res = rpc.call("term.list")
         _terms.value = res.decode(ListSerializer(Term.serializer()))
+    }
+
+    suspend fun refreshProjects() {
+        val res = rpc.call("projects.list")
+        _projects.value = res.decode(ListSerializer(Project.serializer()))
+    }
+
+    val protocolVersion: Int
+        get() = _hello.value?.get("protocolVersion")?.jsonPrimitive?.content?.toIntOrNull() ?: 1
+
+    fun hasCapability(cap: String): Boolean {
+        val arr = _hello.value?.get("capabilities") as? kotlinx.serialization.json.JsonArray ?: return false
+        return arr.any { it.jsonPrimitive.content == cap }
     }
 
     fun session(id: String): SessionSummary? = _sessions.value.firstOrNull { it.id == id }

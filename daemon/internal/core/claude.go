@@ -1621,7 +1621,10 @@ func (m *Manager) AskAside(ctx context.Context, id, question, followUp string) (
 // answerAside gets the answer to a side question from the right place.
 func (m *Manager) answerAside(ctx context.Context, s *Session, id, prompt string, isClaude bool) (string, error) {
 	if !isClaude {
-		return m.asideAgy(ctx, s, prompt)
+		if s.isAgySafe() {
+			return m.asideAgy(ctx, s, prompt)
+		}
+		return m.answerGenericAside(ctx, s, prompt)
 	}
 	var raw json.RawMessage
 	var err error

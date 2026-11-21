@@ -1,19 +1,24 @@
 # Agent Companion
 
-Run and follow coding agents on your own computers from an Android phone. It supports
-**[Claude Code](https://claude.com/claude-code)** and **agy** (Google's Antigravity CLI). You can chat with
-them, approve tool calls, answer their questions, review plans and diffs, and use real terminals, on any
-number of computers at once. Every connection is end-to-end encrypted.
+Run and orchestrate coding agents across all your Linux computers from a **Linux Desktop workbench**
+and an **Android phone**. It supports **[Claude Code](https://claude.com/claude-code)**, **agy** (Google's
+Antigravity CLI, including Gemini Enterprise login), **OpenAI Codex CLI**, and **any custom ACP (Agent
+Client Protocol) agent**. Manage projects, isolated Git worktrees, per-turn checkpoints and diffs, GitHub
+PRs & Issues, scripts, scheduled tasks, usage/cost telemetry, and real interactive terminals — across any
+number of local or remote hosts, all end-to-end encrypted.
 
-**[Download the Android app](https://github.com/Sidd065/agent-companion/releases/latest/download/agent-companion.apk)**
+**[Download Linux Desktop (.deb)](https://github.com/Sidd065/agent-companion/releases/latest/download/agent-companion_0.4.0_amd64.deb)**
+· **[Linux AppImage](https://github.com/Sidd065/agent-companion/releases/latest/download/Agent-Companion-0.4.0-x86_64.AppImage)**
+· **[Android APK](https://github.com/Sidd065/agent-companion/releases/latest/download/agent-companion.apk)**
 · [Releases](https://github.com/Sidd065/agent-companion/releases) · [Install](#install)
 
 ```
- Android app ──── wss:// (Cloudflare quick tunnel) ────▶ cloudflared ─▶ agentc ──┬─ claude -p     (one per Claude session, stream-json)
-  (Kotlin/Compose)   end-to-end encrypted (Noise IK)                   (Go)     ├─ agy acp       (one per agy session)
-        ▲                                                                       ├─ agy language server (tasks, artifacts…)
-        │                                                                       ├─ ~/.claude      (history, checkpoints, subagents)
-        └────────────── Firebase Cloud Messaging (notifications) ◀──────────────┴─ tmux          (terminals: claude, agy, shells)
+ Linux Desktop ──┬─ Unix socket (one-click local pair) / wss:// (Noise IK) ─▶ agentc (Go, Proto v2) ──┬─ claude -p     (stream-json)
+  (Electron/React)│                                                                                    ├─ agy acp + LS  (Gemini Enterprise)
+ Android app ────┴─ wss:// (Cloudflare tunnel / LAN, Noise IK) ─────────────▶                          ├─ codex exec    (OpenAI Codex CLI)
+  (Kotlin/Compose)                                                                                     ├─ generic ACP   (any ACP CLI)
+        ▲                                                                                              ├─ git/worktrees/checkpoints/gh PRs
+        └────────────── Firebase Cloud Messaging (notifications) ◀─────────────────────────────────────┴─ tmux PTYs + cron scheduler + PSI
 ```
 
 Each computer runs a small daemon, `agentc`, which drives the agents and reaches the phone through a
@@ -21,6 +26,31 @@ Cloudflare quick tunnel. You don't need port forwarding, a VPN or an account. Th
 and terminals of all your computers together.
 
 ## Features
+
+**Linux Desktop Workbench & Protocol v2**
+
+- **Linux Desktop App** (`desktop/`, Electron + React 19 + Tailwind v4 + `xterm.js`): frameless Linux shell
+  packaged as `.deb` (with Ubuntu 24.04 `t64` fallback dependencies) and `.AppImage`, plus `agentc://`
+  deep-link handling. Pair with your local `agentc` daemon in one click over its `0600` Unix socket, or
+  paste any `agentc pair` link to manage multiple local and remote machines in one unified UI.
+- **Projects & Isolated Git Worktrees**: register local folders, initialize new Git repos, or clone URLs /
+  GitHub `owner/repo` slugs. Start any thread in a fresh isolated Git worktree with auto-run setup scripts.
+- **Per-Turn Hidden Git Checkpoints & Diff Review**: every agent turn automatically captures a non-destructive
+  Git ref snapshot (`refs/agentc/checkpoints/<session>/<turn>`) using an ephemeral index (never touching your
+  staging area). Inspect stacked or split turn/uncommitted/branch/staged diffs, drop inline review comments
+  straight into the composer, or revert workspace files with one click (with a safety backup ref).
+- **Full Source Control & GitHub PRs / Issues**: stage, unstage, discard, commit (with AI commit message
+  suggestions), amend, fetch/pull/push (with default-branch push guard), manage branches/worktrees/stashes,
+  browse GitHub PRs & CI checks, check out PRs into fresh worktrees, and start threads from GitHub Issues.
+- **Any Coding Agent + Portable Handoff**: first-class drivers for Claude Code, Antigravity (`agy`), OpenAI
+  Codex CLI, and any custom ACP CLI configured in Settings. Switch providers mid-project via **Portable
+  Handoff** (`session.handoff`).
+- **Power Workbench**: inline `!command` shell execution right in the composer, `/btw` Side Chat tab, `@file`
+  fuzzy mentions, `$skill` triggers, collapsible bottom `xterm.js` Terminal Drawer (`Ctrl+J`) over encrypted
+  Noise streams, Command Palette (`Ctrl+K`), 6 built-in light/dark themes + color-blind diff palette +
+  sanitized Custom CSS, customizable keybindings, 92-day Usage & Cost Dashboard (`Ctrl+U`), Cron/Interval
+  Scheduled Tasks, and Linux Host Health / Memory PSI monitoring with stuck-process kill.
+
 
 **Both agents**
 
@@ -208,10 +238,16 @@ logs, and per-session agent logs.
 
 ## Building from source
 
-You need Go (see `daemon/go.mod`), JDK 17 and the Android SDK.
+You need Go (see `daemon/go.mod`), Node.js 22+ (for the Linux desktop app), and JDK 17 + Android SDK (for Android).
 
 ```sh
+# 1. Go daemon
 cd daemon && go build -o agentc . && ./agentc install
+
+# 2. Linux Desktop App (.deb + .AppImage in desktop/release/)
+cd desktop && npm install && npm run build && npm run package:linux
+
+# 3. Android App
 cd android && ./gradlew assembleRelease   # app/build/outputs/apk/release/app-release.apk
 ```
 
@@ -237,8 +273,12 @@ go run ./cmd/agentctl itest                         # end-to-end agy scenarios a
 go run ./cmd/agentctl itest claude                  # end-to-end Claude Code scenarios (real turns on Haiku)
 CLAUDE_ITEST=1 go test ./internal/claude -run Live  # the Claude adapter against a real claude
 
+cd desktop
+npm run typecheck && npm test                       # Protocol, Noise cross-lang vectors, pairing, diff parser, themes
+xvfb-run -a npm run test:e2e                        # Real-Electron Playwright E2E against hermetic agentc + fakeacp
+
 cd android
-./gradlew testDebugUnitTest                         # NoiseTest checks the Kotlin client against the Go vectors
+./gradlew testDebugUnitTest                         # NoiseTest + ProtocolV2ModelsTest
 ```
 
 ### Layout
@@ -253,6 +293,12 @@ cd android
   - `acp`, `agyproc` and `lsapi`: agy.
   - `term`: tmux.
   - `fsops`, `push` (FCM) and `qrterm`.
+- `desktop/`:
+  - `packages/protocol`: Go-generated (`daemon/cmd/protogen`) TypeScript v2 protocol contracts & shared Noise vectors.
+  - `packages/client-core`: Pure TypeScript Noise_IK / Noise_IKpsk1 crypto, pairing, RPC, `HostSupervisor` reconnect, `TerminalStream`, and transcript reducer.
+  - `packages/desktop-main`: Sandboxed Electron main/preload shell, local daemon Unix socket auto-detect/pair, `agentc://` deep links, tray & notifications.
+  - `packages/web`: React 19 + Tailwind v4 + `xterm.js` workbench UI (chat, diffs, files, git, PRs, side chat, usage, schedules, settings).
+  - `e2e/` & `packaging/`: Real-Electron Playwright E2E suite (hermetic daemon + `fakeacp`) and Linux `.deb`/`.AppImage` packager.
 - `android/app`:
   - `net/`: the Noise client, secure socket and RPC.
   - `core/`: models, pairing and Keystore-wrapped keys.

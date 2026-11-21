@@ -285,6 +285,9 @@ fun ManageScreen() {
                 }
             }
 
+            // Protocol v2 Workbench: Usage & Cost, Schedules, Host Health/PSI, Providers
+            WorkbenchV2Section(conn, reload) { sid -> nav.navigate(Routes.chat(sid)) }
+
             // Claude Code
             ClaudeManageBlocks(conn, reload) { reload++ }
 

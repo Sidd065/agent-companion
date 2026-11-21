@@ -16,7 +16,11 @@ import (
 
 	"agentc/internal/acp"
 	"agentc/internal/agyproc"
+	"agentc/internal/acpproc"
+	"agentc/internal/checkpoints"
 	"agentc/internal/claude"
+	"agentc/internal/codex"
+	"agentc/internal/providers"
 )
 
 // SessionMeta is the persisted, client-visible state of a session.
@@ -65,6 +69,15 @@ type SessionMeta struct {
 	// LastPrompt is when the user last sent the agent a message from here
 	// (ms). It settles review requests made before it.
 	LastPrompt int64 `json:"lastPrompt,omitempty"`
+	// T3 parity fields: projects, worktrees, inbox lifecycle, per-turn checkpoints, drafts.
+	ProjectID    string                       `json:"projectId,omitempty"`
+	WorktreePath string                       `json:"worktreePath,omitempty"`
+	Branch       string                       `json:"branch,omitempty"`
+	Settled      bool                         `json:"settled,omitempty"`
+	SnoozedUntil int64                        `json:"snoozedUntil,omitempty"`
+	GroupedUnder string                       `json:"groupedUnder,omitempty"`
+	Draft        string                       `json:"draft,omitempty"`
+	Checkpoints  []checkpoints.TurnCheckpoint `json:"checkpoints,omitempty"`
 }
 
 // QueuedPrompt is a message waiting for the current turn to end.
@@ -107,8 +120,16 @@ type Summary struct {
 	RSSKiB      int64     `json:"rssKiB,omitempty"`
 	Status      string    `json:"status,omitempty"`     // transient agent status (e.g. compacting)
 	Suggestion  string    `json:"suggestion,omitempty"` // predicted next prompt (Claude)
-	LiveElse    string    `json:"liveElsewhere,omitempty"`
-	TurnStart   int64     `json:"turnStart,omitempty"` // when the running turn began (ms)
+	LiveElse       string                      `json:"liveElsewhere,omitempty"`
+	TurnStart      int64                       `json:"turnStart,omitempty"` // when the running turn began (ms)
+	ProjectID      string                      `json:"projectId,omitempty"`
+	WorktreePath   string                      `json:"worktreePath,omitempty"`
+	Branch         string                      `json:"branch,omitempty"`
+	Settled        bool                        `json:"settled,omitempty"`
+	SnoozedUntil   int64                       `json:"snoozedUntil,omitempty"`
+	GroupedUnder   string                      `json:"groupedUnder,omitempty"`
+	Draft          string                      `json:"draft,omitempty"`
+	LastCheckpoint *checkpoints.TurnCheckpoint `json:"lastCheckpoint,omitempty"`
 }
 
 // Detail is the full view sent when a client opens a session.
@@ -122,8 +143,9 @@ type Detail struct {
 	Modes         *acp.Modes         `json:"modes,omitempty"`
 	ConfigOptions []acp.ConfigOption `json:"configOptions,omitempty"`
 	Commands      []acp.Command      `json:"commands,omitempty"`
-	Info          map[string]any     `json:"info,omitempty"`
-	ResumeAt      string             `json:"resumeAt,omitempty"`
+	Info          map[string]any               `json:"info,omitempty"`
+	ResumeAt      string                       `json:"resumeAt,omitempty"`
+	Checkpoints   []checkpoints.TurnCheckpoint `json:"checkpoints,omitempty"`
 }
 
 type pendingPerm struct {
@@ -221,6 +243,12 @@ func (s *Session) summaryLocked() Summary {
 		CreatedAt: m.CreatedAt, UpdatedAt: m.UpdatedAt, LastText: m.LastText, ContextUsed: m.ContextUsed,
 		ContextSize: m.ContextSize, Usage: m.Usage, Turns: m.Turns, Archived: m.Archived, Pinned: m.Pinned,
 		ForkedFrom: m.ForkedFrom, Origin: m.Origin, Error: m.LastError, Status: s.status, Suggestion: s.suggestion,
+		ProjectID: m.ProjectID, WorktreePath: m.WorktreePath, Branch: m.Branch, Settled: m.Settled,
+		SnoozedUntil: m.SnoozedUntil, GroupedUnder: m.GroupedUnder, Draft: m.Draft,
+	}
+	if len(m.Checkpoints) > 0 {
+		cp := m.Checkpoints[len(m.Checkpoints)-1]
+		sum.LastCheckpoint = &cp
 	}
 	if s.inflight > 0 && !s.turnStart.IsZero() {
 		sum.TurnStart = s.turnStart.UnixMilli()
@@ -272,7 +300,7 @@ func (s *Session) Summary() Summary {
 func (s *Session) detailLocked() Detail {
 	return Detail{Summary: s.summaryLocked(), AddDirs: s.meta.AddDirs, Sandbox: s.meta.Sandbox, AgentName: s.meta.AgentName, ExtraArgs: s.meta.ExtraArgs,
 		Models: s.meta.Models, Modes: s.meta.Modes,
-		ConfigOptions: s.meta.ConfigOptions, Commands: s.meta.Commands, Info: s.meta.Info, ResumeAt: s.meta.ResumeAt}
+		ConfigOptions: s.meta.ConfigOptions, Commands: s.meta.Commands, Info: s.meta.Info, ResumeAt: s.meta.ResumeAt, Checkpoints: append([]checkpoints.TurnCheckpoint(nil), s.meta.Checkpoints...)}
 }
 
 // ---- op streaming ----
@@ -722,10 +750,19 @@ func updateMeta(raw json.RawMessage) (string, int64) {
 func (s *Session) isClaude() bool { return s.meta.Agent == "claude" }
 
 func (s *Session) agentLabelLocked() string {
-	if s.meta.Agent == "claude" {
+	switch s.meta.Agent {
+	case "claude":
 		return "Claude"
+	case "", "agy":
+		return "agy"
+	case "codex":
+		return "Codex"
+	default:
+		if pc, ok := s.m.providerConfig(s.meta.Agent); ok && pc.Name != "" {
+			return pc.Name
+		}
+		return s.meta.Agent
 	}
-	return "agy"
 }
 
 // PermAnswer carries what a choice can't: answers to questions and the
@@ -846,6 +883,9 @@ func (s *Session) start(ctx context.Context, mode string) error {
 	cwd, addDirs, skip, id := s.meta.Cwd, s.meta.AddDirs, s.meta.SkipPerms, s.meta.ID
 	sandbox, agentName, noTel, extra := s.meta.Sandbox, s.meta.AgentName, s.meta.NoTelemetry, s.meta.ExtraArgs
 	isClaude := s.isClaude()
+	isAgy := s.isAgy()
+	isCodex := s.isCodex()
+	agentID := firstNonEmpty(s.meta.Agent, "agy")
 	wantModel, wantMode, wantThought := s.meta.WantModel, s.meta.WantMode, s.meta.WantThought
 	resumeAt, forkOf := s.meta.ResumeAt, s.meta.ForkOf
 	s.mu.Unlock()
@@ -853,41 +893,86 @@ func (s *Session) start(ctx context.Context, mode string) error {
 		return fmt.Errorf("working directory %q is not available", cwd)
 	}
 	var p agentProc
-	if isClaude {
+	switch {
+	case isClaude:
 		if mode == "load" || (mode == "resume" && s.claudeStale()) {
-			// Claude's transcript is read straight from disk; the process
-			// only needs to resume it.
 			if err := s.replayClaude(); err != nil {
 				log.Printf("session %s: replay: %v", id, err)
 			}
 			mode = "resume"
 		}
 		if mode == "resume" && forkOf == "" && !s.m.claudeTranscriptExists(id, cwd) {
-			mode = "new" // nothing was written yet: start it under the same id
+			mode = "new"
 		}
 		if forkOf != "" && s.m.claudeTranscriptExists(id, cwd) {
-			forkOf = "" // the fork has been written; resume it directly
+			forkOf = ""
 		}
 		if live := s.m.claudeLiveElsewhere(id); live != nil {
 			return fmt.Errorf("this conversation is open in another Claude Code process (pid %d, %s); close it there or fork it to continue here", live.Pid, firstNonEmpty(live.Status, "running"))
 		}
 		s.mu.Lock()
-		s.follow = nil // our own process writes it from now on
+		s.follow = nil
 		s.mu.Unlock()
-		p = claude.Start(claude.Options{Bin: s.m.claudeBin(), Env: s.m.claudeEnv(), HomeDir: s.m.cfg.HomeDir,
+		bin := s.m.claudeBin()
+		env := s.m.claudeEnv()
+		if ov, ok := s.m.providerConfig("claude"); ok {
+			if ov.Command != "" {
+				bin = ov.Command
+			}
+			env = providers.MergeEnv(env, ov.Env)
+		}
+		p = claude.Start(claude.Options{Bin: bin, Env: env, HomeDir: s.m.cfg.HomeDir,
 			LogDir: filepath.Join(s.m.cfg.StateDir, "logs"), SkipPermissions: skip, AddDirs: addDirs,
 			Model: wantModel, Effort: wantThought, Mode: wantMode, AgentName: agentName, ExtraArgs: extra,
 			ResumeAt: resumeAt, ForkFrom: forkOf, Handler: procHandler{s: s}})
-	} else {
+	case isAgy:
+		bin := s.m.cfg.AgyPath
+		env := s.m.agyEnv()
+		if ov, ok := s.m.providerConfig("agy"); ok {
+			if ov.Command != "" {
+				bin = ov.Command
+			}
+			env = providers.MergeEnv(env, ov.Env)
+		}
 		ap, err := agyproc.Start(ctx, agyproc.Options{
-			AgyPath: s.m.cfg.AgyPath, Cwd: cwd, SkipPermissions: skip, AddDirs: addDirs,
+			AgyPath: bin, Cwd: cwd, SkipPermissions: skip, AddDirs: addDirs,
 			Sandbox: sandbox, AgentName: agentName, NoTelemetry: noTel, ExtraArgs: extra,
-			LogDir: filepath.Join(s.m.cfg.StateDir, "logs"), Env: s.m.agyEnv(), Handler: procHandler{s: s},
+			LogDir: filepath.Join(s.m.cfg.StateDir, "logs"), Env: env, Handler: procHandler{s: s},
 		})
 		if err != nil {
 			return err
 		}
 		p = ap
+	case isCodex:
+		bin := "codex"
+		env := s.m.agyEnv()
+		if ov, ok := s.m.providerConfig("codex"); ok {
+			if ov.Command != "" {
+				bin = ov.Command
+			}
+			env = providers.MergeEnv(env, ov.Env)
+		}
+		p = codex.Start(codex.Options{
+			Bin: bin, Env: env, Cwd: cwd, SkipPermissions: skip,
+			Model: wantModel, Effort: wantThought, Mode: wantMode, ExtraArgs: extra,
+			Handler: procHandler{s: s},
+		})
+	default:
+		pc, ok := s.m.providerConfig(agentID)
+		if !ok || pc.Command == "" {
+			return fmt.Errorf("provider %q is not configured", agentID)
+		}
+		args := append([]string(nil), pc.Args...)
+		args = append(args, extra...)
+		gp, err := acpproc.Start(ctx, acpproc.Options{
+			Command: pc.Command, Args: args, Cwd: cwd,
+			LogDir: filepath.Join(s.m.cfg.StateDir, "logs"), LogPrefix: "acp-" + agentID,
+			Env: providers.MergeEnv(s.m.agyEnv(), pc.Env), Handler: procHandler{s: s},
+		})
+		if err != nil {
+			return err
+		}
+		p = gp
 	}
 	conn := p.ACP()
 	cctx, cancel := context.WithTimeout(ctx, 5*time.Minute)
@@ -929,7 +1014,7 @@ func (s *Session) start(ctx context.Context, mode string) error {
 	}
 	if err != nil {
 		p.Close(5 * time.Second)
-		return fmt.Errorf("%s session/%s: %w", map[bool]string{true: "claude", false: "agy"}[isClaude], mode, err)
+		return fmt.Errorf("%s session/%s: %w", agentID, mode, err)
 	}
 	if setup.SessionID == "" {
 		setup.SessionID = id
@@ -1237,12 +1322,19 @@ func (s *Session) beginTurnLocked() {
 func (s *Session) runPrompt(itemID, ref string, blocks []acp.ContentBlock) {
 	ctx := context.Background()
 	err := s.ensureLive(ctx, "")
+	var preRef, preSHA string
+	if err == nil {
+		preRef, preSHA = s.capturePreCheckpoint(ctx)
+	}
 	var res acp.PromptResult
 	if err == nil {
 		s.mu.Lock()
 		p := s.proc
 		id := s.meta.ID
 		label := s.agentLabelLocked()
+		if it := s.tr.Get(itemID); it != nil && it.Text != "" {
+			s.maybeHeuristicTitleLocked(it.Text)
+		}
 		s.mu.Unlock()
 		if p == nil {
 			err = errors.New(label + " is not running")
@@ -1254,10 +1346,14 @@ func (s *Session) runPrompt(itemID, ref string, blocks []acp.ContentBlock) {
 			err = p.ACP().Call(ctx, "session/prompt", params, &res)
 		}
 	}
-	s.finishPrompt(itemID, &res, err)
+	s.finishPromptWithCheckpoint(itemID, &res, err, preRef, preSHA)
 }
 
 func (s *Session) finishPrompt(itemID string, res *acp.PromptResult, err error) {
+	s.finishPromptWithCheckpoint(itemID, res, err, "", "")
+}
+
+func (s *Session) finishPromptWithCheckpoint(itemID string, res *acp.PromptResult, err error, preRef, preSHA string) {
 	s.mu.Lock()
 	s.inflight--
 	if s.inflight < 0 {
@@ -1300,8 +1396,18 @@ func (s *Session) finishPrompt(itemID string, res *acp.PromptResult, err error) 
 				go s.autoTitle(s.firstUserTextLocked())
 			}
 		}
+		turnNum := s.meta.Turns
 		if s.inflight == 0 {
-			s.queueOpsLocked(s.tr.AddTurn(&Turn{StopReason: res.StopReason, Usage: res.Usage, DurationMs: dur}))
+			var cp *checkpoints.TurnCheckpoint
+			if preRef != "" {
+				s.mu.Unlock()
+				cp = s.capturePostCheckpoint(context.Background(), turnNum, preRef, preSHA)
+				s.mu.Lock()
+				if cp != nil {
+					s.meta.Checkpoints = append(s.meta.Checkpoints, *cp)
+				}
+			}
+			s.queueOpsLocked(s.tr.AddTurn(&Turn{TurnIndex: turnNum, StopReason: res.StopReason, Usage: res.Usage, DurationMs: dur, Checkpoint: cp}))
 		}
 	}
 	var next *QueuedPrompt
@@ -1334,9 +1440,15 @@ func (s *Session) finishPrompt(itemID string, res *acp.PromptResult, err error) 
 			notifyKind = "" // the agent continues with the queued message
 		}
 	}
-	sid, title, label := s.meta.ID, s.meta.Title, s.agentLabelLocked()
-	agyPrompt := !s.isClaude() && itemID != "" && s.inflight == 0
+	sid, title, label, cwd := s.meta.ID, s.meta.Title, s.agentLabelLocked(), s.meta.Cwd
+	agyPrompt := s.isAgy() && itemID != "" && s.inflight == 0
 	s.mu.Unlock()
+	if s.m.Git != nil && cwd != "" {
+		s.m.Git.Invalidate(cwd)
+	}
+	if err == nil && res != nil && res.Usage != nil {
+		s.m.recordTurnUsage(s, res.Usage, dur)
+	}
 	s.emit()
 	s.m.saveSession(s)
 	if notifyKind != "" {
