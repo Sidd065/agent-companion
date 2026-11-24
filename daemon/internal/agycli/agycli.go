@@ -14,6 +14,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"agentc/internal/agyproc"
 )
 
 // CLI runs agy subcommands.
@@ -49,9 +51,11 @@ func (c *CLI) Run(ctx context.Context, timeout time.Duration, args ...string) (*
 	defer cancel()
 	start := time.Now()
 	cmd := exec.CommandContext(cctx, c.Agy, args...)
+	var baseEnv []string
 	if c.Env != nil {
-		cmd.Env = append(c.Env(), "NO_COLOR=1", "AGY_CLI_HIDE_LOGO=1", "TERM=dumb")
+		baseEnv = c.Env()
 	}
+	cmd.Env = append(agyproc.BuildEnv(baseEnv), "NO_COLOR=1", "AGY_CLI_HIDE_LOGO=1", "TERM=dumb")
 	home, _ := os.UserHomeDir()
 	cmd.Dir = home
 	var out, errb bytes.Buffer

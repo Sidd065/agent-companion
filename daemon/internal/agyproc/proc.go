@@ -83,7 +83,7 @@ func Start(ctx context.Context, o Options) (*Proc, error) {
 	args = append(args, o.ExtraArgs...)
 	cmd := exec.Command(o.AgyPath, args...)
 	cmd.Dir = o.Cwd
-	cmd.Env = o.Env
+	cmd.Env = BuildEnv(o.Env)
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
@@ -289,4 +289,46 @@ func (p *Proc) RSSKiB() int64 {
 		}
 	}
 	return 0
+}
+
+const forceFileTokenStorageEnv = "AGY_CLI_FORCE_FILE_TOKEN_STORAGE"
+
+// BuildEnv prepares the environment for an `agy` subprocess.
+//
+// When a user logs into `agy` over SSH, agy writes OAuth credentials (including
+// Gemini Enterprise / BAIC user_tier metadata) to the file-based token store
+// (`~/.gemini/antigravity-cli/antigravity-oauth-token`). Under a headless
+// systemd --user service, SSH_* env vars are absent while a desktop D-Bus
+// keyring may still hold an older/stale token, causing `agy acp` to authenticate
+// against the wrong backend (e.g. raw Vertex AI 403 instead of BAIC).
+//
+// If the file-based token exists and the caller has not explicitly set
+// AGY_CLI_FORCE_FILE_TOKEN_STORAGE, enable it so `agy acp` uses the same
+// credentials as interactive SSH sessions.
+func BuildEnv(base []string) []string {
+	var env []string
+	if len(base) > 0 {
+		env = append(env, base...)
+	} else {
+		env = append(env, os.Environ()...)
+	}
+	home := ""
+	for _, kv := range env {
+		if strings.HasPrefix(kv, forceFileTokenStorageEnv+"=") {
+			return env
+		}
+		if strings.HasPrefix(kv, "HOME=") {
+			home = strings.TrimPrefix(kv, "HOME=")
+		}
+	}
+	if home == "" {
+		home, _ = os.UserHomeDir()
+	}
+	if home != "" {
+		tokPath := filepath.Join(home, ".gemini", "antigravity-cli", "antigravity-oauth-token")
+		if info, err := os.Stat(tokPath); err == nil && !info.IsDir() && info.Size() > 0 {
+			env = append(env, forceFileTokenStorageEnv+"=1")
+		}
+	}
+	return env
 }
