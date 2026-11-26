@@ -16,7 +16,9 @@ import { useApp } from '../../state/appStore.js';
 
 export const TitleBar: React.FC = () => {
   const {
+    hostList,
     activeHost,
+    setActiveHostId,
     activeSession,
     activeDetail,
     viewMode,
@@ -55,20 +57,45 @@ export const TitleBar: React.FC = () => {
         </button>
 
         <div className="flex items-center gap-1.5 text-xs text-[var(--text-secondary)] truncate ml-1">
-          {activeHost && (
-            <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-[var(--bg-surface)] border border-[var(--border)] text-[11px]">
-              <span
-                className={`w-1.5 h-1.5 rounded-full ${
-                  activeHost.state === 'connected'
-                    ? 'bg-[var(--success)]'
-                    : activeHost.state === 'reconnecting' || activeHost.state === 'connecting'
-                      ? 'bg-[var(--warning)]'
-                      : 'bg-[var(--danger)]'
-                }`}
-              />
-              {activeHost.creds.name}
-            </span>
-          )}
+          {activeHost &&
+            (hostList.length > 1 ? (
+              <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-[var(--bg-surface)] border border-[var(--border)] text-[11px]">
+                <span
+                  className={`w-1.5 h-1.5 rounded-full shrink-0 ${
+                    activeHost.state === 'connected'
+                      ? 'bg-[var(--success)]'
+                      : activeHost.state === 'reconnecting' || activeHost.state === 'connecting'
+                        ? 'bg-[var(--warning)]'
+                        : 'bg-[var(--danger)]'
+                  }`}
+                />
+                <select
+                  data-testid="titlebar-host-select"
+                  value={activeHost.creds.id}
+                  onChange={(e) => setActiveHostId(e.target.value)}
+                  className="bg-transparent text-[11px] text-[var(--text-primary)] outline-none cursor-pointer"
+                >
+                  {hostList.map((h) => (
+                    <option key={h.creds.id} value={h.creds.id}>
+                      {h.creds.name}
+                    </option>
+                  ))}
+                </select>
+              </span>
+            ) : (
+              <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-[var(--bg-surface)] border border-[var(--border)] text-[11px]">
+                <span
+                  className={`w-1.5 h-1.5 rounded-full ${
+                    activeHost.state === 'connected'
+                      ? 'bg-[var(--success)]'
+                      : activeHost.state === 'reconnecting' || activeHost.state === 'connecting'
+                        ? 'bg-[var(--warning)]'
+                        : 'bg-[var(--danger)]'
+                  }`}
+                />
+                {activeHost.creds.name}
+              </span>
+            ))}
           {viewMode === 'thread' && activeSession && (
             <>
               {projectName && <span className="text-[var(--text-muted)]">/ {projectName}</span>}
@@ -116,7 +143,7 @@ export const TitleBar: React.FC = () => {
         <button
           type="button"
           data-testid="usage-view-btn"
-          onClick={() => setViewMode(viewMode === 'usage' ? 'thread' : 'usage')}
+          onClick={() => setViewMode(viewMode === 'usage' ? (activeSession ? 'thread' : 'draft') : 'usage')}
           title="Usage & Cost Dashboard (Ctrl+U)"
           className={`p-1.5 rounded hover:bg-[var(--bg-hover)] cursor-pointer ${viewMode === 'usage' ? 'bg-[var(--accent-soft)] text-[var(--accent)]' : 'text-[var(--text-secondary)]'}`}
         >
@@ -126,7 +153,7 @@ export const TitleBar: React.FC = () => {
         <button
           type="button"
           data-testid="schedules-view-btn"
-          onClick={() => setViewMode(viewMode === 'schedules' ? 'thread' : 'schedules')}
+          onClick={() => setViewMode(viewMode === 'schedules' ? (activeSession ? 'thread' : 'draft') : 'schedules')}
           title="Scheduled Tasks"
           className={`p-1.5 rounded hover:bg-[var(--bg-hover)] cursor-pointer ${viewMode === 'schedules' ? 'bg-[var(--accent-soft)] text-[var(--accent)]' : 'text-[var(--text-secondary)]'}`}
         >
@@ -161,7 +188,7 @@ export const TitleBar: React.FC = () => {
           title="Toggle Right Panel (Ctrl+Alt+B)"
           onClick={() => {
             if (!rightPanelOpen && rightTabs.length === 0) {
-              openRightTab({ kind: 'diff', title: 'Diff', diffScope: 'uncommitted' });
+              openRightTab({ id: 'diff', kind: 'diff', title: 'Diff', diffScope: 'uncommitted' });
             } else {
               setRightPanelOpen((v) => !v);
             }

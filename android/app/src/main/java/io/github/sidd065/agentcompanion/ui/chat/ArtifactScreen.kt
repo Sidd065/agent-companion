@@ -87,6 +87,7 @@ import io.github.sidd065.agentcompanion.ui.components.MarkdownText
 import io.github.sidd065.agentcompanion.ui.components.relTime
 import io.github.sidd065.agentcompanion.ui.files.FileTransfer
 import io.github.sidd065.agentcompanion.ui.theme.LocalExtra
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.launch
 import kotlinx.serialization.builtins.ListSerializer
 import kotlinx.serialization.json.jsonObject
@@ -206,31 +207,48 @@ fun ArtifactScreen(sessionId: String, path: String) {
     var sending by remember { mutableStateOf(false) }
     var menu by remember { mutableStateOf(false) }
     val name = path.substringAfterLast('/')
-    val kind = info?.kind ?: when (name.substringAfterLast('.', "").lowercase()) {
-        "md", "markdown" -> "markdown"
-        "png", "jpg", "jpeg", "gif", "webp" -> "image"
-        "txt", "json", "log", "py", "go", "js", "ts", "sh", "yaml", "yml", "csv" -> "text"
-        else -> "file"
-    }
+    fun kindFor(artInfo: LiveArtifact?): String =
+        artInfo?.kind?.takeIf { it.isNotBlank() } ?: when (name.substringAfterLast('.', "").lowercase()) {
+            "md", "markdown" -> "markdown"
+            "png", "jpg", "jpeg", "gif", "webp" -> "image"
+            "txt", "json", "log", "py", "go", "js", "ts", "sh", "yaml", "yml", "csv" -> "text"
+            else -> "file"
+        }
+    val kind = kindFor(info)
     val uri = info?.uri ?: "file://$path"
 
-    LaunchedEffect(reload) {
+    LaunchedEffect(conn.config.id, sessionId, path, reload) {
+        content = null
+        error = null
+        var fetchedInfo: LiveArtifact? = null
         runCatching { conn.rpc.call("session.live", params { put("id", sessionId) }).decode(LiveState.serializer()) }
-            .onSuccess { l -> info = l.artifacts.firstOrNull { it.path == path } }
-        if (kind == "markdown" || kind == "text") {
+            .onSuccess { l ->
+                fetchedInfo = l.artifacts.firstOrNull { it.path == path }
+                info = fetchedInfo
+            }
+        val effectiveKind = kindFor(fetchedInfo)
+        if (effectiveKind == "markdown" || effectiveKind == "text") {
             runCatching { conn.rpc.call("session.artifact", params { put("id", sessionId); put("path", path) }).jsonObject }
                 .onSuccess { r -> content = r["content"]?.jsonPrimitive?.content; loadedAt = r["mtime"]?.jsonPrimitive?.longOrNull ?: System.currentTimeMillis(); error = null }
                 .onFailure { error = it.message }
         }
     }
     // Follow agent edits while the screen is open.
-    LaunchedEffect(conn, sessionId) {
+    LaunchedEffect(conn.config.id, sessionId, path) {
         conn.rpc.events.collect { ev ->
             if (ev.name != "session.live") return@collect
             val o = ev.data.jsonObject
             if (o["id"]?.jsonPrimitive?.content != sessionId) return@collect
-            runCatching { AppJson.decodeFromJsonElement(LiveState.serializer(), o["live"]!!) }.getOrNull()
-                ?.artifacts?.firstOrNull { it.path == path }?.let { info = it }
+            val updated = runCatching { AppJson.decodeFromJsonElement(LiveState.serializer(), o["live"]!!) }.getOrNull()
+                ?.artifacts?.firstOrNull { it.path == path } ?: return@collect
+            val prevKind = kindFor(info)
+            info = updated
+            val nextKind = kindFor(updated)
+            if ((nextKind == "markdown" || nextKind == "text") && prevKind != nextKind && content == null) {
+                runCatching { conn.rpc.call("session.artifact", params { put("id", sessionId); put("path", path) }).jsonObject }
+                    .onSuccess { r -> content = r["content"]?.jsonPrimitive?.content; loadedAt = r["mtime"]?.jsonPrimitive?.longOrNull ?: System.currentTimeMillis(); error = null }
+                    .onFailure { error = it.message }
+            }
         }
     }
     val blocks = remember(content, kind) {
@@ -285,7 +303,7 @@ fun ArtifactScreen(sessionId: String, path: String) {
                         FileTransfer.enqueueDownload(ctx, conn, path) { res ->
                             scope.launch {
                                 res.onSuccess { snack.showSnackbar("Saved to ${it.displayPath}") }
-                                    .onFailure { snack.showSnackbar("Download failed: ${it.message}") }
+                                    .onFailure { if (it !is CancellationException) snack.showSnackbar("Download failed: ${it.message}") }
                             }
                         }
                     }) { Icon(Icons.Outlined.Download, "Download to phone") }
@@ -297,7 +315,7 @@ fun ArtifactScreen(sessionId: String, path: String) {
                                 FileTransfer.enqueueDownload(ctx, conn, path) { res ->
                                     scope.launch {
                                         res.onSuccess { snack.showSnackbar("Saved to ${it.displayPath}") }
-                                            .onFailure { snack.showSnackbar("Download failed: ${it.message}") }
+                                            .onFailure { if (it !is CancellationException) snack.showSnackbar("Download failed: ${it.message}") }
                                     }
                                 }
                             })

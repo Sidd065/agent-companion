@@ -13,6 +13,7 @@ import (
 	"strings"
 	"syscall"
 	"time"
+	"unicode/utf8"
 
 	"agentc/internal/acp"
 	"agentc/internal/acpproc"
@@ -69,7 +70,18 @@ func (m *Manager) isAgyID(id string) bool {
 	if s := m.Get(id); s != nil {
 		return s.isAgySafe()
 	}
-	return !m.isClaudeID(id)
+	if m.isClaudeID(id) || m.isCodexID(id) {
+		return false
+	}
+	agyDir := m.cfg.AgyDataDir
+	if agyDir == "" && m.cfg.HomeDir != "" {
+		agyDir = filepath.Join(m.cfg.HomeDir, ".gemini", "antigravity")
+	}
+	if agyDir == "" {
+		return false
+	}
+	_, err := os.Stat(filepath.Join(agyDir, "conversations", id+".db"))
+	return err == nil
 }
 
 func (s *Session) isAgy() bool   { return s.meta.Agent == "" || s.meta.Agent == "agy" }
@@ -107,10 +119,10 @@ func (m *Manager) providerConfig(id string) (providers.ProviderConfig, bool) {
 
 // InvalidateAgentsCache clears the cached agent profile list after provider changes.
 func (m *Manager) InvalidateAgentsCache() {
-	agentsMu.Lock()
-	agentsList = nil
-	agentsAt = time.Time{}
-	agentsMu.Unlock()
+	m.agentsMu.Lock()
+	m.agentsList = nil
+	m.agentsAt = time.Time{}
+	m.agentsMu.Unlock()
 	m.hub.Broadcast("providers.changed", m.Agents())
 }
 
@@ -471,19 +483,26 @@ func (m *Manager) Handoff(ctx context.Context, sourceID, targetAgent, targetMode
 		Title:        srcTitle + " (" + targetAgent + ")",
 		Flags:        Flags{Model: targetModel, Mode: targetMode},
 	}
-	if strings.TrimSpace(userPrompt) != "" {
-		cp.Prompt = &PromptInput{Text: handoffText + "\n---\n\n" + strings.TrimSpace(userPrompt)}
-	}
 	ns, err := m.Create(ctx, cp)
 	if ns != nil {
 		ns.mu.Lock()
 		ns.meta.ForkedFrom = sourceID
-		ns.meta.WorktreePath = srcWt
-		ns.meta.Branch = srcBranch
+		if filepath.Clean(ns.meta.Cwd) == filepath.Clean(srcCwd) {
+			ns.meta.WorktreePath = srcWt
+			ns.meta.Branch = srcBranch
+		}
+		if handoffText != "" {
+			ns.meta.SeedHandoff = handoffText
+		}
 		ns.queueOpsLocked(ns.tr.AddNotice("info", fmt.Sprintf("Handed off context from %q (%d entries).", srcTitle, len(items))))
 		ns.mu.Unlock()
 		ns.emit()
 		m.saveSession(ns)
+		if err == nil {
+			if trimmedPrompt := strings.TrimSpace(userPrompt); trimmedPrompt != "" {
+				_, err = ns.Prompt(PromptInput{Text: trimmedPrompt})
+			}
+		}
 	}
 	return ns, handoffText, err
 }
@@ -587,13 +606,10 @@ func (m *Manager) GlobalSearch(ctx context.Context, query, projectID string, lim
 			if it.Kind != "user" && it.Kind != "agent" {
 				continue
 			}
-			low := strings.ToLower(it.Text)
-			if idx := strings.Index(low, q); idx >= 0 {
-				start := max(0, idx-40)
-				end := min(len(it.Text), idx+len(q)+80)
+			if snip, ok := caseFoldSnippet(it.Text, q, 40, 80); ok {
 				hits = append(hits, SearchHit{
 					Kind: "message", SessionID: meta.ID, ProjectID: meta.ProjectID,
-					Title: meta.Title, Snippet: strings.TrimSpace(it.Text[start:end]), UpdatedAt: it.Ts,
+					Title: meta.Title, Snippet: snip, UpdatedAt: it.Ts,
 				})
 				break
 			}
@@ -607,6 +623,64 @@ func (m *Manager) GlobalSearch(ctx context.Context, query, projectID string, lim
 		hits = hits[:limit]
 	}
 	return hits
+}
+
+func caseFoldSnippet(text, queryLower string, contextRunesBefore, contextRunesAfter int) (string, bool) {
+	if queryLower == "" {
+		return "", false
+	}
+	var lowBuf strings.Builder
+	lowBuf.Grow(len(text))
+	foldedByteToOrigByte := make([]int, 0, len(text)+1)
+	for origIdx, r := range text {
+		folded := strings.ToLower(string(r))
+		for k := 0; k < len(folded); k++ {
+			foldedByteToOrigByte = append(foldedByteToOrigByte, origIdx)
+		}
+		lowBuf.WriteString(folded)
+	}
+	foldedByteToOrigByte = append(foldedByteToOrigByte, len(text))
+
+	lowStr := lowBuf.String()
+	idx := strings.Index(lowStr, queryLower)
+	if idx < 0 {
+		return "", false
+	}
+	matchStart := foldedByteToOrigByte[idx]
+	endFoldIdx := min(idx+len(queryLower), len(foldedByteToOrigByte)-1)
+	matchEnd := foldedByteToOrigByte[endFoldIdx]
+	if matchEnd < len(text) && (matchEnd <= matchStart || (endFoldIdx > 0 && endFoldIdx < len(foldedByteToOrigByte)-1 && foldedByteToOrigByte[endFoldIdx] == foldedByteToOrigByte[endFoldIdx-1])) {
+		_, sz := utf8.DecodeRuneInString(text[matchEnd:])
+		matchEnd = min(len(text), matchEnd+sz)
+	}
+
+	start := matchStart
+	for range contextRunesBefore {
+		if start <= 0 {
+			break
+		}
+		_, sz := utf8.DecodeLastRuneInString(text[:start])
+		if sz <= 0 {
+			break
+		}
+		start -= sz
+	}
+	end := matchEnd
+	for range contextRunesAfter {
+		if end >= len(text) {
+			break
+		}
+		_, sz := utf8.DecodeRuneInString(text[end:])
+		if sz <= 0 {
+			break
+		}
+		end += sz
+	}
+
+	snip := strings.ReplaceAll(text[start:end], "\r\n", " ")
+	snip = strings.ReplaceAll(snip, "\n", " ")
+	snip = strings.ReplaceAll(snip, "\r", " ")
+	return strings.TrimSpace(snip), true
 }
 
 // ---- Unified Skills Discovery ----
@@ -643,10 +717,13 @@ func (m *Manager) DiscoverSkills(cwd string) []SkillEntry {
 	}
 	if cwd != "" {
 		scan(filepath.Join(cwd, ".claude", "skills"), "project")
+		scan(filepath.Join(cwd, ".codex", "skills"), "project")
+		scan(filepath.Join(cwd, ".agents", "skills"), "project")
 		scan(filepath.Join(cwd, ".agentc", "skills"), "project")
 		scan(filepath.Join(cwd, ".gemini", "skills"), "project")
 	}
 	scan(filepath.Join(m.cfg.HomeDir, ".claude", "skills"), "claude")
+	scan(filepath.Join(m.cfg.HomeDir, ".codex", "skills"), "codex")
 	scan(filepath.Join(m.cfg.HomeDir, ".gemini", "antigravity-cli", "skills"), "agy")
 	scan(filepath.Join(m.cfg.HomeDir, ".gemini", "antigravity-cli", "builtin", "skills"), "agy")
 	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })

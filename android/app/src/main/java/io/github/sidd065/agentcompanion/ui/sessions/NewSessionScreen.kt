@@ -36,8 +36,12 @@ import androidx.compose.material.icons.outlined.CreateNewFolder
 import androidx.compose.material.icons.outlined.Folder
 import androidx.compose.material.icons.outlined.FolderOpen
 import androidx.compose.material.icons.outlined.History
+import androidx.compose.material.icons.outlined.Bolt
 import androidx.compose.material.icons.outlined.Image
 import androidx.compose.material.icons.outlined.Home
+import androidx.compose.material.icons.outlined.Psychology
+import androidx.compose.material.icons.outlined.Tune
+import androidx.compose.material.icons.outlined.WarningAmber
 import androidx.compose.material.icons.automirrored.outlined.InsertDriveFile
 import androidx.compose.material3.AssistChip
 import androidx.compose.material3.Button
@@ -57,6 +61,7 @@ import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -71,6 +76,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.snapshots.SnapshotStateList
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -93,8 +99,11 @@ import io.github.sidd065.agentcompanion.ui.activeConnection
 import io.github.sidd065.agentcompanion.ui.chat.AttachmentUtil
 import io.github.sidd065.agentcompanion.ui.chat.Pending
 import io.github.sidd065.agentcompanion.ui.components.LocalSnack
+import io.github.sidd065.agentcompanion.ui.components.ModelPickerSheet
 import io.github.sidd065.agentcompanion.ui.components.TextPromptDialog
 import io.github.sidd065.agentcompanion.ui.components.baseName
+import io.github.sidd065.agentcompanion.ui.components.mergePickerModels
+import io.github.sidd065.agentcompanion.ui.components.rememberHomeDir
 import io.github.sidd065.agentcompanion.ui.components.shortPath
 import io.github.sidd065.agentcompanion.ui.theme.LocalExtra
 import kotlinx.coroutines.launch
@@ -106,26 +115,89 @@ import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.put
 
+internal fun resolveNewSessionHostId(
+    currentHostId: String,
+    initialHost: String,
+    userChangedHost: Boolean,
+    settings: io.github.sidd065.agentcompanion.core.AppSettings,
+    conns: List<HostConnection>,
+    userPickedHostId: String? = io.github.sidd065.agentcompanion.ui.ExplicitHostChoice.hostId,
+): String {
+    val resolved = io.github.sidd065.agentcompanion.ui.resolveEffectiveHostId(
+        explicitRouteHostId = initialHost,
+        settings = settings,
+        conns = conns,
+        userPickedHostId = userPickedHostId,
+    ) ?: ""
+    if (currentHostId.isBlank()) return resolved
+    if (userChangedHost) {
+        return if (settings.hosts.any { it.id == currentHostId }) currentHostId else resolved
+    }
+    if (initialHost.isNotBlank() && settings.hosts.any { it.id == initialHost }) {
+        return initialHost
+    }
+    val currentConnected = conns.firstOrNull { it.config.id == currentHostId }?.rpc?.isConnected == true
+    val currentValid = settings.hosts.any { it.id == currentHostId }
+    return if (!currentValid || (!currentConnected && resolved.isNotBlank() && resolved != currentHostId)) {
+        resolved
+    } else {
+        currentHostId
+    }
+}
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun NewSessionScreen(initialCwd: String, initialText: String, initialHost: String = "") {
-    val g = LocalContext.current.graph
+    val ctx = LocalContext.current
+    val g = ctx.graph
     val settings by g.prefs.flow.collectAsState()
+    val conns by g.connections.collectAsState()
+    val explicit by io.github.sidd065.agentcompanion.ui.ExplicitHostChoice.flow.collectAsState()
+    conns.forEach { c -> androidx.compose.runtime.key(c.config.id) { c.rpc.state.collectAsState() } }
+    var userChangedHost by androidx.compose.runtime.saveable.rememberSaveable { mutableStateOf(false) }
     var hostId by androidx.compose.runtime.saveable.rememberSaveable {
-        mutableStateOf(initialHost.takeIf { h -> settings.hosts.any { it.id == h } } ?: settings.activeHost?.id ?: "")
+        mutableStateOf(io.github.sidd065.agentcompanion.ui.resolveEffectiveHostId(initialHost, settings, g.connections.value) ?: "")
+    }
+    val nextHostId = resolveNewSessionHostId(
+        currentHostId = hostId,
+        initialHost = initialHost,
+        userChangedHost = userChangedHost,
+        settings = settings,
+        conns = conns,
+        userPickedHostId = explicit,
+    )
+    LaunchedEffect(nextHostId) {
+        if (nextHostId.isNotBlank() && nextHostId != hostId) {
+            hostId = nextHostId
+        }
     }
     val text = androidx.compose.runtime.saveable.rememberSaveable { mutableStateOf(initialText) }
+    val attachments = remember { mutableStateListOf<Pending>() }
+    LaunchedEffect(Unit) {
+        ShareInbox.image?.let { uri ->
+            ShareInbox.image = null
+            runCatching { attachments.add(AttachmentUtil.fromUri(ctx, uri)) }
+        }
+    }
     io.github.sidd065.agentcompanion.ui.HostScope(hostId) {
         androidx.compose.runtime.key(hostId) {
             NewSessionContent(
                 initialCwd = if (hostId == initialHost || initialHost.isBlank()) initialCwd else "",
                 textState = text,
+                attachments = attachments,
                 hostPicker = {
                     if (settings.hosts.size > 1) {
                         Text("Computer", style = MaterialTheme.typography.labelLarge)
                         Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                             settings.hosts.forEach { h ->
-                                FilterChip(selected = h.id == hostId, onClick = { hostId = h.id }, label = { Text(h.label) })
+                                FilterChip(
+                                    selected = h.id == hostId,
+                                    onClick = {
+                                        userChangedHost = true
+                                        hostId = h.id
+                                    },
+                                    label = { Text(h.label) },
+                                )
                             }
                         }
                     }
@@ -137,7 +209,12 @@ fun NewSessionScreen(initialCwd: String, initialText: String, initialHost: Strin
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun NewSessionContent(initialCwd: String, textState: androidx.compose.runtime.MutableState<String>, hostPicker: @Composable () -> Unit) {
+private fun NewSessionContent(
+    initialCwd: String,
+    textState: androidx.compose.runtime.MutableState<String>,
+    attachments: SnapshotStateList<Pending>,
+    hostPicker: @Composable () -> Unit,
+) {
     val ctx = LocalContext.current
     val g = ctx.graph
     val nav = LocalNav.current
@@ -147,7 +224,10 @@ private fun NewSessionContent(initialCwd: String, textState: androidx.compose.ru
     val settings by g.prefs.flow.collectAsState()
     val agents by conn.agents.collectAsState()
     val projects by conn.projects.collectAsState()
-    val home = conn.homeDir()
+    val providerModels by conn.providerModels.collectAsState()
+    val hello by conn.hello.collectAsState()
+    val codexCatalog = providerModels["codex"]
+    val home = conn.rememberHomeDir()
     var cwd by remember { mutableStateOf(initialCwd) }
     var projectId by remember { mutableStateOf<String?>(null) }
     var useWorktree by remember { mutableStateOf(false) }
@@ -160,13 +240,20 @@ private fun NewSessionContent(initialCwd: String, textState: androidx.compose.ru
             agents.firstOrNull { it.available }?.let { agent = it.id }
         }
     }
+    LaunchedEffect(conn.config.id, agent) {
+        if (agent == "codex") {
+            runCatching { conn.fetchProviderModels("codex", false) }
+        }
+    }
     val addDirs = remember { mutableStateListOf<String>() }
     var flagsOpen by remember { mutableStateOf(false) }
-    val attachments = remember { mutableStateListOf<Pending>() }
+    var codexModelSheet by remember { mutableStateOf(false) }
+    var codexEffortSheet by remember { mutableStateOf(false) }
+    var codexModeSheet by remember { mutableStateOf(false) }
     var picking by remember { mutableStateOf<String?>(null) } // "cwd" | "add"
     var creating by remember { mutableStateOf(false) }
 
-    LaunchedEffect(conn) {
+    LaunchedEffect(conn.config.id) {
         if (cwd.isBlank()) {
             runCatching {
                 // The folder this phone last started a session in, else the most active one.
@@ -174,12 +261,6 @@ private fun NewSessionContent(initialCwd: String, textState: androidx.compose.ru
                 val h = conn.rpc.call("fs.home").jsonObject
                 cwd = mine?.takeIf { it.isNotBlank() } ?: h["recent"]?.jsonArray?.firstOrNull()?.jsonPrimitive?.content ?: h["home"]?.jsonPrimitive?.content ?: ""
             }
-        }
-    }
-    LaunchedEffect(Unit) {
-        ShareInbox.image?.let { uri ->
-            ShareInbox.image = null
-            runCatching { attachments.add(AttachmentUtil.fromUri(ctx, uri)) }
         }
     }
     val photo = rememberLauncherForActivityResult(ActivityResultContracts.PickMultipleVisualMedia(8)) { uris ->
@@ -193,7 +274,7 @@ private fun NewSessionContent(initialCwd: String, textState: androidx.compose.ru
         creating = true
         scope.launch {
             try {
-                val flagDirs = if (agent == "claude") settings.claudeFlags.addDirs else settings.agyFlags.addDirs
+                val flagDirs = settings.addDirs(agent)
                 val res = conn.rpc.call("session.create", params {
                     settings.flagsJson(agent).forEach { (k, v) -> put(k, v) }
                     put("agent", agent)
@@ -215,7 +296,7 @@ private fun NewSessionContent(initialCwd: String, textState: androidx.compose.ru
                 res["warning"]?.jsonPrimitive?.content?.let { snack.showSnackbar(it) }
                 val id = res["session"]!!.jsonObject["id"]!!.jsonPrimitive.content
                 runCatching { ctx.getSharedPreferences("ui", android.content.Context.MODE_PRIVATE).edit().putString("lastCwd:${conn.config.id}", cwd).apply() }
-                nav.navigate(Routes.chat(id)) { popUpTo(Routes.SESSIONS) }
+                nav.navigate(Routes.chat(id, host = conn.config.id)) { popUpTo(Routes.SESSIONS) }
             } catch (e: Exception) {
                 snack.showSnackbar("Couldn't start session: ${e.message}")
             } finally {
@@ -296,6 +377,68 @@ private fun NewSessionContent(initialCwd: String, textState: androidx.compose.ru
                     placeholder = { Text("Branch name (optional, auto-generated if blank)") },
                 )
             }
+            // Codex / OpenRouter quick-pick chips right above composer
+            if (agent == "codex") {
+                val ex = LocalExtra.current
+                val mergedCodexModels = remember(codexCatalog, settings.customCodexModels) {
+                    mergePickerModels(codexCatalog, settings.customCodexModels)
+                }
+                val selModel = settings.codexFlags.model.trim()
+                val modelChipText = if (selModel.isNotEmpty()) {
+                    mergedCodexModels.firstOrNull { it.modelId == selModel }?.name?.ifBlank { selModel } ?: selModel
+                } else {
+                    codexCatalog?.defaultModelId?.takeIf { it.isNotBlank() } ?: "Model"
+                }
+                val effText = settings.codexFlags.effort.takeIf { it.isNotBlank() }?.let { "Effort: $it" } ?: "Effort: default"
+                val curMode = settings.codexFlags.mode.trim()
+                val modeChipText = if (curMode.isNotEmpty()) {
+                    codexCatalog?.availableModes?.firstOrNull { it.id == curMode }?.name?.takeIf { it.isNotBlank() } ?: curMode
+                } else {
+                    "Mode: default"
+                }
+                Row(
+                    Modifier.horizontalScroll(rememberScrollState()),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    AssistChip(
+                        onClick = { codexModelSheet = true },
+                        leadingIcon = { Icon(Icons.Outlined.Bolt, null, Modifier.size(16.dp)) },
+                        label = { Text(modelChipText, maxLines = 1, overflow = TextOverflow.Ellipsis) },
+                    )
+                    AssistChip(
+                        onClick = { codexEffortSheet = true },
+                        leadingIcon = { Icon(Icons.Outlined.Psychology, null, Modifier.size(16.dp)) },
+                        label = { Text(effText, maxLines = 1) },
+                    )
+                    AssistChip(
+                        onClick = { codexModeSheet = true },
+                        leadingIcon = { Icon(Icons.Outlined.Tune, null, Modifier.size(16.dp)) },
+                        label = { Text(modeChipText, maxLines = 1) },
+                    )
+                }
+                val openRouterReady = conn.openRouterConfigured || hello?.get("openRouterConfigured")?.jsonPrimitive?.content == "true"
+                if (!openRouterReady && codexCatalog != null && !codexCatalog.nativeAuthConfigured) {
+                    Surface(
+                        color = ex.warning.copy(alpha = 0.12f),
+                        shape = RoundedCornerShape(10.dp),
+                        modifier = Modifier.fillMaxWidth().clickable { nav.navigate(Routes.MANAGE) },
+                    ) {
+                        Row(
+                            Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Icon(Icons.Outlined.WarningAmber, null, tint = ex.warning, modifier = Modifier.size(16.dp))
+                            Spacer(Modifier.width(8.dp))
+                            Text(
+                                "OpenRouter API key not configured on ${conn.config.label} — tap to open Host → Providers",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                    }
+                }
+            }
             // Prompt
             // A long pasted prompt scrolls inside the field, so the flags and Start stay near.
             OutlinedTextField(
@@ -338,6 +481,69 @@ private fun NewSessionContent(initialCwd: String, textState: androidx.compose.ru
         }
     }
     if (flagsOpen) io.github.sidd065.agentcompanion.ui.components.AgentFlagsSheet(agent, conn, onDismiss = { flagsOpen = false })
+    if (codexModelSheet) {
+        ModelPickerSheet(
+            conn = conn,
+            currentModelId = settings.codexFlags.model.ifBlank { null },
+            allowDefault = true,
+            onSelect = { picked ->
+                g.scope.launch {
+                    g.prefs.update { st ->
+                        val updated = st.copy(codexFlags = st.codexFlags.copy(model = picked))
+                        if (picked.isNotBlank()) updated.withRecentCodexModel(picked) else updated
+                    }
+                }
+            },
+            onDismiss = { codexModelSheet = false },
+        )
+    }
+    if (codexEffortSheet) {
+        val efforts = listOf("" to "Default") +
+            (codexCatalog?.reasoningEfforts?.ifEmpty { listOf("low", "medium", "high", "xhigh") }
+                ?: listOf("low", "medium", "high", "xhigh"))
+                .map { it to it.replaceFirstChar { c -> c.uppercase() } }
+        AppSheet(onDismissRequest = { codexEffortSheet = false }) {
+            Column(Modifier.padding(bottom = 24.dp)) {
+                Text("Effort", style = MaterialTheme.typography.titleMedium, modifier = Modifier.padding(horizontal = 20.dp, vertical = 8.dp))
+                efforts.forEach { (id, label) ->
+                    ListItem(
+                        headlineContent = { Text(label) },
+                        trailingContent = { if (settings.codexFlags.effort == id) Text("✓", color = MaterialTheme.colorScheme.primary) },
+                        modifier = Modifier.clickable {
+                            codexEffortSheet = false
+                            scope.launch { g.prefs.update { it.copy(codexFlags = it.codexFlags.copy(effort = id)) } }
+                        },
+                    )
+                }
+            }
+        }
+    }
+    if (codexModeSheet) {
+        val modes = listOf("" to "Default") +
+            (codexCatalog?.availableModes?.takeIf { it.isNotEmpty() }?.map { it.id to it.name }
+                ?: listOf(
+                    "default" to "Build (Supervised)",
+                    "plan" to "Plan",
+                    "acceptEdits" to "Auto-accept edits",
+                    "auto" to "Auto (Workspace write)",
+                    "full-access" to "Full access",
+                ))
+        AppSheet(onDismissRequest = { codexModeSheet = false }) {
+            Column(Modifier.padding(bottom = 24.dp)) {
+                Text("Mode", style = MaterialTheme.typography.titleMedium, modifier = Modifier.padding(horizontal = 20.dp, vertical = 8.dp))
+                modes.forEach { (id, label) ->
+                    ListItem(
+                        headlineContent = { Text(label) },
+                        trailingContent = { if (settings.codexFlags.mode == id) Text("✓", color = MaterialTheme.colorScheme.primary) },
+                        modifier = Modifier.clickable {
+                            codexModeSheet = false
+                            scope.launch { g.prefs.update { it.copy(codexFlags = it.codexFlags.copy(mode = id)) } }
+                        },
+                    )
+                }
+            }
+        }
+    }
     picking?.let { which ->
         DirectoryPicker(conn, start = if (which == "cwd") cwd else "", onDismiss = { picking = null }) { picked ->
             if (which == "cwd") cwd = picked else if (picked !in addDirs) addDirs.add(picked)
@@ -375,7 +581,7 @@ fun DirectoryPicker(conn: HostConnection, start: String, onDismiss: () -> Unit, 
     var home by remember { mutableStateOf("") }
     var newFolder by remember { mutableStateOf(false) }
     var showHidden by remember { mutableStateOf(false) }
-    LaunchedEffect(Unit) {
+    LaunchedEffect(conn.config.id) {
         runCatching {
             val h = conn.rpc.call("fs.home").jsonObject
             home = h["home"]?.jsonPrimitive?.content ?: ""
@@ -383,7 +589,7 @@ fun DirectoryPicker(conn: HostConnection, start: String, onDismiss: () -> Unit, 
             if (path.isBlank()) path = home
         }
     }
-    LaunchedEffect(path, showHidden) {
+    LaunchedEffect(conn.config.id, path, showHidden) {
         if (path.isBlank()) return@LaunchedEffect
         error = null
         runCatching { listing = conn.rpc.call("fs.list", params { put("path", path); put("hidden", showHidden) }).decode(FsList.serializer()) }
@@ -403,7 +609,7 @@ fun DirectoryPicker(conn: HostConnection, start: String, onDismiss: () -> Unit, 
             Row(Modifier.padding(horizontal = 12.dp, vertical = 6.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 Button(onClick = { onPick(listing?.path ?: path) }, enabled = listing != null) { Text("Use this folder") }
                 OutlinedButton(onClick = { newFolder = true }) { Icon(Icons.Outlined.CreateNewFolder, null, Modifier.size(18.dp)); Spacer(Modifier.width(6.dp)); Text("New") }
-                IconButton(onClick = { path = home }) { Icon(Icons.Outlined.Home, "Home") }
+                IconButton(onClick = { if (home.isNotBlank()) path = home }, enabled = home.isNotBlank()) { Icon(Icons.Outlined.Home, "Home") }
             }
             error?.let { Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(16.dp)) }
             LazyColumn(Modifier.fillMaxWidth()) {

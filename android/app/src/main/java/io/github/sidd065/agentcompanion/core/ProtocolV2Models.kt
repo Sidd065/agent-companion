@@ -197,6 +197,7 @@ data class ScheduledTask(
     val cwd: String = "",
     val agent: String = "",
     val model: String? = null,
+    val mode: String? = null,
     val prompt: String = "",
     val useWorktree: Boolean = false,
     val nextRunAt: Long = 0,
@@ -249,5 +250,77 @@ data class HostHealth(
     val loadAvg1: Double = 0.0,
     val loadAvg5: Double = 0.0,
     val processes: List<ManagedProcess> = emptyList(),
+    val checkedAt: Long = 0,
+)
+
+@Serializable
+data class CustomModel(
+    val slug: String,
+    val name: String = "",
+)
+
+@Serializable
+data class ProviderModelInfo(
+    val modelId: String,
+    val name: String = "",
+    val description: String = "",
+    val provider: String = "",
+    val contextWindow: Int = 0,
+    val supportsReasoning: Boolean = false,
+    val supportsTools: Boolean = false,
+    val supportsImages: Boolean = false,
+    val isCustom: Boolean = false,
+)
+
+@Serializable
+data class ProviderModeInfo(
+    val id: String,
+    val name: String = "",
+    val description: String = "",
+)
+
+@Serializable
+data class ProviderModelsResult(
+    val provider: String = "codex",
+    val defaultModelId: String = "",
+    val openRouterConfigured: Boolean = false,
+    val nativeAuthConfigured: Boolean = false,
+    val models: List<ProviderModelInfo> = emptyList(),
+    val customModels: List<CustomModel> = emptyList(),
+    val availableModes: List<ProviderModeInfo> = emptyList(),
+    val reasoningEfforts: List<String> = emptyList(),
+)
+
+@Serializable
+data class ProviderConfig(
+    val id: String,
+    val name: String = "",
+    val driver: String = "",
+    val command: String = "",
+    val args: List<String> = emptyList(),
+    val env: Map<String, String>? = null,
+    val enabled: Boolean = true,
+    val defaultModel: String = "",
+    val customModels: List<CustomModel> = emptyList(),
+    val icon: String = "",
+    val builtin: Boolean = false,
+    val features: List<String> = emptyList(),
+)
+
+@Serializable
+data class ProvidersListResult(
+    val agents: List<AgentProfile> = emptyList(),
+    val configs: List<ProviderConfig> = emptyList(),
+)
+
+@Serializable
+data class ProviderHealth(
+    val id: String,
+    val available: Boolean = false,
+    val command: String = "",
+    val version: String = "",
+    val authStatus: String = "",
+    val message: String = "",
+    val latencyMs: Long = 0,
     val checkedAt: Long = 0,
 )

@@ -15,11 +15,13 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"agentc/internal/acp"
 	"agentc/internal/agyproc"
 	"agentc/internal/claude"
+	"agentc/internal/codex"
 	"agentc/internal/gitops"
 	"agentc/internal/lsapi"
 	"agentc/internal/projects"
@@ -30,16 +32,21 @@ import (
 
 // Config configures the session manager.
 type Config struct {
-	AgyPath       string
-	ClaudePath    string // claude executable ("" = ~/.local/bin/claude or PATH)
-	StateDir      string
-	ConfigDir     string
-	WorktreeDir   string
-	HomeDir       string
-	AgyDataDir    string // ~/.gemini/antigravity-cli
-	IdleHibernate time.Duration
-	MaxLive       int
-	DefaultSkip   bool
+	AgyPath              string
+	ClaudePath           string // claude executable ("" = ~/.local/bin/claude or PATH)
+	CodexPath            string // codex executable ("" = ~/.local/bin/codex or PATH)
+	OpenRouterAPIKey     string
+	OpenRouterAPIKeyFile string
+	OpenRouterBaseURL    string // optional override for hermetic tests
+	Env                  map[string]string
+	StateDir             string
+	ConfigDir            string
+	WorktreeDir          string
+	HomeDir              string
+	AgyDataDir           string // ~/.gemini/antigravity-cli
+	IdleHibernate        time.Duration
+	MaxLive              int
+	DefaultSkip          bool
 }
 
 // Notification is pushed to every connected client.
@@ -73,19 +80,29 @@ type Manager struct {
 	cfg Config
 	hub *Hub
 	// live-state watchers of running, subscribed sessions (see live.go)
-	liveWatches map[string]*liveWatch
-	mu          sync.Mutex
-	sessions    map[string]*Session
-	utilMu      sync.Mutex
-	util        *agyproc.Proc
-	utilUse     time.Time
-	histMu      sync.Mutex
-	hist        []HistEntry
-	histAt      time.Time
-	notMu       sync.Mutex
-	notifs      []Notification
-	notSeq      int64
-	stopCh      chan struct{}
+	liveWatches     map[string]*liveWatch
+	mu              sync.Mutex
+	sessions        map[string]*Session
+	utilMu          sync.Mutex
+	util            *agyproc.Proc
+	utilUse         time.Time
+	histMu          sync.Mutex
+	hist            []HistEntry
+	histAt          time.Time
+	notMu           sync.Mutex
+	notifs          []Notification
+	notSeq          int64
+	agentsMu        sync.Mutex
+	agentsList      []AgentProfile
+	agentsAt        time.Time
+	codexMu         sync.Mutex
+	codexStateDir   string
+	codexStateOwned bool
+	codexBridge     *codex.Bridge
+	codexCatalog    *codex.Catalog
+	stopCh          chan struct{}
+	stopOnce        sync.Once
+	stopped         atomic.Bool
 	// Parity subsystems (Projects, Git/Worktrees, Providers, Usage, Scheduler).
 	Projects          *projects.Store
 	Git               *gitops.Service
@@ -147,6 +164,28 @@ func (m *Manager) Hub() *Hub { return m.hub }
 // Cfg returns the configuration.
 func (m *Manager) Cfg() Config { return m.cfg }
 
+// StopCh returns the channel closed when Shutdown begins.
+func (m *Manager) StopCh() <-chan struct{} {
+	if m == nil {
+		return nil
+	}
+	return m.stopCh
+}
+
+func (m *Manager) isStopped() bool {
+	if m == nil || m.stopped.Load() {
+		return true
+	}
+	if m.stopCh != nil {
+		select {
+		case <-m.stopCh:
+			return true
+		default:
+		}
+	}
+	return false
+}
+
 // ---- persistence ----
 
 type savedSession struct {
@@ -202,10 +241,16 @@ func (m *Manager) loadSessions() {
 }
 
 func (m *Manager) saveSession(s *Session) {
+	if m == nil || s == nil || m.stopped.Load() {
+		return
+	}
 	// One save at a time per session, so an older snapshot can't land on top
 	// of a newer one.
 	s.saveMu.Lock()
 	defer s.saveMu.Unlock()
+	if m.stopped.Load() {
+		return
+	}
 	s.mu.Lock()
 	if s.removed || s.meta.ID == "" {
 		s.mu.Unlock()
@@ -255,26 +300,42 @@ func (m *Manager) SaveAll() {
 
 // Shutdown stops all agy processes gracefully.
 func (m *Manager) Shutdown() {
-	if m.Scheduler != nil {
-		m.Scheduler.Stop()
+	if m == nil {
+		return
 	}
-	close(m.stopCh)
-	var wg sync.WaitGroup
-	for _, s := range m.all() {
-		wg.Add(1)
-		go func(s *Session) {
-			defer wg.Done()
-			s.Hibernate()
-		}(s)
-	}
-	wg.Wait()
-	m.utilMu.Lock()
-	if m.util != nil {
-		m.util.Close(5 * time.Second)
-		m.util = nil
-	}
-	m.utilMu.Unlock()
-	m.SaveAll()
+	m.stopOnce.Do(func() {
+		if m.Scheduler != nil {
+			m.Scheduler.Stop()
+		}
+		if m.stopCh != nil {
+			close(m.stopCh)
+		}
+		var wg sync.WaitGroup
+		for _, s := range m.all() {
+			wg.Add(1)
+			go func(s *Session) {
+				defer wg.Done()
+				s.Hibernate()
+			}(s)
+		}
+		wg.Wait()
+		for _, s := range m.all() {
+			s.stopTimers()
+		}
+		m.utilMu.Lock()
+		if m.util != nil {
+			m.util.Close(5 * time.Second)
+			m.util = nil
+		}
+		m.utilMu.Unlock()
+		m.SaveAll()
+		m.stopped.Store(true)
+		for _, s := range m.all() {
+			s.saveMu.Lock()
+			s.saveMu.Unlock()
+		}
+		m.shutdownCodex()
+	})
 }
 
 func (m *Manager) all() []*Session {
@@ -437,6 +498,9 @@ func (m *Manager) agyEnv() []string {
 	if !pathSet {
 		env = append(env, "PATH="+filepath.Join(m.cfg.HomeDir, ".local", "bin")+":/usr/local/bin:/usr/bin:/bin")
 	}
+	if len(m.cfg.Env) > 0 {
+		env = providers.MergeEnv(env, m.cfg.Env)
+	}
 	return env
 }
 
@@ -458,8 +522,8 @@ func (m *Manager) AgySettings() map[string]any {
 }
 
 func (m *Manager) defaultDelivery(agent string) string {
-	if agent == "claude" {
-		return "steer" // Claude takes messages mid-turn, like its own terminal UI
+	if agent == "claude" || agent == "codex" {
+		return "steer" // Claude and Codex support live mid-turn steering
 	}
 	if v, _ := m.AgySettings()["queuedMessages"].(string); strings.Contains(strings.ToLower(v), "immediate") {
 		return "steer"
@@ -468,6 +532,10 @@ func (m *Manager) defaultDelivery(agent string) string {
 }
 
 func (m *Manager) defaultModel(agent string) string {
+	if agent == "codex" {
+		_, _, cfgDef := m.codexCustomModelInputs()
+		return codex.DefaultModelID(cfgDef, m.OpenRouterConfigured(), codex.HasNativeOpenAIAuth(m.CodexHome(), m.cfg.HomeDir, m.ProviderHealthEnv("codex")))
+	}
 	if agent != "agy" {
 		return "" // the agent's own default
 	}
@@ -588,6 +656,7 @@ func (m *Manager) History(ctx context.Context, force bool) []HistEntry {
 	}
 	out := make([]HistEntry, 0, len(byID))
 	out = append(out, m.claudeHistory()...)
+	out = append(out, m.codexHistory()...)
 	for _, e := range byID {
 		ann := m.readAnnotations(e.ID)
 		if ann.Title != "" {
@@ -771,7 +840,13 @@ func (m *Manager) List(ctx context.Context, force bool) []Summary {
 		if ls, ok := liveClaude[sum.ID]; ok {
 			sum.LiveElse = firstNonEmpty(ls.Status, "running")
 		}
-		if h, ok := histByID[sum.ID]; ok {
+		h, ok := histByID[sum.ID]
+		if !ok && s.isCodexSafe() {
+			if tid := s.codexThreadID(); tid != "" {
+				h, ok = histByID[tid]
+			}
+		}
+		if ok {
 			sum.Archived, sum.Pinned = h.Archived, h.Pinned
 			if h.UpdatedAt > sum.UpdatedAt+5000 && !sum.Live {
 				sum.UpdatedAt = h.UpdatedAt
@@ -781,6 +856,11 @@ func (m *Manager) List(ctx context.Context, force bool) []Summary {
 			}
 		}
 		seen[sum.ID] = true
+		if s.isCodexSafe() {
+			if tid := s.codexThreadID(); tid != "" {
+				seen[tid] = true
+			}
+		}
 		out = append(out, sum)
 	}
 	for _, h := range hist {
@@ -800,22 +880,77 @@ func (m *Manager) List(ctx context.Context, force bool) []Summary {
 
 // ---- create / open ----
 
-// Flags are the agy launch options the app chose (saved on the phone).
+// Flags are the agent launch options chosen by Desktop, Android, or CLI callers.
 type Flags struct {
 	SkipPermissions  *bool    `json:"skipPermissions,omitempty"`
 	Sandbox          bool     `json:"sandbox,omitempty"`
+	SandboxMode      string   `json:"sandboxMode,omitempty"`
+	ApprovalPolicy   string   `json:"approvalPolicy,omitempty"`
+	Provider         string   `json:"provider,omitempty"`
 	AgentName        string   `json:"agentName,omitempty"` // --agent (custom agy agent)
 	DisableTelemetry bool     `json:"disableTelemetry,omitempty"`
-	ExtraArgs        []string `json:"extraArgs,omitempty"` // appended to `agy acp`
+	ExtraArgs        []string `json:"extraArgs,omitempty"` // appended to agent CLI
 	AddDirs          []string `json:"addDirs,omitempty"`
 	Model            string   `json:"model,omitempty"`
 	Mode             string   `json:"mode,omitempty"`
 	Thought          string   `json:"thought,omitempty"`
+	Effort           string   `json:"effort,omitempty"`
+}
+
+func (f *Flags) UnmarshalJSON(b []byte) error {
+	type rawFlags struct {
+		SkipPermissions  *bool           `json:"skipPermissions,omitempty"`
+		Sandbox          json.RawMessage `json:"sandbox,omitempty"`
+		SandboxMode      string          `json:"sandboxMode,omitempty"`
+		ApprovalPolicy   string          `json:"approvalPolicy,omitempty"`
+		Provider         string          `json:"provider,omitempty"`
+		AgentName        string          `json:"agentName,omitempty"`
+		DisableTelemetry bool            `json:"disableTelemetry,omitempty"`
+		ExtraArgs        []string        `json:"extraArgs,omitempty"`
+		AddDirs          []string        `json:"addDirs,omitempty"`
+		Model            string          `json:"model,omitempty"`
+		Mode             string          `json:"mode,omitempty"`
+		Thought          string          `json:"thought,omitempty"`
+		Effort           string          `json:"effort,omitempty"`
+	}
+	var rf rawFlags
+	if err := json.Unmarshal(b, &rf); err != nil {
+		return err
+	}
+	f.SkipPermissions = rf.SkipPermissions
+	f.SandboxMode = strings.TrimSpace(rf.SandboxMode)
+	f.ApprovalPolicy = strings.TrimSpace(rf.ApprovalPolicy)
+	f.Provider = strings.TrimSpace(rf.Provider)
+	f.AgentName = rf.AgentName
+	f.DisableTelemetry = rf.DisableTelemetry
+	f.ExtraArgs = rf.ExtraArgs
+	f.AddDirs = rf.AddDirs
+	f.Model = rf.Model
+	f.Mode = rf.Mode
+	f.Thought = rf.Thought
+	f.Effort = rf.Effort
+	if len(rf.Sandbox) > 0 && string(rf.Sandbox) != "null" {
+		var sb bool
+		if err := json.Unmarshal(rf.Sandbox, &sb); err == nil {
+			f.Sandbox = sb
+		} else {
+			var ss string
+			if err := json.Unmarshal(rf.Sandbox, &ss); err == nil {
+				ss = strings.TrimSpace(ss)
+				f.SandboxMode = ss
+				f.Sandbox = ss != "" && ss != "danger-full-access" && ss != "dangerFullAccess" && ss != "off" && ss != "false" && ss != "none"
+			} else {
+				return fmt.Errorf("invalid sandbox value: %s", string(rf.Sandbox))
+			}
+		}
+	}
+	return nil
 }
 
 // CreateParams describe a new session.
 type CreateParams struct {
 	Flags
+	FlagsNested  *Flags       `json:"flags,omitempty"`
 	Agent        string       `json:"agent,omitempty"` // agy | claude | codex | <custom-acp>
 	Cwd          string       `json:"cwd"`
 	ProjectID    string       `json:"projectId,omitempty"`
@@ -827,6 +962,83 @@ type CreateParams struct {
 	Prompt       *PromptInput `json:"prompt,omitempty"`
 }
 
+func (p *CreateParams) UnmarshalJSON(b []byte) error {
+	var topFlags Flags
+	if err := json.Unmarshal(b, &topFlags); err != nil {
+		return err
+	}
+	type rawCreate struct {
+		FlagsNested  *Flags       `json:"flags,omitempty"`
+		Agent        string       `json:"agent,omitempty"`
+		Cwd          string       `json:"cwd"`
+		ProjectID    string       `json:"projectId,omitempty"`
+		UseWorktree  bool         `json:"useWorktree,omitempty"`
+		BaseBranch   string       `json:"baseBranch,omitempty"`
+		BranchName   string       `json:"branchName,omitempty"`
+		GroupedUnder string       `json:"groupedUnder,omitempty"`
+		Title        string       `json:"title,omitempty"`
+		Prompt       *PromptInput `json:"prompt,omitempty"`
+	}
+	var rc rawCreate
+	if err := json.Unmarshal(b, &rc); err != nil {
+		return err
+	}
+	p.Flags = topFlags
+	if rc.FlagsNested != nil {
+		n := rc.FlagsNested
+		if n.SkipPermissions != nil {
+			p.Flags.SkipPermissions = n.SkipPermissions
+		}
+		if n.Sandbox {
+			p.Flags.Sandbox = true
+		}
+		if n.SandboxMode != "" {
+			p.Flags.SandboxMode = n.SandboxMode
+		}
+		if n.ApprovalPolicy != "" {
+			p.Flags.ApprovalPolicy = n.ApprovalPolicy
+		}
+		if n.Provider != "" {
+			p.Flags.Provider = n.Provider
+		}
+		if n.AgentName != "" {
+			p.Flags.AgentName = n.AgentName
+		}
+		if n.DisableTelemetry {
+			p.Flags.DisableTelemetry = true
+		}
+		if len(n.ExtraArgs) > 0 {
+			p.Flags.ExtraArgs = n.ExtraArgs
+		}
+		if len(n.AddDirs) > 0 {
+			p.Flags.AddDirs = n.AddDirs
+		}
+		if n.Model != "" {
+			p.Flags.Model = n.Model
+		}
+		if n.Mode != "" {
+			p.Flags.Mode = n.Mode
+		}
+		if n.Thought != "" {
+			p.Flags.Thought = n.Thought
+		}
+		if n.Effort != "" {
+			p.Flags.Effort = n.Effort
+		}
+	}
+	p.FlagsNested = rc.FlagsNested
+	p.Agent = rc.Agent
+	p.Cwd = rc.Cwd
+	p.ProjectID = rc.ProjectID
+	p.UseWorktree = rc.UseWorktree
+	p.BaseBranch = rc.BaseBranch
+	p.BranchName = rc.BranchName
+	p.GroupedUnder = rc.GroupedUnder
+	p.Title = rc.Title
+	p.Prompt = rc.Prompt
+	return nil
+}
+
 func (m *Manager) applyFlags(meta *SessionMeta, f *Flags) {
 	if f == nil {
 		return
@@ -834,11 +1046,30 @@ func (m *Manager) applyFlags(meta *SessionMeta, f *Flags) {
 	if f.SkipPermissions != nil {
 		meta.SkipPerms = *f.SkipPermissions
 	}
-	meta.Sandbox, meta.AgentName, meta.NoTelemetry = f.Sandbox, strings.TrimSpace(f.AgentName), f.DisableTelemetry
-	meta.ExtraArgs = nil
-	for _, a := range f.ExtraArgs {
-		if strings.TrimSpace(a) != "" {
-			meta.ExtraArgs = append(meta.ExtraArgs, a)
+	if f.Sandbox || f.SandboxMode != "" {
+		meta.Sandbox = f.Sandbox
+	}
+	if f.SandboxMode != "" {
+		meta.SandboxMode = f.SandboxMode
+	}
+	if f.ApprovalPolicy != "" {
+		meta.ApprovalPolicy = f.ApprovalPolicy
+	}
+	if f.Provider != "" {
+		meta.Provider = f.Provider
+	}
+	if strings.TrimSpace(f.AgentName) != "" {
+		meta.AgentName = strings.TrimSpace(f.AgentName)
+	}
+	if f.DisableTelemetry {
+		meta.NoTelemetry = true
+	}
+	if len(f.ExtraArgs) > 0 {
+		meta.ExtraArgs = nil
+		for _, a := range f.ExtraArgs {
+			if strings.TrimSpace(a) != "" {
+				meta.ExtraArgs = append(meta.ExtraArgs, a)
+			}
 		}
 	}
 	for _, d := range f.AddDirs {
@@ -853,14 +1084,19 @@ func (m *Manager) applyFlags(meta *SessionMeta, f *Flags) {
 			}
 		}
 	}
-	if f.Model != "" {
-		meta.WantModel = f.Model
+	if strings.TrimSpace(f.Model) != "" {
+		meta.WantModel = strings.TrimSpace(f.Model)
 	}
-	if f.Mode != "" {
-		meta.WantMode = f.Mode
+	if strings.TrimSpace(f.Mode) != "" {
+		mode := strings.TrimSpace(f.Mode)
+		if meta.Agent == "codex" {
+			mode = codex.NormalizeModeID(mode, meta.SkipPerms)
+		}
+		meta.WantMode = mode
 	}
-	if f.Thought != "" {
-		meta.WantThought = f.Thought
+	effort := firstNonEmpty(strings.TrimSpace(f.Thought), strings.TrimSpace(f.Effort))
+	if effort != "" {
+		meta.WantThought = effort
 	}
 }
 
@@ -905,7 +1141,14 @@ func (m *Manager) Create(ctx context.Context, p CreateParams) (*Session, error) 
 	meta := SessionMeta{Agent: agent, Cwd: cwd, ProjectID: projID, WorktreePath: wtPath, Branch: branch,
 		GroupedUnder: p.GroupedUnder, SkipPerms: m.cfg.DefaultSkip, WantModel: m.defaultModel(agent),
 		CreatedAt: ts, UpdatedAt: ts, Origin: "app", Title: title, TitleLocked: strings.TrimSpace(p.Title) != ""}
+	m.applyFlags(&meta, p.FlagsNested)
 	m.applyFlags(&meta, &p.Flags)
+	if meta.WantModel != "" {
+		meta.Models = &acp.Models{
+			CurrentModelID:  meta.WantModel,
+			AvailableModels: []acp.Model{{ModelID: meta.WantModel, Name: meta.WantModel}},
+		}
+	}
 	s := newSession(m, meta)
 	if err := s.ensureLive(ctx, "new"); err != nil {
 		return nil, err
@@ -938,6 +1181,11 @@ func (m *Manager) OpenWith(ctx context.Context, id string, flags *Flags) (*Sessi
 	if s := m.Get(id); s != nil {
 		return s, nil
 	}
+	for _, s := range m.all() {
+		if s.isCodexSafe() && s.codexThreadID() == id {
+			return s, nil
+		}
+	}
 	var h *HistEntry
 	for _, e := range m.History(ctx, false) {
 		if e.ID == id {
@@ -961,6 +1209,9 @@ func (m *Manager) OpenWith(ctx context.Context, id string, flags *Flags) (*Sessi
 		}
 	}
 	if h == nil {
+		h = m.findCodexHist(id)
+	}
+	if h == nil {
 		if _, err := os.Stat(filepath.Join(m.cfg.AgyDataDir, "conversations", id+".db")); err != nil {
 			return nil, fmt.Errorf("conversation %s not found", id)
 		}
@@ -968,6 +1219,9 @@ func (m *Manager) OpenWith(ctx context.Context, id string, flags *Flags) (*Sessi
 	}
 	if h.Agent == "claude" {
 		return m.openClaude(h, flags)
+	}
+	if h.Agent == "codex" {
+		return m.openCodex(ctx, h, flags)
 	}
 	cwd := h.Cwd
 	if st, err := os.Stat(cwd); cwd == "" || err != nil || !st.IsDir() {
@@ -1042,6 +1296,7 @@ func (m *Manager) Forget(id string) {
 		return
 	}
 	s.Hibernate()
+	s.stopTimers()
 	s.mu.Lock()
 	s.removed = true
 	s.mu.Unlock()

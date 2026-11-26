@@ -108,7 +108,11 @@ object Pairing {
             fingerprint = link.fingerprint,
             pairedAt = System.currentTimeMillis(),
         )
-        g.prefs.update { s -> s.copy(hosts = s.hosts.filterNot { it.id == host.id } + host, activeHostId = s.activeHostId ?: host.id) }
+        val currentActiveConnected = g.connections.value.any { it.config.id == g.prefs.value.activeHostId && it.rpc.isConnected }
+        g.prefs.update { s ->
+            val nextActive = if (s.activeHostId == null || !currentActiveConnected) host.id else s.activeHostId
+            s.copy(hosts = s.hosts.filterNot { it.id == host.id } + host, activeHostId = nextActive)
+        }
         return Result.Paired(host)
     }
 }

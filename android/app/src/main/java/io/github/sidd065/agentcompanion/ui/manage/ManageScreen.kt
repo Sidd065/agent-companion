@@ -69,13 +69,16 @@ import io.github.sidd065.agentcompanion.net.HostConnection
 import io.github.sidd065.agentcompanion.net.decode
 import io.github.sidd065.agentcompanion.net.params
 import io.github.sidd065.agentcompanion.ui.BottomTabs
+import io.github.sidd065.agentcompanion.ui.ExplicitHostChoice
 import io.github.sidd065.agentcompanion.ui.LocalNav
 import io.github.sidd065.agentcompanion.ui.Routes
 import io.github.sidd065.agentcompanion.ui.TextHolder
 import io.github.sidd065.agentcompanion.ui.activeConnection
 import io.github.sidd065.agentcompanion.ui.components.ConfirmDialog
+import io.github.sidd065.agentcompanion.ui.components.HostSelectorBar
 import io.github.sidd065.agentcompanion.ui.components.LocalSnack
 import io.github.sidd065.agentcompanion.ui.components.Pill
+import io.github.sidd065.agentcompanion.ui.selectActiveHost
 import io.github.sidd065.agentcompanion.ui.components.copyText
 import io.github.sidd065.agentcompanion.ui.components.fmtDuration
 import io.github.sidd065.agentcompanion.ui.sessions.ConnectionBanner
@@ -120,13 +123,24 @@ fun ManageScreen() {
     var hostMenu by remember { mutableStateOf(false) }
     val g = androidx.compose.ui.platform.LocalContext.current.graph
     val settings by g.prefs.flow.collectAsState()
+    val allConns by g.connections.collectAsState()
     var busy by remember { mutableStateOf<String?>(null) }
     var addMcp by remember { mutableStateOf(false) }
     var pluginDialog by remember { mutableStateOf(false) }
     var runDialog by remember { mutableStateOf(false) }
     var confirmUpdate by remember { mutableStateOf(false) }
 
-    LaunchedEffect(conn, reload) {
+    LaunchedEffect(conn.config.id, reload) {
+        daemon = null
+        agy = null
+        models = emptyList()
+        mcp = null
+        plugins = null
+        skills = emptyList()
+        files = emptyList()
+        rc = null
+        pushStatus = null
+        devices = null
         launch { runCatching { daemon = conn.rpc.call("daemon.info").jsonObject } }
         launch { runCatching { agy = conn.rpc.call("agy.info", timeoutMs = 180_000).jsonObject } }
         launch { runCatching { models = conn.rpc.call("agy.models").decode(ListSerializer(AgyModel.serializer())) } }
@@ -177,7 +191,7 @@ fun ManageScreen() {
                             settings.hosts.forEach { h ->
                                 DropdownMenuItem(text = { Text(h.label + if (h.id == conn.config.id) "  ✓" else "") }, onClick = {
                                     hostMenu = false
-                                    scope.launch { g.prefs.update { it.copy(activeHostId = h.id) } }
+                                    selectActiveHost(g.prefs, scope, h.id)
                                 })
                             }
                             DropdownMenuItem(text = { Text("Hosts & pairing…") }, onClick = { hostMenu = false; nav.navigate("hosts") })
@@ -193,7 +207,15 @@ fun ManageScreen() {
         },
         bottomBar = { BottomTabs(nav) },
     ) { pad ->
-        Column(Modifier.padding(pad).fillMaxSize().verticalScroll(rememberScrollState()).padding(horizontal = 12.dp)) {
+        Column(Modifier.padding(pad).fillMaxSize()) {
+            if (allConns.size > 1) {
+                HostSelectorBar(
+                    conns = allConns,
+                    activeHostId = conn.config.id,
+                    onSelect = { id -> selectActiveHost(g.prefs, scope, id) },
+                )
+            }
+            Column(Modifier.weight(1f).fillMaxWidth().verticalScroll(rememberScrollState()).padding(horizontal = 12.dp)) {
             ConnectionBanner(conn)
             busy?.let { Text("$it…", style = MaterialTheme.typography.labelMedium, color = LocalExtra.current.muted, modifier = Modifier.padding(4.dp)) }
 
@@ -286,7 +308,7 @@ fun ManageScreen() {
             }
 
             // Protocol v2 Workbench: Usage & Cost, Schedules, Host Health/PSI, Providers
-            WorkbenchV2Section(conn, reload) { sid -> nav.navigate(Routes.chat(sid)) }
+            WorkbenchV2Section(conn, reload) { sid -> nav.navigate(Routes.chat(sid, host = conn.config.id)) }
 
             // Claude Code
             ClaudeManageBlocks(conn, reload) { reload++ }
@@ -339,7 +361,7 @@ fun ManageScreen() {
                     Switch(v, { setSetting(conn, "allowNonWorkspaceAccess", JsonPrimitive(it)) { reload++ } })
                 }
                 KV("Default model", st.s("model"))
-                TextButton(onClick = { files.firstOrNull { it.name == "settings.json" }?.let { nav.navigate(Routes.file(it.path, edit = true)) } }) { Text("Edit settings.json") }
+                TextButton(onClick = { files.firstOrNull { it.name == "settings.json" }?.let { nav.navigate(Routes.file(it.path, edit = true, host = conn.config.id)) } }) { Text("Edit settings.json") }
             }
 
             // Models
@@ -375,7 +397,7 @@ fun ManageScreen() {
                         }
                     }
                     m.error?.let { Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall) }
-                    TextButton(onClick = { nav.navigate(Routes.file(m.path, edit = true)) }) { Text("Edit mcp_config.json") }
+                    TextButton(onClick = { nav.navigate(Routes.file(m.path, edit = true, host = conn.config.id)) }) { Text("Edit mcp_config.json") }
                 }
             }
 
@@ -407,7 +429,7 @@ fun ManageScreen() {
                 skills.groupBy { it.source }.forEach { (src, list) ->
                     Text(src, style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.primary, modifier = Modifier.padding(top = 6.dp))
                     list.forEach { sk ->
-                        Column(Modifier.fillMaxWidth().clickable { nav.navigate(Routes.file(sk.path)) }.padding(vertical = 4.dp)) {
+                        Column(Modifier.fillMaxWidth().clickable { nav.navigate(Routes.file(sk.path, host = conn.config.id)) }.padding(vertical = 4.dp)) {
                             Text("/" + sk.name, style = MaterialTheme.typography.bodyMedium, fontFamily = FontFamily.Monospace)
                             if (sk.description.isNotBlank()) Text(sk.description, style = MaterialTheme.typography.labelSmall, color = LocalExtra.current.muted, maxLines = 2, overflow = TextOverflow.Ellipsis)
                         }
@@ -419,7 +441,7 @@ fun ManageScreen() {
             Block("Configuration files") {
                 files.forEach { f ->
                     Row(Modifier.fillMaxWidth().clickable {
-                        if (f.dir) nav.navigate(Routes.files(f.path)) else nav.navigate(Routes.file(f.path, edit = !f.exists))
+                        if (f.dir) nav.navigate(Routes.files(f.path, host = conn.config.id)) else nav.navigate(Routes.file(f.path, edit = !f.exists, host = conn.config.id))
                         if (!f.dir && !f.exists) scope.launch { runCatching { conn.rpc.call("fs.write", params { put("path", f.path); put("text", ""); put("createDirs", true); put("noOverwrite", true) }) } }
                     }.padding(vertical = 6.dp), verticalAlignment = Alignment.CenterVertically) {
                         Column(Modifier.weight(1f)) {
@@ -441,6 +463,7 @@ fun ManageScreen() {
                 }
             }
             Spacer(Modifier.height(24.dp))
+            }
         }
     }
 
@@ -466,9 +489,12 @@ fun ManageScreen() {
                     scope.launch {
                         runCatching { conn.rpc.call("devices.revoke", params { put("id", dv.s("id") ?: "") }) }
                             .onFailure { snack.showSnackbar("Unpair failed: ${it.message}") }
-                        if (self) g.prefs.update { st ->
-                            val rest = st.hosts.filterNot { it.id == conn.config.id }
-                            st.copy(hosts = rest, activeHostId = rest.firstOrNull()?.id)
+                        if (self) {
+                            if (ExplicitHostChoice.hostId == conn.config.id) ExplicitHostChoice.hostId = null
+                            g.prefs.update { st ->
+                                val rest = st.hosts.filterNot { it.id == conn.config.id }
+                                st.copy(hosts = rest, activeHostId = rest.firstOrNull()?.id)
+                            }
                         } else reload++
                     }
                 }) { Text("Unpair") }

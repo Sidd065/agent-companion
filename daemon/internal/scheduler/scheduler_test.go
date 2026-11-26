@@ -41,4 +41,12 @@ func TestCronParsingAndRunNow(t *testing.T) {
 	case <-time.After(3 * time.Second):
 		t.Fatal("scheduled runner did not fire")
 	}
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		_, runs := eng.List()
+		if len(runs) > 0 && runs[0].Status == "ok" {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
 }

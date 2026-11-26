@@ -9,7 +9,8 @@ import {
   Sparkles,
 } from 'lucide-react';
 import type { GitBranch as GitBranchInfo, SessionSummary } from '@agentc/protocol';
-import { useApp } from '../../state/appStore.js';
+import { providerCatalogKey, useApp } from '../../state/appStore.js';
+import { coerceSupportedMode, isFullAccessMode, resolveAvailableModes } from '../../utils/codexModels.js';
 import { Composer, type PendingAttachment } from './Composer.js';
 
 const STARTER_PROMPTS = [
@@ -25,6 +26,9 @@ export const DraftView: React.FC<{ openModelPickerSignal?: number }> = ({ openMo
     activeHost,
     draft,
     setDraft,
+    openDraft,
+    providerCatalogs,
+    loadProviderModels,
     callHost,
     selectSession,
     setAddProjectModalOpen,
@@ -33,7 +37,7 @@ export const DraftView: React.FC<{ openModelPickerSignal?: number }> = ({ openMo
     pushToast,
   } = useApp();
 
-  const targetHost = hosts[draft.hostId] ?? activeHost ?? hostList[0] ?? null;
+  const targetHost = activeHost ?? hosts[draft.hostId] ?? hostList[0] ?? null;
   const targetHostId = targetHost?.creds.id ?? '';
   const projects = targetHost?.projects ?? [];
 
@@ -42,29 +46,70 @@ export const DraftView: React.FC<{ openModelPickerSignal?: number }> = ({ openMo
     [projects, draft.projectId, draft.cwd],
   );
 
+  const effectiveAgent =
+    draft.agent ||
+    selectedProject?.defaultAgent ||
+    targetHost?.agents.find((a) => a.available)?.id ||
+    targetHost?.agents[0]?.id ||
+    '';
+
+  const activeCatalog =
+    targetHostId && effectiveAgent
+      ? providerCatalogs[providerCatalogKey(targetHostId, effectiveAgent)]
+      : undefined;
+
   const [branches, setBranches] = useState<GitBranchInfo[]>([]);
 
-  // Ensure draft has valid hostId, cwd, and default agent
+  // Load dynamic provider catalog for Draft mode
+  useEffect(() => {
+    if (!targetHostId || !effectiveAgent) return;
+    void loadProviderModels(targetHostId, effectiveAgent, false);
+  }, [targetHostId, effectiveAgent, loadProviderModels]);
+
+  // Ensure draft has valid hostId, cwd, default agent, and supported mode
   useEffect(() => {
     if (!targetHost) return;
     const patch: Partial<typeof draft> = {};
-    if (draft.hostId !== targetHost.creds.id) patch.hostId = targetHost.creds.id;
-    if (!draft.agent) {
-      const def =
-        selectedProject?.defaultAgent ||
-        targetHost.agents.find((a) => a.available)?.id ||
-        targetHost.agents[0]?.id ||
-        '';
-      if (def) patch.agent = def;
+    if (draft.hostId !== targetHost.creds.id) {
+      patch.hostId = targetHost.creds.id;
     }
-    if (!draft.cwd && projects.length > 0) {
-      patch.cwd = projects[0].path;
-      patch.projectId = projects[0].id;
+    if (!draft.agent && effectiveAgent) {
+      patch.agent = effectiveAgent;
+    }
+    if (!draft.cwd) {
+      if (projects.length > 0) {
+        patch.cwd = projects[0].path;
+        patch.projectId = projects[0].id;
+      } else if (targetHost.info?.home) {
+        patch.cwd = targetHost.info.home;
+      }
+    }
+    if (effectiveAgent) {
+      const modes = resolveAvailableModes({
+        agentId: effectiveAgent,
+        catalogModes: activeCatalog?.availableModes,
+      });
+      const coerced = coerceSupportedMode(draft.mode, draft.skipPermissions, modes);
+      if (coerced.id !== draft.mode || coerced.skip !== draft.skipPermissions) {
+        patch.mode = coerced.id;
+        patch.skipPermissions = coerced.skip;
+      }
     }
     if (Object.keys(patch).length > 0) {
       setDraft((prev) => ({ ...prev, ...patch }));
     }
-  }, [targetHost, draft.hostId, draft.agent, draft.cwd, projects, selectedProject, setDraft]);
+  }, [
+    targetHost,
+    draft.hostId,
+    draft.agent,
+    draft.cwd,
+    draft.mode,
+    draft.skipPermissions,
+    effectiveAgent,
+    activeCatalog?.availableModes,
+    projects,
+    setDraft,
+  ]);
 
   // Fetch branches when useWorktree enabled or project selected
   useEffect(() => {
@@ -96,15 +141,32 @@ export const DraftView: React.FC<{ openModelPickerSignal?: number }> = ({ openMo
       pushToast({ text: 'Pair a host first to start a thread', level: 'error' });
       return;
     }
-    const effectiveCwd = draft.cwd.trim() || selectedProject?.path || '~';
+    const effectiveCwd = draft.cwd.trim() || selectedProject?.path || targetHost?.info?.home || '~';
+    const agentToUse = effectiveAgent || 'claude';
+    const modes = resolveAvailableModes({
+      agentId: agentToUse,
+      catalogModes: activeCatalog?.availableModes,
+    });
+    const resolvedMode = coerceSupportedMode(draft.mode, draft.skipPermissions, modes);
+    const isFull = isFullAccessMode(resolvedMode.id);
+    const effortVal = draft.thought !== undefined ? draft.thought : '';
+
     const res = await callHost<{ session?: SessionSummary } | SessionSummary>(targetHostId, 'session.create', {
-      agent: draft.agent || targetHost?.agents.find((a) => a.available)?.id || 'claude',
+      agent: agentToUse,
       cwd: effectiveCwd,
       projectId: draft.projectId || selectedProject?.id || undefined,
       model: draft.model || undefined,
-      mode: draft.mode || undefined,
-      thought: draft.thought || undefined,
-      skipPermissions: draft.skipPermissions,
+      mode: resolvedMode.id || undefined,
+      thought: effortVal || undefined,
+      effort: effortVal || undefined,
+      skipPermissions: isFull,
+      flags: {
+        model: draft.model || undefined,
+        mode: resolvedMode.id || undefined,
+        effort: effortVal || undefined,
+        thought: effortVal || undefined,
+        skipPermissions: isFull,
+      },
       useWorktree: draft.useWorktree,
       baseBranch: draft.useWorktree ? draft.baseBranch || undefined : undefined,
       branchName: draft.useWorktree ? draft.branchName.trim() || undefined : undefined,
@@ -172,10 +234,9 @@ export const DraftView: React.FC<{ openModelPickerSignal?: number }> = ({ openMo
                   <div className="relative flex items-center">
                     <Server className="w-3.5 h-3.5 absolute left-2.5 text-[var(--accent)] pointer-events-none" />
                     <select
+                      data-testid="draft-host-select"
                       value={targetHostId}
-                      onChange={(e) =>
-                        setDraft((prev) => ({ ...prev, hostId: e.target.value, projectId: undefined, cwd: '' }))
-                      }
+                      onChange={(e) => openDraft({ hostId: e.target.value })}
                       className="w-full rounded-lg border border-[var(--border)] bg-[var(--bg-base)] pl-8 pr-2.5 py-1.5 text-xs text-[var(--text-primary)] outline-none focus:border-[var(--accent)]"
                     >
                       {hostList.map((h) => (

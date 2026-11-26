@@ -8,15 +8,16 @@
 //   - session/request_permission (tool approval, AskUserQuestion, plan review)
 //
 // Prompt directives:
-//   [edit:path:content]  writes file in cwd and emits ACP tool_call + diff
-//   [perm]               requests approval for a shell command (or [perm:cmd])
-//   [question]           sends an AskUserQuestion permission card
-//   [plan]               sends a plan review card
-//   [bash:cmd]           runs a command tool call (simulated or real with [realbash:cmd])
-//   [slow:ms]            streams chunks slowly over ms milliseconds (cancellable!)
-//   [error:msg]          fails the turn with an error
-//   [markdown]           emits rich Markdown (code, table, inline & block TeX, mermaid)
-//   [subagent]           emits a subagent tool call
+//
+//	[edit:path:content]  writes file in cwd and emits ACP tool_call + diff
+//	[perm]               requests approval for a shell command (or [perm:cmd])
+//	[question]           sends an AskUserQuestion permission card
+//	[plan]               sends a plan review card
+//	[bash:cmd]           runs a command tool call (simulated or real with [realbash:cmd])
+//	[slow:ms]            streams chunks slowly over ms milliseconds (cancellable!)
+//	[error:msg]          fails the turn with an error
+//	[markdown]           emits rich Markdown (code, table, inline & block TeX, mermaid)
+//	[subagent]           emits a subagent tool call
 package main
 
 import (

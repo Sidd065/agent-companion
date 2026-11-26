@@ -2,9 +2,11 @@ export * from './generated.js';
 import type {
   AgentProfile,
   AsideItem,
+  DaemonInfo as GeneratedDaemonInfo,
   Device,
   Notification,
   Project,
+  ProviderConfig,
   ScheduledTask,
   ScheduleRunRecord,
   SessionDetail,
@@ -13,6 +15,15 @@ import type {
   TranscriptItem,
   TranscriptOp,
 } from './generated.js';
+
+export type BuiltinAgentId = 'claude' | 'agy' | 'codex';
+export type AgentId = BuiltinAgentId | (string & {});
+export type ReasoningEffortId = '' | 'low' | 'medium' | 'high' | 'xhigh' | 'max' | (string & {});
+
+export interface ProvidersListResult {
+  agents: AgentProfile[];
+  configs: ProviderConfig[];
+}
 
 export interface HelloReply {
   v: number;
@@ -26,26 +37,8 @@ export interface HelloReply {
   publicUrl?: string;
 }
 
-export interface DaemonInfo {
-  name: string;
-  version: string;
-  protocolVersion?: number;
-  capabilities?: string[];
-  host: string;
-  home: string;
-  uptimeSec: number;
-  agents: AgentProfile[];
-  stats?: Record<string, unknown>;
-  hostId: string;
-  fingerprint: string;
-  publicUrl?: string;
-  devices: number;
-  sessions?: SessionSummary[];
-  projects?: Project[];
-  client?: { id: string; deviceId: string; deviceName: string };
-  listen?: string[];
-  tunnel?: { mode?: string; url?: string; error?: string };
-  config?: Record<string, unknown>;
+export interface DaemonInfo extends GeneratedDaemonInfo {
+  defaultSkipPermissions?: boolean;
 }
 
 export interface PairedHostCredentials {

@@ -91,8 +91,14 @@ fun GitWorkbenchTab(
     var confirmDefaultPush by remember { mutableStateOf(false) }
     var busy by remember { mutableStateOf(false) }
 
-    LaunchedEffect(repoPath, reloadKey, refresh) {
-        if (repoPath.isBlank()) return@LaunchedEffect
+    LaunchedEffect(conn.config.id, repoPath, reloadKey, refresh) {
+        if (repoPath.isBlank()) {
+            status = null
+            branches = emptyList()
+            worktrees = emptyList()
+            prs = emptyList()
+            return@LaunchedEffect
+        }
         runCatching {
             val st = conn.rpc.call("git.status", params { put("path", repoPath); put("force", refresh > 0) })
                 .decode(GitStatus.serializer())
@@ -111,7 +117,13 @@ fun GitWorkbenchTab(
                         conn.rpc.call("pr.list", params { put("path", repoPath); put("state", "open"); put("limit", 15) })
                             .decode(ListSerializer(PullRequestSummary.serializer()))
                     }.getOrDefault(emptyList())
+                } else {
+                    prs = emptyList()
                 }
+            } else {
+                branches = emptyList()
+                worktrees = emptyList()
+                prs = emptyList()
             }
         }.onFailure { snack.showSnackbar("Git status: ${it.message}") }
     }

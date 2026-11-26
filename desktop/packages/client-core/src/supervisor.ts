@@ -114,8 +114,13 @@ export class HostSupervisor {
 
   updateCredentials(next: PairedHostCredentials): void {
     const urlChanged = next.url !== this.creds.url || next.localUrl !== this.creds.localUrl;
+    const authChanged = next.devicePriv !== this.creds.devicePriv || next.hostKey !== this.creds.hostKey;
+    const inactiveState =
+      this.state === 'unpaired' ||
+      this.state === 'disconnected' ||
+      (this.state as string) === 'closed';
     this.creds = next;
-    if (urlChanged && !this.disposed) {
+    if ((urlChanged || authChanged || inactiveState) && !this.disposed) {
       this.useFallbackUrl = false;
       this.reconnectNow();
     }
@@ -163,7 +168,7 @@ export class HostSupervisor {
         devicePriv: base64ToBytes(this.creds.devicePriv),
         deviceName: this.opts.deviceName,
         platform: this.opts.platform ?? 'linux-desktop',
-        appVersion: this.opts.appVersion ?? '0.4.0',
+        appVersion: this.opts.appVersion ?? '0.5.0',
         WebSocketImpl: this.opts.WebSocketImpl,
         onEvent: (ev, data) => {
           if (this.client !== client) return;
@@ -205,12 +210,12 @@ export class HostSupervisor {
           return;
         }
         if (reply.publicUrl && reply.publicUrl !== this.creds.url) {
-          this.creds = { ...this.creds, url: reply.publicUrl, name: reply.host || this.creds.name };
+          this.creds = { ...this.creds, url: reply.publicUrl, name: this.creds.name || reply.host };
           this.events.onCredentialsUpdated?.(this.creds);
         }
         const info = await client.call<DaemonInfo>(
           'hello',
-          { device: this.opts.deviceName, app: this.opts.appVersion ?? '0.4.0' },
+          { device: this.opts.deviceName, app: this.opts.appVersion ?? '0.5.0' },
           20_000,
         );
         if (this.client !== client || this.disposed) return;

@@ -25,6 +25,7 @@ import (
 	"agentc/internal/agycli"
 	"agentc/internal/core"
 	"agentc/internal/fsops"
+	"agentc/internal/projects"
 	"agentc/internal/push"
 	"agentc/internal/secure"
 	"agentc/internal/term"
@@ -32,6 +33,38 @@ import (
 
 // Version is the daemon version (set by main).
 var Version = "dev"
+
+// DaemonInfo describes the host metadata returned by `daemon.info` and `hello`.
+type DaemonInfo struct {
+	Name                 string              `json:"name"`
+	Version              string              `json:"version"`
+	ProtocolVersion      int                 `json:"protocolVersion,omitempty"`
+	Capabilities         []string            `json:"capabilities,omitempty"`
+	OpenRouterConfigured bool                `json:"openRouterConfigured"`
+	Host                 string              `json:"host"`
+	Home                 string              `json:"home"`
+	UptimeSec            int                 `json:"uptimeSec"`
+	Agents               []core.AgentProfile `json:"agents"`
+	Stats                map[string]any      `json:"stats,omitempty"`
+	HostID               string              `json:"hostId"`
+	Fingerprint          string              `json:"fingerprint"`
+	PublicURL            string              `json:"publicUrl,omitempty"`
+	Devices              int                 `json:"devices"`
+	Sessions             []core.Summary      `json:"sessions,omitempty"`
+	Projects             []projects.Project  `json:"projects,omitempty"`
+	Client               struct {
+		ID         string `json:"id"`
+		DeviceID   string `json:"deviceId"`
+		DeviceName string `json:"deviceName"`
+	} `json:"client,omitempty"`
+	Listen []string `json:"listen,omitempty"`
+	Tunnel struct {
+		Mode  string `json:"mode,omitempty"`
+		URL   string `json:"url,omitempty"`
+		Error string `json:"error,omitempty"`
+	} `json:"tunnel,omitempty"`
+	Config map[string]any `json:"config,omitempty"`
+}
 
 // Server wires everything together.
 type Server struct {
@@ -70,7 +103,11 @@ func (s *Server) Handler() http.Handler {
 		CheckOrigin: func(r *http.Request) bool { return true },
 	}
 	s.limiter = newLimiter()
-	s.uploads = newUploads()
+	var stopCh <-chan struct{}
+	if s.Mgr != nil {
+		stopCh = s.Mgr.StopCh()
+	}
+	s.uploads = newUploads(stopCh)
 	s.pending = make(chan struct{}, 32)
 	s.registerMethods()
 	mux := http.NewServeMux()
@@ -99,9 +136,18 @@ func (s *Server) publicURL() string {
 	return s.PublicURL()
 }
 
+func (s *Server) fs() fsops.FS {
+	if s != nil && s.Mgr != nil {
+		return fsops.New(s.Mgr.Cfg().HomeDir)
+	}
+	return fsops.New("")
+}
+
 func (s *Server) info(ctx context.Context) map[string]any {
 	m := map[string]any{
-		"name": "agentc", "version": Version, "protocolVersion": ProtocolVersion, "capabilities": Capabilities, "host": s.hostName(), "home": fsops.Home, "uptimeSec": int(time.Since(s.Started).Seconds()),
+		"name": "agentc", "version": Version, "protocolVersion": ProtocolVersion, "capabilities": Capabilities,
+		"openRouterConfigured": s.Mgr.OpenRouterConfigured(),
+		"host":                 s.hostName(), "home": s.fs().HomeDir(), "uptimeSec": int(time.Since(s.Started).Seconds()),
 		"agents": s.Mgr.Agents(), "stats": s.Mgr.Stats(), "apk": s.apkInfo(),
 		"hostId": s.Identity.ID(), "fingerprint": secure.Fingerprint(s.Identity.Key.Public), "publicUrl": s.publicURL(),
 		"devices": len(s.Devices.List()),
@@ -542,6 +588,8 @@ func (s *Server) onTermState(id, state, msg string) {
 			switch t.Kind {
 			case "claude":
 				agent = "Claude"
+			case "codex":
+				agent = "Codex"
 			case "shell", "cmd":
 				agent = "The command"
 			}

@@ -1,12 +1,14 @@
-import React, { useCallback, useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   Activity,
   Archive,
+  Check,
   CheckCircle2,
   Cpu,
   FolderGit2,
   HeartPulse,
   Info,
+  KeyRound,
   Keyboard,
   Palette,
   Plus,
@@ -20,15 +22,17 @@ import {
   XCircle,
 } from 'lucide-react';
 import type {
+  CustomModel,
   HostHealth,
   Project,
   ProviderConfig,
   ProviderHealth,
   ScriptDef,
 } from '@agentc/protocol';
-import { useApp } from '../../state/appStore.js';
+import { customModelsScopeKey, providerCatalogKey, useApp } from '../../state/appStore.js';
 import { DEFAULT_KEYBINDINGS, displayChord, formatEventChord } from '../../state/keybindings.js';
 import { BUILTIN_THEMES } from '../../state/themes.js';
+import { buildProviderUpsertPayload } from '../../utils/codexModels.js';
 
 const TABS = [
   { id: 'general', label: 'General', icon: Sliders },
@@ -43,6 +47,48 @@ const TABS = [
   { id: 'about', label: 'About', icon: Info },
 ];
 
+const HOST_SCOPED_TABS = new Set(['providers', 'projects', 'health', 'about']);
+
+function normalizeSettingsTab(raw?: string): string {
+  if (raw && TABS.some((t) => t.id === raw)) return raw;
+  return 'general';
+}
+
+export interface ProvidersRequestTracker {
+  hydrateSeq: number;
+  configsSeq: number;
+}
+
+export function beginHydrateProvidersSeq(tracker: ProvidersRequestTracker): number {
+  tracker.configsSeq += 1;
+  tracker.hydrateSeq += 1;
+  return tracker.hydrateSeq;
+}
+
+export function isCurrentHydrateProvidersSeq(tracker: ProvidersRequestTracker, seq: number): boolean {
+  return tracker.hydrateSeq === seq;
+}
+
+export function beginRefreshConfigsOnlySeq(tracker: ProvidersRequestTracker): {
+  seq: number;
+  hydrateSnap: number;
+} {
+  tracker.configsSeq += 1;
+  return { seq: tracker.configsSeq, hydrateSnap: tracker.hydrateSeq };
+}
+
+export function isCurrentRefreshConfigsOnlySeq(
+  tracker: ProvidersRequestTracker,
+  token: { seq: number; hydrateSnap: number },
+): boolean {
+  return tracker.configsSeq === token.seq && tracker.hydrateSeq === token.hydrateSnap;
+}
+
+export function resetProvidersRequestTracker(tracker: ProvidersRequestTracker): void {
+  tracker.hydrateSeq += 1;
+  tracker.configsSeq += 1;
+}
+
 export const SettingsModal: React.FC = () => {
   const {
     settingsModalOpen,
@@ -51,8 +97,16 @@ export const SettingsModal: React.FC = () => {
     settings,
     updateSettings,
     resetSettings,
+    hosts,
     hostList,
     activeHost,
+    viewMode,
+    draft,
+    providerCatalogs,
+    loadProviderModels,
+    refreshHostInfo,
+    saveCustomModelSlug,
+    removeCustomModelSlug,
     allSessions,
     callHost,
     setPairModalOpen,
@@ -63,16 +117,38 @@ export const SettingsModal: React.FC = () => {
     pushToast,
   } = useApp();
 
-  const [tab, setTab] = useState(settingsInitialTab || 'general');
+  const [tab, setTab] = useState(() => normalizeSettingsTab(settingsInitialTab));
   const [search, setSearch] = useState('');
+  const [selectedHostId, setSelectedHostId] = useState('');
 
-  // Providers state
-  const [providerConfigs, setProviderConfigs] = useState<ProviderConfig[]>([]);
+  // Inline host rename state (replaces native browser prompt dialog)
+  const [renamingHostId, setRenamingHostId] = useState<string | null>(null);
+  const [renameHostValue, setRenameHostValue] = useState('');
+
+  // Providers state (strictly tagged by hostId to prevent cross-host bleed and form input wipes)
+  const [providersState, setProvidersState] = useState<{
+    hostId: string;
+    configs: ProviderConfig[];
+    loaded: boolean;
+  }>({ hostId: '', configs: [], loaded: false });
+  const [providersFetching, setProvidersFetching] = useState(false);
+  const hydratedProvidersHostRef = useRef<string>('');
+  const providersTrackerRef = useRef<ProvidersRequestTracker>({ hydrateSeq: 0, configsSeq: 0 });
   const [providerHealth, setProviderHealth] = useState<Record<string, ProviderHealth>>({});
   const [newProvId, setNewProvId] = useState('');
   const [newProvName, setNewProvName] = useState('');
   const [newProvCmd, setNewProvCmd] = useState('');
   const [newProvArgs, setNewProvArgs] = useState('');
+
+  // Codex & OpenRouter dedicated form state
+  const [codexEnabled, setCodexEnabled] = useState(true);
+  const [codexApiKeyInput, setCodexApiKeyInput] = useState('');
+  const [codexCommandInput, setCodexCommandInput] = useState('');
+  const [codexDefaultModelInput, setCodexDefaultModelInput] = useState('');
+  const [codexSaving, setCodexSaving] = useState(false);
+  const [codexRefreshing, setCodexRefreshing] = useState(false);
+  const [newCustomSlug, setNewCustomSlug] = useState('');
+  const [newCustomName, setNewCustomName] = useState('');
 
   // Diagnostics / Linux Host Health
   const [health, setHealth] = useState<HostHealth | null>(null);
@@ -88,24 +164,100 @@ export const SettingsModal: React.FC = () => {
   const [newScriptOnWt, setNewScriptOnWt] = useState(false);
 
   useEffect(() => {
-    if (settingsModalOpen && settingsInitialTab) {
-      setTab(settingsInitialTab);
+    resetProvidersRequestTracker(providersTrackerRef.current);
+    setProvidersFetching(false);
+    if (settingsModalOpen) {
+      hydratedProvidersHostRef.current = '';
+      setProvidersState({ hostId: '', configs: [], loaded: false });
+      setTab(normalizeSettingsTab(settingsInitialTab));
+      const initialHost =
+        (viewMode === 'draft' ? draft.hostId : activeHost?.creds.id) ||
+        activeHost?.creds.id ||
+        hostList[0]?.creds.id ||
+        '';
+      setSelectedHostId(initialHost);
+      setRenamingHostId(null);
+      setCodexApiKeyInput('');
+    } else {
+      hydratedProvidersHostRef.current = '';
     }
-  }, [settingsModalOpen, settingsInitialTab]);
+  }, [settingsModalOpen, settingsInitialTab]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  const hostId = activeHost?.creds.id ?? hostList[0]?.creds.id ?? '';
-
-  const loadProviders = useCallback(async () => {
-    if (!hostId) return;
-    try {
-      const res = await callHost<{ configs?: ProviderConfig[] }>(hostId, 'providers.list', {});
-      setProviderConfigs(Array.isArray(res?.configs) ? res.configs : []);
-    } catch {
-      setProviderConfigs([]);
+  // Keep selectedHostId valid if hosts change while modal is open
+  useEffect(() => {
+    if (!settingsModalOpen) return;
+    if (!selectedHostId || !hosts[selectedHostId]) {
+      setSelectedHostId(activeHost?.creds.id ?? hostList[0]?.creds.id ?? '');
     }
-  }, [hostId, callHost]);
+  }, [settingsModalOpen, selectedHostId, hosts, activeHost, hostList]);
 
-  const checkHealthAll = async () => {
+  const hostId = (selectedHostId && hosts[selectedHostId] ? selectedHostId : activeHost?.creds.id ?? hostList[0]?.creds.id) ?? '';
+  const targetHost = (hostId ? hosts[hostId] : null) ?? activeHost ?? null;
+  const providerConfigs = providersState.hostId === hostId ? providersState.configs : [];
+  const providersReadyForHost = providersState.hostId === hostId && providersState.loaded;
+  const providersLoading = Boolean(hostId) && (!providersReadyForHost || providersFetching);
+  const codexCatalog = hostId ? providerCatalogs[providerCatalogKey(hostId, 'codex')] : undefined;
+  const codexCfg = useMemo(() => providerConfigs.find((c) => c.id === 'codex'), [providerConfigs]);
+
+  const prevSettingsHostRef = useRef(hostId);
+  useEffect(() => {
+    if (prevSettingsHostRef.current !== hostId) {
+      prevSettingsHostRef.current = hostId;
+      resetProvidersRequestTracker(providersTrackerRef.current);
+      setProvidersFetching(false);
+      setCodexApiKeyInput('');
+      setProviderHealth({});
+      setHealth(null);
+    }
+  }, [hostId]);
+
+  const hydrateProvidersForHost = useCallback(
+    async (targetHostId?: string) => {
+      const hId = targetHostId ?? hostId;
+      if (!hId) return;
+      const seq = beginHydrateProvidersSeq(providersTrackerRef.current);
+      setProvidersFetching(true);
+      try {
+        const res = await callHost<{ configs?: ProviderConfig[] }>(hId, 'providers.list', {});
+        if (!isCurrentHydrateProvidersSeq(providersTrackerRef.current, seq)) return;
+        const cfgs = Array.isArray(res?.configs) ? res.configs : [];
+        setProvidersState({ hostId: hId, configs: cfgs, loaded: true });
+        hydratedProvidersHostRef.current = hId;
+        const cx = cfgs.find((c) => c.id === 'codex');
+        setCodexEnabled(cx?.enabled ?? true);
+        setCodexCommandInput(cx?.command ?? '');
+        setCodexDefaultModelInput(cx?.defaultModel ?? '');
+      } catch {
+        if (!isCurrentHydrateProvidersSeq(providersTrackerRef.current, seq)) return;
+        setProvidersState({ hostId: hId, configs: [], loaded: true });
+        hydratedProvidersHostRef.current = hId;
+      } finally {
+        if (isCurrentHydrateProvidersSeq(providersTrackerRef.current, seq)) {
+          setProvidersFetching(false);
+        }
+      }
+    },
+    [hostId, callHost],
+  );
+
+  const refreshProviderConfigsOnly = useCallback(
+    async (targetHostId?: string) => {
+      const hId = targetHostId ?? hostId;
+      if (!hId) return;
+      const token = beginRefreshConfigsOnlySeq(providersTrackerRef.current);
+      try {
+        const res = await callHost<{ configs?: ProviderConfig[] }>(hId, 'providers.list', {});
+        if (!isCurrentRefreshConfigsOnlySeq(providersTrackerRef.current, token)) return;
+        const cfgs = Array.isArray(res?.configs) ? res.configs : [];
+        setProvidersState({ hostId: hId, configs: cfgs, loaded: true });
+      } catch {
+        // preserve existing loaded configs on transient error
+      }
+    },
+    [hostId, callHost],
+  );
+
+  const checkHealthAll = useCallback(async () => {
     if (!hostId) return;
     try {
       const res = await callHost<ProviderHealth[]>(hostId, 'providers.health', {});
@@ -115,7 +267,7 @@ export const SettingsModal: React.FC = () => {
     } catch (e) {
       pushToast({ text: `Health check failed: ${(e as Error).message}`, level: 'error' });
     }
-  };
+  }, [hostId, callHost, pushToast]);
 
   const loadHostHealth = useCallback(async () => {
     if (!hostId) return;
@@ -131,10 +283,29 @@ export const SettingsModal: React.FC = () => {
   }, [hostId, callHost, pushToast]);
 
   useEffect(() => {
-    if (!settingsModalOpen) return;
-    if (tab === 'providers') void loadProviders();
-    if (tab === 'health') void loadHostHealth();
-  }, [settingsModalOpen, tab, loadProviders, loadHostHealth]);
+    if (!settingsModalOpen || !hostId) return;
+    if (tab === 'providers') {
+      if (hydratedProvidersHostRef.current !== hostId) {
+        void hydrateProvidersForHost(hostId);
+      } else {
+        void refreshProviderConfigsOnly(hostId);
+      }
+      void checkHealthAll();
+      void loadProviderModels(hostId, 'codex', false);
+    }
+    if (tab === 'health') {
+      void loadHostHealth();
+    }
+  }, [
+    settingsModalOpen,
+    tab,
+    hostId,
+    hydrateProvidersForHost,
+    refreshProviderConfigsOnly,
+    checkHealthAll,
+    loadProviderModels,
+    loadHostHealth,
+  ]);
 
   // Keybinding chord capture listener
   useEffect(() => {
@@ -156,12 +327,102 @@ export const SettingsModal: React.FC = () => {
     return () => window.removeEventListener('keydown', onKey, true);
   }, [recordingId, settings.keybindings, updateSettings, pushToast]);
 
+  const scopedLocalCodexCustom = useMemo(
+    () => (hostId ? settings.customModelsByScope?.[customModelsScopeKey(hostId, 'codex')] ?? [] : []),
+    [hostId, settings.customModelsByScope],
+  );
+
+  const mergedCodexCustomModels = useMemo<CustomModel[]>(() => {
+    const out: CustomModel[] = [];
+    const seen = new Set<string>();
+    for (const cm of [
+      ...(codexCfg?.customModels ?? []),
+      ...(codexCatalog?.customModels ?? []),
+      ...scopedLocalCodexCustom,
+    ]) {
+      const slug = cm.slug?.trim();
+      if (!slug || seen.has(slug)) continue;
+      seen.add(slug);
+      out.push({ slug, name: cm.name?.trim() || slug });
+    }
+    return out;
+  }, [codexCfg?.customModels, codexCatalog?.customModels, scopedLocalCodexCustom]);
+
   if (!settingsModalOpen) return null;
 
   const filteredTabs = TABS.filter((t) => !search.trim() || t.label.toLowerCase().includes(search.toLowerCase()));
   const archivedSessions = allSessions.filter((s) => s.archived);
-  const hostProjects: Project[] = activeHost?.projects ?? [];
+  const hostProjects: Project[] = targetHost?.projects ?? [];
   const selectedProj = hostProjects.find((p) => p.id === selectedProjId) ?? hostProjects[0] ?? null;
+
+  const codexAgentProfile = (targetHost?.agents ?? []).find((a) => a.id === 'codex');
+  const codexHealth = providerHealth['codex'];
+  const hasStoredRedactedOrKey = codexCfg?.env?.OPENROUTER_API_KEY === '***';
+  const openRouterReady = Boolean(
+    codexCatalog?.openRouterConfigured || targetHost?.info?.openRouterConfigured || hasStoredRedactedOrKey,
+  );
+  const nativeAuthReady = Boolean(codexCatalog?.nativeAuthConfigured);
+
+  const handleSaveCodexSettings = async (clearApiKey = false) => {
+    if (!hostId || codexSaving || providersLoading) return;
+    setCodexSaving(true);
+    try {
+      const payload = buildProviderUpsertPayload(codexCfg, {
+        id: 'codex',
+        name: 'Codex',
+        driver: 'codex',
+        enabled: codexEnabled,
+        command: codexCommandInput,
+        defaultModel: codexDefaultModelInput,
+        apiKeyInput: clearApiKey ? '' : codexApiKeyInput,
+        clearApiKey,
+      });
+      await callHost(hostId, 'providers.upsert', payload);
+      setCodexApiKeyInput('');
+      await Promise.all([
+        refreshHostInfo(hostId),
+        hydrateProvidersForHost(hostId),
+        checkHealthAll(),
+        loadProviderModels(hostId, 'codex', true),
+      ]);
+      pushToast({
+        text: clearApiKey ? 'Cleared stored OpenRouter API key' : 'Saved Codex & OpenRouter settings',
+        level: 'success',
+      });
+    } catch (e) {
+      pushToast({ text: `Save failed: ${(e as Error).message}`, level: 'error' });
+    } finally {
+      setCodexSaving(false);
+    }
+  };
+
+  const handleRefreshCodexCatalog = async () => {
+    if (!hostId || codexRefreshing) return;
+    setCodexRefreshing(true);
+    try {
+      await loadProviderModels(hostId, 'codex', true);
+      pushToast({ text: 'Refreshed Codex & OpenRouter model catalog', level: 'info' });
+    } finally {
+      setCodexRefreshing(false);
+    }
+  };
+
+  const handleAddCodexCustomModel = async () => {
+    const slug = newCustomSlug.trim();
+    if (!slug || !hostId) return;
+    const name = newCustomName.trim() || slug;
+    await saveCustomModelSlug(hostId, 'codex', { slug, name });
+    setNewCustomSlug('');
+    setNewCustomName('');
+    await refreshProviderConfigsOnly(hostId);
+    pushToast({ text: `Saved custom model ${slug}`, level: 'success' });
+  };
+
+  const handleRemoveCodexCustomModel = async (slug: string) => {
+    if (!hostId) return;
+    await removeCustomModelSlug(hostId, 'codex', slug);
+    await refreshProviderConfigsOnly(hostId);
+  };
 
   const addCustomProvider = async () => {
     if (!hostId || !newProvId.trim() || !newProvCmd.trim()) return;
@@ -179,7 +440,7 @@ export const SettingsModal: React.FC = () => {
       setNewProvCmd('');
       setNewProvArgs('');
       pushToast({ text: 'Saved custom ACP provider', level: 'success' });
-      await loadProviders();
+      await Promise.all([refreshHostInfo(hostId), refreshProviderConfigsOnly(hostId), checkHealthAll()]);
     } catch (e) {
       pushToast({ text: (e as Error).message, level: 'error' });
     }
@@ -205,6 +466,16 @@ export const SettingsModal: React.FC = () => {
     } catch (e) {
       pushToast({ text: (e as Error).message, level: 'error' });
     }
+  };
+
+  const submitHostRename = async (id: string) => {
+    const trimmed = renameHostValue.trim();
+    if (trimmed) {
+      await renameHost(id, trimmed);
+      pushToast({ text: `Renamed host to "${trimmed}"`, level: 'success' });
+    }
+    setRenamingHostId(null);
+    setRenameHostValue('');
   };
 
   return (
@@ -264,16 +535,38 @@ export const SettingsModal: React.FC = () => {
 
         {/* Right Content */}
         <div className="flex-1 flex flex-col min-w-0 min-h-0">
-          <div className="flex items-center justify-between border-b border-[var(--border)] px-5 py-3">
+          <div className="flex items-center justify-between gap-2 border-b border-[var(--border)] px-5 py-3">
             <div className="text-sm font-semibold">{TABS.find((t) => t.id === tab)?.label ?? 'Settings'}</div>
-            <button
-              type="button"
-              data-testid="settings-close-btn"
-              onClick={() => setSettingsModalOpen(false)}
-              className="rounded-lg p-1 text-[var(--text-muted)] hover:bg-[var(--bg-hover)] hover:text-[var(--text-primary)] cursor-pointer"
-            >
-              <X className="w-4 h-4" />
-            </button>
+            <div className="flex items-center gap-2">
+              {HOST_SCOPED_TABS.has(tab) && hostList.length > 1 && (
+                <div className="inline-flex items-center gap-1.5">
+                  <Server className="w-3.5 h-3.5 text-[var(--accent)]" />
+                  <select
+                    data-testid="settings-host-select"
+                    value={hostId}
+                    onChange={(e) => {
+                      setSelectedHostId(e.target.value);
+                      setCodexApiKeyInput('');
+                    }}
+                    className="rounded-lg border border-[var(--border)] bg-[var(--bg-base)] px-2.5 py-1 text-xs text-[var(--text-primary)] outline-none focus:border-[var(--accent)]"
+                  >
+                    {hostList.map((h) => (
+                      <option key={h.creds.id} value={h.creds.id}>
+                        {h.creds.name} ({h.state})
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              )}
+              <button
+                type="button"
+                data-testid="settings-close-btn"
+                onClick={() => setSettingsModalOpen(false)}
+                className="rounded-lg p-1 text-[var(--text-muted)] hover:bg-[var(--bg-hover)] hover:text-[var(--text-primary)] cursor-pointer"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
           </div>
 
           <div className="flex-1 overflow-y-auto p-5 space-y-4">
@@ -453,26 +746,65 @@ export const SettingsModal: React.FC = () => {
                     className="rounded-xl border border-[var(--border)] bg-[var(--bg-base)] p-3 space-y-2"
                   >
                     <div className="flex items-center justify-between gap-2">
-                      <div>
-                        <div className="font-semibold flex items-center gap-2">
-                          <span
-                            className={`w-2 h-2 rounded-full ${
-                              h.state === 'connected' ? 'bg-[var(--success)]' : 'bg-[var(--warning)]'
-                            }`}
-                          />
-                          {h.creds.name}
-                          <span className="text-[10.5px] font-normal text-[var(--text-muted)]">({h.state})</span>
-                        </div>
-                        <div className="font-mono text-[10.5px] text-[var(--text-muted)]">
+                      <div className="min-w-0 flex-1">
+                        {renamingHostId === h.creds.id ? (
+                          <div className="flex items-center gap-1.5 max-w-sm">
+                            <input
+                              type="text"
+                              autoFocus
+                              data-testid={`rename-host-input-${h.creds.id}`}
+                              value={renameHostValue}
+                              onChange={(e) => setRenameHostValue(e.target.value)}
+                              onKeyDown={(e) => {
+                                if (e.key === 'Enter') void submitHostRename(h.creds.id);
+                                if (e.key === 'Escape') {
+                                  setRenamingHostId(null);
+                                  setRenameHostValue('');
+                                }
+                              }}
+                              className="flex-1 rounded-md border border-[var(--accent)] bg-[var(--bg-surface)] px-2 py-0.5 text-xs outline-none"
+                            />
+                            <button
+                              type="button"
+                              data-testid={`rename-host-save-${h.creds.id}`}
+                              onClick={() => void submitHostRename(h.creds.id)}
+                              className="rounded bg-[var(--accent)] px-2 py-0.5 text-[11px] font-semibold text-[var(--accent-fg)] cursor-pointer"
+                            >
+                              Save
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setRenamingHostId(null);
+                                setRenameHostValue('');
+                              }}
+                              className="rounded border border-[var(--border)] px-2 py-0.5 text-[11px] text-[var(--text-muted)] cursor-pointer"
+                            >
+                              Cancel
+                            </button>
+                          </div>
+                        ) : (
+                          <div className="font-semibold flex items-center gap-2">
+                            <span
+                              className={`w-2 h-2 rounded-full ${
+                                h.state === 'connected' ? 'bg-[var(--success)]' : 'bg-[var(--warning)]'
+                              }`}
+                            />
+                            {h.creds.name}
+                            <span className="text-[10.5px] font-normal text-[var(--text-muted)]">({h.state})</span>
+                          </div>
+                        )}
+                        <div className="font-mono text-[10.5px] text-[var(--text-muted)] mt-0.5">
                           {h.creds.localUrl || h.creds.url} · v{h.info?.version || '?'} · proto v{h.info?.protocolVersion || 1}
                         </div>
                       </div>
-                      <div className="flex items-center gap-1.5">
+                      <div className="flex items-center gap-1.5 shrink-0">
                         <button
                           type="button"
+                          data-testid={`rename-host-btn-${h.creds.id}`}
                           onClick={() => {
-                            const next = window.prompt('Rename host:', h.creds.name);
-                            if (next?.trim()) void renameHost(h.creds.id, next.trim());
+                            setRenamingHostId(h.creds.id);
+                            setRenameHostValue(h.creds.name);
                           }}
                           className="rounded border border-[var(--border)] px-2 py-0.5 text-[11px] hover:bg-[var(--bg-hover)] cursor-pointer"
                         >
@@ -539,7 +871,7 @@ export const SettingsModal: React.FC = () => {
                   <div>
                     <div className="font-medium">Agent Providers &amp; Generic ACP</div>
                     <div className="text-[11px] text-[var(--text-muted)]">
-                      Inspect built-in drivers (Claude Code, Antigravity, Codex) or register any custom ACP CLI.
+                      Configure Codex &amp; OpenRouter BYOK models, inspect built-in drivers, or register any custom ACP CLI.
                     </div>
                   </div>
                   <button
@@ -552,54 +884,298 @@ export const SettingsModal: React.FC = () => {
                   </button>
                 </div>
 
-                <div className="space-y-2">
-                  {(activeHost?.agents ?? []).map((ag) => {
-                    const hl = providerHealth[ag.id];
-                    const cfg = providerConfigs.find((c) => c.id === ag.id);
-                    return (
-                      <div
-                        key={ag.id}
-                        className="rounded-xl border border-[var(--border)] bg-[var(--bg-base)] p-3 flex items-center justify-between gap-3"
-                      >
-                        <div className="min-w-0">
-                          <div className="flex items-center gap-2 font-medium">
-                            {ag.available ? (
-                              <CheckCircle2 className="w-3.5 h-3.5 text-[var(--success)]" />
-                            ) : (
-                              <XCircle className="w-3.5 h-3.5 text-[var(--text-muted)]" />
-                            )}
-                            <span>{ag.name}</span>
-                            <span className="rounded bg-[var(--bg-elevated)] px-1.5 py-0.5 font-mono text-[10px] text-[var(--text-muted)]">
-                              {ag.driver || ag.id}
-                            </span>
-                            {ag.version && <span className="font-mono text-[10.5px] text-[var(--text-muted)]">{ag.version}</span>}
-                          </div>
-                          <div className="font-mono text-[10.5px] text-[var(--text-muted)] truncate mt-0.5">
-                            {ag.command || ag.reason}
-                          </div>
-                          {hl && (
-                            <div className="text-[10.5px] text-[var(--accent)] mt-0.5">
-                              Health: {hl.available ? 'OK' : 'Unavailable'} · {hl.latencyMs}ms{' '}
-                              {hl.message ? `· ${hl.message}` : ''}
-                            </div>
-                          )}
-                        </div>
-                        {cfg && !cfg.builtin && (
-                          <button
-                            type="button"
-                            onClick={async () => {
-                              await callHost(hostId, 'providers.remove', { id: cfg.id });
-                              await loadProviders();
-                              pushToast({ text: `Removed provider ${cfg.name}`, level: 'info' });
-                            }}
-                            className="rounded p-1 text-[var(--text-muted)] hover:text-[var(--danger)] cursor-pointer"
-                          >
-                            <Trash2 className="w-3.5 h-3.5" />
-                          </button>
+                {/* Dedicated Codex & OpenRouter Integration Card */}
+                <div
+                  data-testid="codex-provider-card"
+                  className="rounded-xl border border-[var(--border-strong)] bg-[var(--bg-base)] p-4 space-y-3.5"
+                >
+                  <div className="flex flex-wrap items-start justify-between gap-2">
+                    <div className="space-y-1">
+                      <div className="flex flex-wrap items-center gap-2">
+                        {codexAgentProfile?.available || codexHealth?.available ? (
+                          <CheckCircle2 className="w-4 h-4 text-[var(--success)]" />
+                        ) : (
+                          <XCircle className="w-4 h-4 text-[var(--warning)]" />
+                        )}
+                        <span className="text-xs font-semibold text-[var(--text-primary)]">
+                          Codex &amp; OpenRouter Integration
+                        </span>
+                        <span className="rounded bg-[var(--bg-elevated)] px-1.5 py-0.5 font-mono text-[10px] text-[var(--accent)]">
+                          CX · codex app-server
+                        </span>
+                        {(codexHealth?.version || codexAgentProfile?.version) && (
+                          <span className="font-mono text-[10.5px] text-[var(--text-muted)]">
+                            {codexHealth?.version || codexAgentProfile?.version}
+                          </span>
                         )}
                       </div>
-                    );
-                  })}
+                      <div className="flex flex-wrap items-center gap-1.5 pt-0.5">
+                        <span
+                          data-testid="codex-openrouter-badge"
+                          className={`inline-flex items-center gap-1 rounded-md border px-2 py-0.5 text-[10.5px] font-medium ${
+                            openRouterReady
+                              ? 'border-[var(--success)]/40 bg-[var(--success)]/10 text-[var(--success)]'
+                              : 'border-[var(--border)] bg-[var(--bg-surface)] text-[var(--text-muted)]'
+                          }`}
+                        >
+                          {openRouterReady ? <Check className="w-3 h-3" /> : <KeyRound className="w-3 h-3" />}
+                          {openRouterReady ? 'OpenRouter Ready' : 'OpenRouter Not Configured'}
+                        </span>
+                        <span
+                          data-testid="codex-native-auth-badge"
+                          className={`inline-flex items-center gap-1 rounded-md border px-2 py-0.5 text-[10.5px] font-medium ${
+                            nativeAuthReady
+                              ? 'border-[var(--success)]/40 bg-[var(--success)]/10 text-[var(--success)]'
+                              : 'border-[var(--border)] bg-[var(--bg-surface)] text-[var(--text-muted)]'
+                          }`}
+                        >
+                          {nativeAuthReady ? 'OpenAI Auth Ready' : 'OpenAI Auth Inactive'}
+                        </span>
+                        <span className="text-[10.5px] text-[var(--text-muted)] font-mono">
+                          {codexCatalog?.models.length ?? 0} catalog models · {mergedCodexCustomModels.length} custom
+                        </span>
+                      </div>
+                      {(codexHealth?.message || codexAgentProfile?.reason) && (
+                        <div className="text-[10.5px] text-[var(--text-secondary)]">
+                          {codexHealth?.message || codexAgentProfile?.reason}
+                        </div>
+                      )}
+                    </div>
+
+                    <div className="flex items-center gap-2">
+                      <label className="inline-flex items-center gap-1.5 text-[11px] text-[var(--text-secondary)] cursor-pointer">
+                        <input
+                          type="checkbox"
+                          data-testid="codex-enabled-checkbox"
+                          checked={codexEnabled}
+                          onChange={(e) => setCodexEnabled(e.target.checked)}
+                        />
+                        Enabled
+                      </label>
+                      <button
+                        type="button"
+                        data-testid="codex-refresh-catalog-btn"
+                        disabled={codexRefreshing || !hostId}
+                        onClick={() => void handleRefreshCodexCatalog()}
+                        className="inline-flex items-center gap-1 rounded-lg border border-[var(--border)] bg-[var(--bg-surface)] px-2.5 py-1 text-[11px] hover:bg-[var(--bg-hover)] cursor-pointer"
+                      >
+                        <RefreshCw className={`w-3 h-3 ${codexRefreshing ? 'animate-spin' : ''}`} />
+                        Refresh Catalog
+                      </button>
+                    </div>
+                  </div>
+
+                  {/* Codex & OpenRouter Configuration Fields */}
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5 pt-2 border-t border-[var(--border)]">
+                    <div className="sm:col-span-2">
+                      <div className="flex items-center justify-between mb-1">
+                        <label className="text-[11px] font-medium text-[var(--text-secondary)]">
+                          OpenRouter API Key (write-only · kept in daemon memory / providers.json)
+                        </label>
+                        {hasStoredRedactedOrKey && (
+                          <div className="flex items-center gap-2">
+                            <span className="font-mono text-[10.5px] text-[var(--success)]">
+                              Stored (***)
+                            </span>
+                            <button
+                              type="button"
+                              data-testid="codex-clear-key-btn"
+                              disabled={codexSaving || providersLoading}
+                              onClick={() => void handleSaveCodexSettings(true)}
+                              className="text-[10.5px] text-[var(--danger)] hover:underline cursor-pointer"
+                            >
+                              Clear Stored Key
+                            </button>
+                          </div>
+                        )}
+                      </div>
+                      <input
+                        type="password"
+                        autoComplete="off"
+                        data-testid="codex-openrouter-key-input"
+                        value={codexApiKeyInput}
+                        onChange={(e) => setCodexApiKeyInput(e.target.value)}
+                        placeholder={
+                          hasStoredRedactedOrKey
+                            ? 'Stored in providers.json (*** — leave blank to preserve existing secret)'
+                            : openRouterReady
+                              ? 'Configured via daemon CLI/env (enter key to override)'
+                              : 'sk-or-v1-...'
+                        }
+                        className="w-full rounded-lg border border-[var(--border)] bg-[var(--bg-surface)] px-2.5 py-1.5 font-mono text-xs outline-none focus:border-[var(--accent)]"
+                      />
+                    </div>
+
+                    <div>
+                      <label className="block text-[11px] font-medium text-[var(--text-secondary)] mb-1">
+                        Codex CLI Binary Path (optional, supports ~/...)
+                      </label>
+                      <input
+                        type="text"
+                        data-testid="codex-command-input"
+                        value={codexCommandInput}
+                        onChange={(e) => setCodexCommandInput(e.target.value)}
+                        placeholder={codexAgentProfile?.command || '~/.local/bin/codex'}
+                        className="w-full rounded-lg border border-[var(--border)] bg-[var(--bg-surface)] px-2.5 py-1.5 font-mono text-xs outline-none focus:border-[var(--accent)]"
+                      />
+                    </div>
+
+                    <div>
+                      <label className="block text-[11px] font-medium text-[var(--text-secondary)] mb-1">
+                        Default Model Slug (optional)
+                      </label>
+                      <input
+                        type="text"
+                        list="codex-catalog-models-datalist"
+                        data-testid="codex-default-model-input"
+                        value={codexDefaultModelInput}
+                        onChange={(e) => setCodexDefaultModelInput(e.target.value)}
+                        placeholder={codexCatalog?.defaultModelId || 'google/gemini-3-flash-preview'}
+                        className="w-full rounded-lg border border-[var(--border)] bg-[var(--bg-surface)] px-2.5 py-1.5 font-mono text-xs outline-none focus:border-[var(--accent)]"
+                      />
+                      <datalist id="codex-catalog-models-datalist">
+                        {(codexCatalog?.models ?? []).slice(0, 120).map((m) => (
+                          <option key={m.modelId} value={m.modelId}>
+                            {m.name}
+                          </option>
+                        ))}
+                      </datalist>
+                    </div>
+                  </div>
+
+                  <div className="flex justify-end">
+                    <button
+                      type="button"
+                      data-testid="codex-save-settings-btn"
+                      disabled={codexSaving || providersLoading || !hostId}
+                      onClick={() => void handleSaveCodexSettings(false)}
+                      className="rounded-lg bg-[var(--accent)] px-3.5 py-1.5 font-semibold text-[var(--accent-fg)] disabled:opacity-40 cursor-pointer"
+                    >
+                      {codexSaving ? 'Saving...' : 'Save Codex Settings'}
+                    </button>
+                  </div>
+
+                  {/* Saved Custom OpenRouter Models */}
+                  <div
+                    data-testid="codex-custom-models-section"
+                    className="border-t border-[var(--border)] pt-3 space-y-2"
+                  >
+                    <div className="text-[11px] font-medium text-[var(--text-secondary)]">
+                      Saved Custom OpenRouter &amp; Codex Models ({mergedCodexCustomModels.length})
+                    </div>
+                    <div className="flex flex-wrap gap-2">
+                      <input
+                        type="text"
+                        data-testid="codex-custom-slug-input"
+                        value={newCustomSlug}
+                        onChange={(e) => setNewCustomSlug(e.target.value)}
+                        onKeyDown={(e) => {
+                          if (e.key === 'Enter') {
+                            e.preventDefault();
+                            void handleAddCodexCustomModel();
+                          }
+                        }}
+                        placeholder="Model slug (e.g. google/gemini-3-flash-preview or vendor/model:thinking)"
+                        className="flex-1 min-w-[220px] rounded-lg border border-[var(--border)] bg-[var(--bg-surface)] px-2.5 py-1.5 font-mono text-xs outline-none focus:border-[var(--accent)]"
+                      />
+                      <input
+                        type="text"
+                        data-testid="codex-custom-name-input"
+                        value={newCustomName}
+                        onChange={(e) => setNewCustomName(e.target.value)}
+                        placeholder="Display name (optional)"
+                        className="w-44 rounded-lg border border-[var(--border)] bg-[var(--bg-surface)] px-2.5 py-1.5 text-xs outline-none focus:border-[var(--accent)]"
+                      />
+                      <button
+                        type="button"
+                        data-testid="codex-add-custom-model-btn"
+                        disabled={!newCustomSlug.trim()}
+                        onClick={() => void handleAddCodexCustomModel()}
+                        className="inline-flex items-center gap-1 rounded-lg border border-[var(--accent)]/50 bg-[var(--accent-soft)] px-2.5 py-1.5 text-xs font-semibold text-[var(--accent)] disabled:opacity-40 cursor-pointer"
+                      >
+                        <Plus className="w-3.5 h-3.5" />
+                        Add Model
+                      </button>
+                    </div>
+                    {mergedCodexCustomModels.length > 0 && (
+                      <div className="space-y-1 pt-1">
+                        {mergedCodexCustomModels.map((cm) => (
+                          <div
+                            key={cm.slug}
+                            className="flex items-center justify-between gap-2 rounded-lg border border-[var(--border)] bg-[var(--bg-surface)] px-2.5 py-1.5"
+                          >
+                            <div className="min-w-0">
+                              <span className="font-mono text-[11px] text-[var(--text-primary)]">{cm.slug}</span>
+                              {cm.name && cm.name !== cm.slug && (
+                                <span className="ml-2 text-[11px] text-[var(--text-muted)]">({cm.name})</span>
+                              )}
+                            </div>
+                            <button
+                              type="button"
+                              onClick={() => void handleRemoveCodexCustomModel(cm.slug)}
+                              title="Remove custom model"
+                              className="p-0.5 text-[var(--text-muted)] hover:text-[var(--danger)] cursor-pointer"
+                            >
+                              <Trash2 className="w-3.5 h-3.5" />
+                            </button>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                </div>
+
+                {/* Other Built-in & Registered Providers */}
+                <div className="space-y-2">
+                  {(targetHost?.agents ?? [])
+                    .filter((ag) => ag.id !== 'codex')
+                    .map((ag) => {
+                      const hl = providerHealth[ag.id];
+                      const cfg = providerConfigs.find((c) => c.id === ag.id);
+                      return (
+                        <div
+                          key={ag.id}
+                          className="rounded-xl border border-[var(--border)] bg-[var(--bg-base)] p-3 flex items-center justify-between gap-3"
+                        >
+                          <div className="min-w-0">
+                            <div className="flex items-center gap-2 font-medium">
+                              {ag.available ? (
+                                <CheckCircle2 className="w-3.5 h-3.5 text-[var(--success)]" />
+                              ) : (
+                                <XCircle className="w-3.5 h-3.5 text-[var(--text-muted)]" />
+                              )}
+                              <span>{ag.name}</span>
+                              <span className="rounded bg-[var(--bg-elevated)] px-1.5 py-0.5 font-mono text-[10px] text-[var(--text-muted)]">
+                                {ag.driver || ag.id}
+                              </span>
+                              {ag.version && <span className="font-mono text-[10.5px] text-[var(--text-muted)]">{ag.version}</span>}
+                            </div>
+                            <div className="font-mono text-[10.5px] text-[var(--text-muted)] truncate mt-0.5">
+                              {ag.command || ag.reason}
+                            </div>
+                            {hl && (
+                              <div className="text-[10.5px] text-[var(--accent)] mt-0.5">
+                                Health: {hl.available ? 'OK' : 'Unavailable'} · {hl.latencyMs}ms{' '}
+                                {hl.message ? `· ${hl.message}` : ''}
+                              </div>
+                            )}
+                          </div>
+                          {cfg && !cfg.builtin && (
+                            <button
+                              type="button"
+                              onClick={async () => {
+                                await callHost(hostId, 'providers.remove', { id: cfg.id });
+                                await Promise.all([refreshHostInfo(hostId), refreshProviderConfigsOnly(hostId)]);
+                                pushToast({ text: `Removed provider ${cfg.name}`, level: 'info' });
+                              }}
+                              className="rounded p-1 text-[var(--text-muted)] hover:text-[var(--danger)] cursor-pointer"
+                            >
+                              <Trash2 className="w-3.5 h-3.5" />
+                            </button>
+                          )}
+                        </div>
+                      );
+                    })}
                 </div>
 
                 {/* Add Custom ACP Provider */}
@@ -987,11 +1563,12 @@ export const SettingsModal: React.FC = () => {
                   hosts.
                 </p>
                 <div className="rounded-xl border border-[var(--border)] bg-[var(--bg-base)] p-3 font-mono text-[11px] space-y-1">
-                  <div>Desktop Version: 0.4.0</div>
-                  <div>Protocol Version: v{activeHost?.info?.protocolVersion ?? 2}</div>
-                  <div>Active Daemon: {activeHost?.info?.version ?? 'not connected'}</div>
+                  <div>Desktop Version: {window.agentcDesktop?.version || '0.5.0'}</div>
+                  <div>Protocol Version: v{targetHost?.info?.protocolVersion ?? 2}</div>
+                  <div>Active Daemon: {targetHost?.info?.version ?? 'not connected'}</div>
+                  <div>OpenRouter Configured: {targetHost?.info?.openRouterConfigured ? 'yes' : 'no'}</div>
                   <div>
-                    Capabilities: {(activeHost?.info?.capabilities ?? []).join(', ') || '—'}
+                    Capabilities: {(targetHost?.info?.capabilities ?? []).join(', ') || '—'}
                   </div>
                 </div>
               </div>

@@ -36,6 +36,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.dp
+import io.github.sidd065.agentcompanion.core.ProviderModelsResult
 import io.github.sidd065.agentcompanion.core.SessionExtras
 import io.github.sidd065.agentcompanion.core.SessionSummary
 import io.github.sidd065.agentcompanion.net.HostConnection
@@ -73,7 +74,14 @@ private fun StatusRow(label: String, value: String, mono: Boolean = false, onCop
 /** /status: what this session is and how it's set up. */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun StatusSheet(s: SessionSummary?, extras: SessionExtras, agentVersion: String?, host: String, onDismiss: () -> Unit) {
+fun StatusSheet(
+    s: SessionSummary?,
+    extras: SessionExtras,
+    agentVersion: String?,
+    host: String,
+    onDismiss: () -> Unit,
+    codexCatalog: ProviderModelsResult? = null,
+) {
     val ctx = LocalContext.current
     AppSheet(onDismissRequest = onDismiss, sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)) {
         Column(Modifier.fillMaxWidth().verticalScroll(rememberScrollState()).padding(bottom = 24.dp)) {
@@ -82,16 +90,28 @@ fun StatusSheet(s: SessionSummary?, extras: SessionExtras, agentVersion: String?
                 Text("Loading…", Modifier.padding(20.dp))
                 return@Column
             }
-            val model = s.modelName?.takeIf { it.isNotBlank() } ?: extras.models?.availableModels?.firstOrNull { it.modelId == s.model }?.name ?: s.model
-            val mode = extras.modes?.availableModes?.firstOrNull { it.id == s.mode }?.name ?: s.mode
+            val model = s.modelName?.takeIf { it.isNotBlank() }
+                ?: extras.models?.availableModels?.firstOrNull { it.modelId == s.model }?.name?.takeIf { it.isNotBlank() }
+                ?: (if (s.isCodex) codexCatalog?.models?.firstOrNull { it.modelId == s.model }?.name?.takeIf { it.isNotBlank() } else null)
+                ?: s.model?.takeIf { it.isNotBlank() }
+                ?: (if (s.isCodex) codexCatalog?.defaultModelId?.takeIf { it.isNotBlank() } else null)
+            val mode = extras.modes?.availableModes?.firstOrNull { it.id == s.mode }?.name?.takeIf { it.isNotBlank() }
+                ?: (if (s.isCodex) codexCatalog?.availableModes?.firstOrNull { it.id == s.mode }?.name?.takeIf { it.isNotBlank() } else null)
+                ?: s.mode?.takeIf { it.isNotBlank() }
             StatusRow("Agent", listOfNotNull(s.agentLabel, agentVersion).joinToString(" "))
             StatusRow("Computer", host)
             StatusRow("Folder", s.cwd, mono = true)
             if (extras.addDirs.isNotEmpty()) StatusRow("Also", extras.addDirs.joinToString("\n"), mono = true)
             StatusRow("Model", model ?: "default")
-            s.thought?.takeIf { it.isNotBlank() }?.let { StatusRow(if (s.isClaude) "Effort" else "Thinking", it) }
+            s.thought?.takeIf { it.isNotBlank() }?.let { StatusRow(if (s.isClaude || s.isCodex) "Effort" else "Thinking", it) }
             StatusRow("Mode", mode ?: "default")
-            StatusRow("Permissions", if (s.skipPermissions) "skipped (--dangerously-skip-permissions)" else "asks before risky actions")
+            StatusRow(
+                "Permissions",
+                if (s.skipPermissions) {
+                    if (s.isCodex) "skipped (--dangerously-bypass-approvals-and-sandbox)"
+                    else "skipped (--dangerously-skip-permissions)"
+                } else "asks before risky actions",
+            )
             HorizontalDivider(Modifier.padding(vertical = 6.dp))
             StatusRow("State", listOfNotNull(s.state.ifBlank { null }, s.status, if (s.live) "process ${s.pid}" else "not running").joinToString(" · "))
             StatusRow("Turns", s.turns.toString())
@@ -110,9 +130,9 @@ fun StatusSheet(s: SessionSummary?, extras: SessionExtras, agentVersion: String?
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun PermissionRulesSheet(conn: HostConnection, sessionId: String, onDismiss: () -> Unit) {
-    var rules by remember { mutableStateOf<List<JsonObject>?>(null) }
-    var err by remember { mutableStateOf<String?>(null) }
-    LaunchedEffect(sessionId) {
+    var rules by remember(conn.config.id, sessionId) { mutableStateOf<List<JsonObject>?>(null) }
+    var err by remember(conn.config.id, sessionId) { mutableStateOf<String?>(null) }
+    LaunchedEffect(conn.config.id, sessionId) {
         runCatching {
             val r = conn.rpc.call("session.control", params { put("id", sessionId); put("subtype", "list_permission_rules") }).jsonObject
             (r["state"]?.jsonObject?.get("rules") as? JsonArray)?.map { it.jsonObject }.orEmpty()
@@ -179,8 +199,8 @@ fun MemorySheet(conn: HostConnection, cwd: String, home: String?, onOpen: (Strin
             home?.let { "$it/.claude/CLAUDE.md" to "Your memory for every project" },
         )
     }
-    var exists by remember { mutableStateOf<Map<String, Boolean>>(emptyMap()) }
-    LaunchedEffect(files) {
+    var exists by remember(conn.config.id, files) { mutableStateOf<Map<String, Boolean>>(emptyMap()) }
+    LaunchedEffect(conn.config.id, files) {
         exists = files.associate { (p, _) -> p to runCatching { conn.rpc.call("fs.stat", params { put("path", p) }) }.isSuccess }
     }
     AppSheet(onDismissRequest = onDismiss) {

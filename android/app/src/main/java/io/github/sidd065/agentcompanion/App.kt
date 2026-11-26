@@ -82,25 +82,26 @@ class AppGraph(val app: Application) {
 
     /** Session currently on screen (suppresses its notifications). */
     val visibleSession = MutableStateFlow<String?>(null)
-    private val shown = ArrayList<Triple<Any, String, Set<String>?>>()
+    private data class ShownSession(val token: Any, val hostId: String?, val sessionId: String, val only: Set<String>?)
+    private val shown = ArrayList<ShownSession>()
 
     /**
-     * Marks [sessionId] as on screen (no notifications for it) until the
+     * Marks [sessionId] on [hostId] as on screen (no notifications for it) until the
      * returned function is called. Marks stack, so a screen opened on top
      * of the chat (side questions) and the chat being disposed after it
      * don't clear each other.
      */
-    fun showSession(sessionId: String, only: Set<String>? = null): () -> Unit {
+    fun showSession(sessionId: String, only: Set<String>? = null, hostId: String? = null): () -> Unit {
         val token = Any()
         synchronized(shown) {
-            shown.add(Triple(token, sessionId, only))
+            shown.add(ShownSession(token, hostId, sessionId, only))
             visibleSession.value = sessionId
         }
         notifier.flushHeldBack(leaving = false)
         return {
             synchronized(shown) {
-                shown.removeAll { it.first === token }
-                visibleSession.value = shown.lastOrNull()?.second
+                shown.removeAll { it.token === token }
+                visibleSession.value = shown.lastOrNull()?.sessionId
             }
             notifier.flushHeldBack(leaving = false)
         }
@@ -108,12 +109,13 @@ class AppGraph(val app: Application) {
 
     /**
      * Whether the screen on top already shows notifications of [kind] for
-     * [sessionId]. The side questions screen covers only its answers: a
+     * [sessionId] on [hostId]. The side questions screen covers only its answers: a
      * permission request still notifies there.
      */
-    fun covers(sessionId: String, kind: String): Boolean = synchronized(shown) {
+    fun covers(sessionId: String, kind: String, hostId: String? = null): Boolean = synchronized(shown) {
         val top = shown.lastOrNull() ?: return false
-        top.second == sessionId && (top.third == null || kind in top.third!!)
+        val hostMatches = hostId == null || top.hostId == null || top.hostId == hostId
+        hostMatches && top.sessionId == sessionId && (top.only == null || kind in top.only)
     }
     val foreground = MutableStateFlow(false)
     val notifier = Notifier(app)

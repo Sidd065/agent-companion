@@ -77,13 +77,16 @@ export const Sidebar: React.FC = () => {
   const [selectedProjectFilter, setSelectedProjectFilter] = useState<string>('all');
   const [workingShelfOpen, setWorkingShelfOpen] = useState(true);
   const [settledOpen, setSettledOpen] = useState(false);
+  const [collapsedProjectGroups, setCollapsedProjectGroups] = useState<Record<string, boolean>>({});
 
   const filteredSessions = useMemo(() => {
     const q = query.trim().toLowerCase();
     return allSessions.filter((s) => {
       if (s.archived) return false;
       if (selectedHostFilter !== 'all' && s.hostId !== selectedHostFilter) return false;
-      if (selectedProjectFilter !== 'all' && s.projectId !== selectedProjectFilter) return false;
+      if (selectedProjectFilter !== 'all' && `${s.hostId}:${s.projectId || ''}` !== selectedProjectFilter && s.projectId !== selectedProjectFilter) {
+        return false;
+      }
       if (q) {
         const hay = `${s.title} ${s.cwd} ${s.branch || ''} ${s.agent} ${s.hostName}`.toLowerCase();
         if (!hay.includes(q)) return false;
@@ -116,6 +119,21 @@ export const Sidebar: React.FC = () => {
     }
     return { pinned: pinnedList, working: workingList, active: activeList, settled: settledList };
   }, [filteredSessions, settings.showWorkingShelf]);
+
+  const groupedActive = useMemo(() => {
+    if (!settings.groupByProject) return null;
+    const groups = new Map<string, { key: string; label: string; rows: RowSession[] }>();
+    for (const s of active) {
+      const proj = allProjects.find((p) => p.hostId === s.hostId && p.id === s.projectId);
+      const baseLabel = proj?.name || s.cwd.split('/').filter(Boolean).pop() || 'Other';
+      const label = hostList.length > 1 ? `${baseLabel} · ${s.hostName}` : baseLabel;
+      const key = `${s.hostId}:${proj?.id || baseLabel}`;
+      const cur = groups.get(key) ?? { key, label, rows: [] };
+      cur.rows.push(s);
+      groups.set(key, cur);
+    }
+    return Array.from(groups.values());
+  }, [settings.groupByProject, active, allProjects, hostList.length]);
 
   const handleSettle = async (s: RowSession, next: boolean) => {
     try {
@@ -273,6 +291,11 @@ export const Sidebar: React.FC = () => {
     );
   };
 
+  const selectedProjEntry =
+    selectedProjectFilter !== 'all'
+      ? allProjects.find((p) => `${p.hostId}:${p.id}` === selectedProjectFilter || p.id === selectedProjectFilter)
+      : undefined;
+
   return (
     <aside
       data-testid="sidebar"
@@ -286,8 +309,9 @@ export const Sidebar: React.FC = () => {
             data-testid="new-thread-btn"
             onClick={() =>
               openDraft({
-                hostId: selectedHostFilter !== 'all' ? selectedHostFilter : activeHostId,
-                projectId: selectedProjectFilter !== 'all' ? selectedProjectFilter : undefined,
+                hostId: selectedProjEntry?.hostId || (selectedHostFilter !== 'all' ? selectedHostFilter : activeHostId),
+                projectId: selectedProjEntry?.id,
+                cwd: selectedProjEntry?.path,
               })
             }
             className="flex-1 flex items-center justify-center gap-1.5 py-1.5 px-2.5 rounded-lg bg-[var(--accent)] text-[var(--accent-fg)] font-medium text-xs hover:opacity-90 cursor-pointer"
@@ -325,7 +349,10 @@ export const Sidebar: React.FC = () => {
             {hostList.length > 1 && (
               <button
                 type="button"
-                onClick={() => setSelectedHostFilter('all')}
+                onClick={() => {
+                  setSelectedHostFilter('all');
+                  setSelectedProjectFilter('all');
+                }}
                 className={`shrink-0 px-2 py-0.5 rounded text-[11px] cursor-pointer ${
                   selectedHostFilter === 'all'
                     ? 'bg-[var(--accent-soft)] text-[var(--accent)] font-medium'
@@ -340,7 +367,11 @@ export const Sidebar: React.FC = () => {
                 key={h.creds.id}
                 type="button"
                 data-testid={`host-chip-${h.creds.id}`}
-                onClick={() => { setSelectedHostFilter(selectedHostFilter === h.creds.id ? 'all' : h.creds.id); setActiveHostId(h.creds.id); }}
+                onClick={() => {
+                  setSelectedHostFilter(selectedHostFilter === h.creds.id ? 'all' : h.creds.id);
+                  setSelectedProjectFilter('all');
+                  setActiveHostId(h.creds.id);
+                }}
                 className={`shrink-0 flex items-center gap-1 px-2 py-0.5 rounded text-[11px] cursor-pointer ${
                   selectedHostFilter === h.creds.id
                     ? 'bg-[var(--accent-soft)] text-[var(--accent)] font-medium'
@@ -390,19 +421,30 @@ export const Sidebar: React.FC = () => {
             )}
           </div>
           {allProjects.map((p) => {
-            const active = selectedProjectFilter === p.id;
+            const filterKey = `${p.hostId}:${p.id}`;
+            const active = selectedProjectFilter === filterKey || selectedProjectFilter === p.id;
             return (
               <div
-                key={`${p.hostId}:${p.id}`}
+                key={filterKey}
                 data-testid={`project-item-${p.name}`}
-                onClick={() => setSelectedProjectFilter(active ? 'all' : p.id)}
-                className={`group flex items-center justify-between px-2 py-1 rounded-md text-xs cursor-pointer ${
+                onClick={() => {
+                  setSelectedProjectFilter(active ? 'all' : filterKey);
+                  if (!active && p.hostId !== activeHostId) {
+                    setActiveHostId(p.hostId);
+                  }
+                }}
+                className={`group flex items-center justify-between gap-1 px-2 py-1 rounded-md text-xs cursor-pointer ${
                   active ? 'bg-[var(--accent-soft)] text-[var(--accent)] font-medium' : 'text-[var(--text-secondary)] hover:bg-[var(--bg-hover)]'
                 }`}
               >
-                <div className="flex items-center gap-1.5 truncate">
+                <div className="flex items-center gap-1.5 min-w-0 flex-1">
                   <FolderGit2 className="w-3.5 h-3.5 shrink-0 opacity-75" />
                   <span className="truncate">{p.name}</span>
+                  {hostList.length > 1 && (
+                    <span className="shrink-0 rounded bg-[var(--bg-base)] px-1 py-0.2 text-[9.5px] text-[var(--text-muted)]">
+                      {p.hostName}
+                    </span>
+                  )}
                 </div>
                 <button
                   type="button"
@@ -411,7 +453,7 @@ export const Sidebar: React.FC = () => {
                     e.stopPropagation();
                     openDraft({ hostId: p.hostId, projectId: p.id, cwd: p.path });
                   }}
-                  className="opacity-0 group-hover:opacity-100 p-0.5 rounded hover:bg-[var(--bg-elevated)] cursor-pointer"
+                  className="opacity-0 group-hover:opacity-100 p-0.5 rounded hover:bg-[var(--bg-elevated)] cursor-pointer shrink-0"
                 >
                   <Plus className="w-3 h-3" />
                 </button>
@@ -470,6 +512,33 @@ export const Sidebar: React.FC = () => {
               </div>
               {active.length === 0 ? (
                 <div className="px-4 py-3 text-xs text-[var(--text-muted)]">No active threads</div>
+              ) : groupedActive ? (
+                <div className="space-y-1.5">
+                  {groupedActive.map((grp) => {
+                    const isCollapsed = Boolean(collapsedProjectGroups[grp.key]);
+                    return (
+                      <div key={grp.key}>
+                        <button
+                          type="button"
+                          onClick={() =>
+                            setCollapsedProjectGroups((prev) => ({ ...prev, [grp.key]: !isCollapsed }))
+                          }
+                          className="w-full flex items-center gap-1 px-3 py-0.5 text-[10.5px] font-medium text-[var(--text-secondary)] hover:text-[var(--text-primary)] cursor-pointer"
+                        >
+                          {isCollapsed ? (
+                            <ChevronRight className="w-3 h-3 shrink-0" />
+                          ) : (
+                            <ChevronDown className="w-3 h-3 shrink-0" />
+                          )}
+                          <FolderGit2 className="w-3 h-3 shrink-0 text-[var(--accent)]" />
+                          <span className="truncate">{grp.label}</span>
+                          <span className="text-[10px] text-[var(--text-muted)]">({grp.rows.length})</span>
+                        </button>
+                        {!isCollapsed && grp.rows.map(renderRow)}
+                      </div>
+                    );
+                  })}
+                </div>
               ) : (
                 active.map(renderRow)
               )}
@@ -497,7 +566,7 @@ export const Sidebar: React.FC = () => {
       <div className="px-2.5 py-2 border-t border-[var(--border)] flex items-center justify-between text-xs text-[var(--text-secondary)]">
         <button
           type="button"
-          onClick={() => openRightTab({ kind: 'git', title: 'Source Control' })}
+          onClick={() => openRightTab({ id: 'git', kind: 'git', title: 'Source Control' })}
           className="flex items-center gap-1.5 px-2 py-1 rounded hover:bg-[var(--bg-hover)] cursor-pointer"
           title="Source Control"
         >
@@ -506,7 +575,8 @@ export const Sidebar: React.FC = () => {
         </button>
         <button
           type="button"
-          onClick={() => openSettingsTab('diagnostics')}
+          data-testid="sidebar-health-btn"
+          onClick={() => openSettingsTab('health')}
           className="flex items-center gap-1.5 px-2 py-1 rounded hover:bg-[var(--bg-hover)] cursor-pointer"
           title="Host Health & Diagnostics"
         >

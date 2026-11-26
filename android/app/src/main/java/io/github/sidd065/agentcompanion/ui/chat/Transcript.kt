@@ -83,6 +83,7 @@ import coil3.compose.AsyncImage
 import io.github.sidd065.agentcompanion.core.AppJson
 import io.github.sidd065.agentcompanion.core.Item
 import io.github.sidd065.agentcompanion.core.Perm
+import io.github.sidd065.agentcompanion.core.PermOption
 import io.github.sidd065.agentcompanion.core.Tool
 import io.github.sidd065.agentcompanion.net.HostConnection
 import io.github.sidd065.agentcompanion.net.decode
@@ -132,6 +133,7 @@ fun Tool.commandOutput(): Pair<Int?, String> {
         c.obj()?.get("content").str("text")
     } ?: ""
     val exit = output.obj()?.get("exit_code")?.let { (it as? JsonPrimitive)?.intOrNull }
+        ?: output.obj()?.get("exitCode")?.let { (it as? JsonPrimitive)?.intOrNull }
         ?: Regex("Command exited with code (-?\\d+)").find(raw)?.groupValues?.get(1)?.toIntOrNull()
     val body = raw.substringAfter("Command output:\n", raw).replace("\r\n", "\n").trimEnd()
     return exit to body
@@ -239,7 +241,10 @@ fun toolTitle(t: Tool): String {
         t.name?.startsWith("mcp__") == true -> title.substringAfter(" · ").substringAfter(" ", "").ifBlank { "" }
         t.name == "ExitPlanMode" -> t.input.str("plan")?.lineSequence()?.firstOrNull { it.isNotBlank() }?.trim()?.trimStart('#', ' ') ?: title
         t.kind == "execute" -> t.command() ?: title
-        (t.kind == "edit" || t.kind == "read") && t.path() != null -> baseName(t.path()!!)
+        (t.kind == "edit" || t.kind == "read") && t.path() != null -> {
+            val extra = (t.diffs().size - 1).coerceAtLeast(0)
+            baseName(t.path()!!) + if (t.kind == "edit" && extra > 0) " (+$extra more)" else ""
+        }
         title.startsWith("File ") -> title.removePrefix("File ")
         title.startsWith("Run ") -> title.removePrefix("Run ")
         else -> title
@@ -306,7 +311,7 @@ class TranscriptActions(
     val onApprovePlan: (switchMode: Boolean) -> Unit,
     /** Opens the live log of a running shell command (by its command line). */
     val onLiveOutput: ((String) -> Unit)? = null,
-    /** The session's agent (agy|claude): wording and answer formats differ. */
+    /** The session's agent (agy|claude|codex): wording and answer formats differ. */
     val agent: String = "agy",
     /** The tool call a permission request is about (for its diff). */
     val toolFor: (String) -> io.github.sidd065.agentcompanion.core.Tool? = { null },
@@ -317,7 +322,21 @@ class TranscriptActions(
 ) {
     val label: String get() = io.github.sidd065.agentcompanion.core.agentLabel(agent)
     val isClaude: Boolean get() = agent == "claude"
+    val isCodex: Boolean get() = agent == "codex"
 }
+
+internal fun permOptionLabel(o: PermOption, isClaude: Boolean, isCodex: Boolean): String =
+    if ((isClaude || isCodex) && o.name.isNotBlank()) {
+        o.name
+    } else {
+        when (o.kind) {
+            "allow_once" -> "Allow once"
+            "allow_always" -> "Always allow"
+            "reject_once" -> "Deny"
+            "reject_always" -> "Always deny"
+            else -> o.name
+        }
+    }
 
 @Composable
 fun TranscriptRow(row: Row, actions: TranscriptActions, isLast: Boolean, activeId: String?, wrap: Boolean, cwd: String) {
@@ -767,13 +786,7 @@ fun PermCard(item: Item, actions: TranscriptActions) {
                                 busy = false
                             }
                         }
-                        val label = if (actions.isClaude && o.name.isNotBlank()) o.name else when (o.kind) {
-                            "allow_once" -> "Allow once"
-                            "allow_always" -> "Always allow"
-                            "reject_once" -> "Deny"
-                            "reject_always" -> "Always deny"
-                            else -> o.name
-                        }
+                        val label = permOptionLabel(o, actions.isClaude, actions.isCodex)
                         when {
                             o.kind == "allow_always" -> androidx.compose.material3.FilledTonalButton(onClick = onClick, enabled = !busy) { Text(label) }
                             allow -> Button(onClick = onClick, enabled = !busy) { Text(label) }

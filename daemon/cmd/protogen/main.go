@@ -35,9 +35,10 @@ type namedType struct {
 }
 
 var exportedTypes = []namedType{
-	// Secure / Auth
+	// Secure / Auth / Daemon
 	{"WireHello", reflect.TypeOf(secure.Hello{})},
 	{"Device", reflect.TypeOf(secure.Device{})},
+	{"DaemonInfo", reflect.TypeOf(server.DaemonInfo{})},
 
 	// ACP primitives
 	{"ContentBlock", reflect.TypeOf(acp.ContentBlock{})},
@@ -100,8 +101,13 @@ var exportedTypes = []namedType{
 	{"GitHubIssue", reflect.TypeOf(github.Issue{})},
 
 	// Providers, Schedules, Usage, Terminals, Files
+	{"CustomModel", reflect.TypeOf(providers.CustomModel{})},
 	{"ProviderConfig", reflect.TypeOf(providers.ProviderConfig{})},
 	{"ProviderHealth", reflect.TypeOf(providers.HealthResult{})},
+	{"ProviderModelInfo", reflect.TypeOf(providers.ProviderModelInfo{})},
+	{"ProviderModeInfo", reflect.TypeOf(providers.ProviderModeInfo{})},
+	{"ProviderModelsParams", reflect.TypeOf(providers.ProviderModelsParams{})},
+	{"ProviderModelsResult", reflect.TypeOf(providers.ProviderModelsResult{})},
 	{"ScheduledTask", reflect.TypeOf(scheduler.Task{})},
 	{"ScheduleRunRecord", reflect.TypeOf(scheduler.RunRecord{})},
 	{"UsageBucket", reflect.TypeOf(usage.Bucket{})},

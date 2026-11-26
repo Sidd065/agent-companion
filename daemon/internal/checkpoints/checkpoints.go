@@ -50,8 +50,33 @@ type TurnCheckpoint struct {
 
 const (
 	maxUntrackedFileBytes = 10 << 20 // 10 MiB
-	captureTimeout        = 8 * time.Second
+	captureTimeout        = 20 * time.Second
+	revertTimeout         = 45 * time.Second
 )
+
+func gitErrMsg(stderr string, err error) string {
+	if s := strings.TrimSpace(stderr); s != "" {
+		return s
+	}
+	if err != nil {
+		return err.Error()
+	}
+	return "unknown git error"
+}
+
+func makeTempIndexDir(root, prefix string) (string, error) {
+	gitPath := filepath.Join(root, ".git")
+	if st, err := os.Stat(gitPath); err == nil && st.IsDir() {
+		return os.MkdirTemp(gitPath, "."+prefix)
+	}
+	if cacheDir, err := os.UserCacheDir(); err == nil && cacheDir != "" && !strings.HasPrefix(filepath.Clean(cacheDir), "/tmp") {
+		base := filepath.Join(cacheDir, "agentc", "tmp")
+		if os.MkdirAll(base, 0o700) == nil {
+			return os.MkdirTemp(base, prefix)
+		}
+	}
+	return os.MkdirTemp("", prefix)
+}
 
 var skipCacheDirs = map[string]bool{
 	"node_modules": true, ".next": true, "target": true, "dist": true,
@@ -97,7 +122,7 @@ func Capture(ctx context.Context, dir, sessionID, label string) (ref string, sha
 	}
 	root := strings.TrimSpace(rootOut)
 
-	tmpDir, err := os.MkdirTemp("", "agentc-cp-*")
+	tmpDir, err := makeTempIndexDir(root, "agentc-cp-*")
 	if err != nil {
 		return "", "", 0, err
 	}
@@ -113,14 +138,14 @@ func Capture(ctx context.Context, dir, sessionID, label string) (ref string, sha
 		hasHead = true
 		headSHA = strings.TrimSpace(out)
 		if _, stderr, rerr := runGitEnv(cctx, root, env, "read-tree", "HEAD"); rerr != nil {
-			return "", "", 0, fmt.Errorf("read-tree HEAD: %s", strings.TrimSpace(stderr))
+			return "", "", 0, fmt.Errorf("read-tree HEAD: %s", gitErrMsg(stderr, rerr))
 		}
 	}
 
 	// Stage all tracked modifications and deletions safely into the temp index.
 	if hasHead {
 		if _, stderr, uerr := runGitEnv(cctx, root, env, "add", "-u"); uerr != nil {
-			return "", "", 0, fmt.Errorf("add -u: %s", strings.TrimSpace(stderr))
+			return "", "", 0, fmt.Errorf("add -u: %s", gitErrMsg(stderr, uerr))
 		}
 	}
 
@@ -158,7 +183,7 @@ func Capture(ctx context.Context, dir, sessionID, label string) (ref string, sha
 
 	treeOut, stderr, err := runGitEnv(cctx, root, env, "write-tree")
 	if err != nil {
-		return "", "", skipped, fmt.Errorf("write-tree: %s", strings.TrimSpace(stderr))
+		return "", "", skipped, fmt.Errorf("write-tree: %s", gitErrMsg(stderr, err))
 	}
 	treeSHA := strings.TrimSpace(treeOut)
 
@@ -172,12 +197,12 @@ func Capture(ctx context.Context, dir, sessionID, label string) (ref string, sha
 	)
 	commitOut, stderr, err := runGitEnv(cctx, root, commitEnv, commitArgs...)
 	if err != nil {
-		return "", "", skipped, fmt.Errorf("commit-tree: %s", strings.TrimSpace(stderr))
+		return "", "", skipped, fmt.Errorf("commit-tree: %s", gitErrMsg(stderr, err))
 	}
 	sha = strings.TrimSpace(commitOut)
 	ref = refName(sessionID, label)
 	if _, stderr, err := runGitEnv(cctx, root, nil, "update-ref", ref, sha); err != nil {
-		return "", "", skipped, fmt.Errorf("update-ref: %s", strings.TrimSpace(stderr))
+		return "", "", skipped, fmt.Errorf("update-ref: %s", gitErrMsg(stderr, err))
 	}
 	return ref, sha, skipped, nil
 }
@@ -263,7 +288,7 @@ func Diff(ctx context.Context, dir, scope, fromRef, toRef string) (gitops.DiffRe
 	defer cancel()
 	raw, stderr, err := runGitEnv(cctx, dir, nil, "diff", "--patch", "--no-color", fromRef, toRef)
 	if err != nil {
-		return res, fmt.Errorf("checkpoint diff: %s", strings.TrimSpace(stderr))
+		return res, fmt.Errorf("checkpoint diff: %s", gitErrMsg(stderr, err))
 	}
 	const maxRaw = 2 << 20
 	if len(raw) > maxRaw {
@@ -281,22 +306,19 @@ func Diff(ctx context.Context, dir, scope, fromRef, toRef string) (gitops.DiffRe
 
 // Revert restores the working tree to targetRef after first saving a safety backup snapshot.
 func Revert(ctx context.Context, dir, sessionID, targetRef string) (backupRef string, err error) {
-	cctx, cancel := context.WithTimeout(ctx, 20*time.Second)
+	cctx, cancel := context.WithTimeout(ctx, revertTimeout)
 	defer cancel()
 	rootOut, stderr, err := runGitEnv(cctx, dir, nil, "rev-parse", "--show-toplevel")
 	if err != nil {
-		return "", fmt.Errorf("not a git repository: %s", strings.TrimSpace(stderr))
+		return "", fmt.Errorf("not a git repository: %s", gitErrMsg(stderr, err))
 	}
 	root := strings.TrimSpace(rootOut)
 
-	// Save a safety snapshot before touching any file!
-	backupRef, _, _, _ = Capture(cctx, root, sessionID, fmt.Sprintf("pre-revert-%d", time.Now().Unix()))
-
-	// Compute files present now vs targetRef so files created AFTER targetRef are cleanly removed.
-	curRef, _, _, err := Capture(cctx, root, sessionID, fmt.Sprintf("revert-cur-%d", time.Now().UnixNano()))
-	if err == nil && curRef != "" {
-		defer DeleteRef(context.Background(), root, curRef)
-		nameStatus, _, _ := runGitEnv(cctx, root, nil, "diff", "--name-status", targetRef, curRef)
+	// Save a safety snapshot before touching any file and reuse it to find files added after targetRef!
+	var capErr error
+	backupRef, _, _, capErr = Capture(cctx, root, sessionID, fmt.Sprintf("pre-revert-%d", time.Now().UnixNano()))
+	if capErr == nil && backupRef != "" {
+		nameStatus, _, _ := runGitEnv(cctx, root, nil, "diff", "--name-status", targetRef, backupRef)
 		for _, line := range strings.Split(nameStatus, "\n") {
 			parts := strings.Split(line, "\t")
 			if len(parts) >= 2 && strings.HasPrefix(parts[0], "A") {
@@ -307,17 +329,17 @@ func Revert(ctx context.Context, dir, sessionID, targetRef string) (backupRef st
 	}
 
 	// Restore all files from targetRef tree without altering HEAD or user's index.
-	tmpDir, err := os.MkdirTemp("", "agentc-rev-*")
+	tmpDir, err := makeTempIndexDir(root, "agentc-rev-*")
 	if err != nil {
 		return backupRef, err
 	}
 	defer os.RemoveAll(tmpDir)
 	env := []string{"GIT_INDEX_FILE=" + filepath.Join(tmpDir, "index")}
 	if _, stderr, err := runGitEnv(cctx, root, env, "read-tree", targetRef); err != nil {
-		return backupRef, fmt.Errorf("read-tree target: %s", strings.TrimSpace(stderr))
+		return backupRef, fmt.Errorf("read-tree target: %s", gitErrMsg(stderr, err))
 	}
 	if _, stderr, err := runGitEnv(cctx, root, env, "checkout-index", "-a", "-f"); err != nil {
-		return backupRef, fmt.Errorf("checkout-index: %s", strings.TrimSpace(stderr))
+		return backupRef, fmt.Errorf("checkout-index: %s", gitErrMsg(stderr, err))
 	}
 	return backupRef, nil
 }

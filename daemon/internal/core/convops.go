@@ -117,6 +117,9 @@ func (m *Manager) Fork(ctx context.Context, id, itemID string) (*Session, string
 	if src.isClaudeSafe() {
 		return m.forkClaude(ctx, src, itemID)
 	}
+	if src.isCodexSafe() || !src.isAgySafe() {
+		return m.forkCodex(ctx, src, itemID)
+	}
 	ls, err := m.LS(ctx, id)
 	if err != nil {
 		return nil, "", err
@@ -177,6 +180,9 @@ func (m *Manager) RevertPreview(ctx context.Context, id, itemID string) (json.Ra
 	if s.isClaudeSafe() {
 		return m.revertPreviewClaude(ctx, s, itemID)
 	}
+	if s.isCodexSafe() || !s.isAgySafe() {
+		return m.revertPreviewCheckpoints(ctx, s, itemID)
+	}
 	ls, err := m.LS(ctx, id)
 	if err != nil {
 		return nil, 0, err
@@ -208,6 +214,9 @@ func (m *Manager) Rewind(ctx context.Context, id, itemID string, conversationOnl
 	}
 	if s.isClaudeSafe() {
 		return m.rewindClaude(ctx, s, itemID, conversationOnly)
+	}
+	if s.isCodexSafe() || !s.isAgySafe() {
+		return m.rewindCodex(ctx, s, itemID, conversationOnly)
 	}
 	if err := s.ensureLive(ctx, ""); err != nil {
 		return "", err
@@ -255,6 +264,15 @@ func (s *Session) reloadLive(ctx context.Context) error {
 		return errors.New("not running")
 	}
 	id, cwd := s.meta.ID, s.meta.Cwd
+	isCodex := s.isCodex()
+	remoteID := id
+	if isCodex {
+		remoteID = s.codexThreadIDLocked()
+		if remoteID == "" {
+			s.mu.Unlock()
+			return nil
+		}
+	}
 	var keep []*Item
 	for _, it := range s.tr.Items {
 		if it.Kind == "user" && it.State == "queued" {
@@ -266,12 +284,15 @@ func (s *Session) reloadLive(ctx context.Context) error {
 	var setup acp.SessionSetup
 	cctx, cancel := context.WithTimeout(ctx, 3*time.Minute)
 	defer cancel()
-	err := p.ACP().Call(cctx, "session/load", map[string]any{"sessionId": id, "cwd": cwd, "mcpServers": []any{}}, &setup)
+	err := p.ACP().Call(cctx, "session/load", map[string]any{"sessionId": remoteID, "cwd": cwd, "mcpServers": []any{}}, &setup)
 	s.mu.Lock()
 	for _, it := range keep {
 		s.queueOpsLocked(s.tr.add(it))
 	}
 	if err == nil {
+		if isCodex && setup.SessionID != "" {
+			s.meta.CodexThreadID = setup.SessionID
+		}
 		if setup.Models != nil {
 			s.meta.Models = setup.Models
 		}
@@ -335,6 +356,9 @@ func (m *Manager) Rename(ctx context.Context, id, title string) error {
 			return err
 		}
 		m.invalidateHistory()
+	} else if m.isCodexID(id) {
+		_ = m.renameCodex(ctx, id, title)
+		m.invalidateHistory()
 	} else if m.isAgyID(id) {
 		if err := m.annotate(ctx, id, map[string]any{"title": title}); err != nil {
 			return err
@@ -365,6 +389,9 @@ func (m *Manager) SetFlag(ctx context.Context, id, flag string, on bool) error {
 			return err
 		}
 		m.invalidateHistory()
+	} else if m.isCodexID(id) {
+		_ = m.setFlagCodex(ctx, id, flag, on)
+		m.invalidateHistory()
 	} else if m.isAgyID(id) {
 		if err := m.annotate(ctx, id, ann); err != nil {
 			return err
@@ -393,10 +420,14 @@ func (m *Manager) Delete(ctx context.Context, id string) error {
 	if m.isClaudeID(id) {
 		return m.deleteClaude(id)
 	}
+	if m.isCodexID(id) {
+		return m.deleteCodex(ctx, id)
+	}
 	wasAgy := m.isAgyID(id)
 	var cwd string
 	if s := m.Get(id); s != nil {
 		s.Hibernate()
+		s.stopTimers()
 		s.mu.Lock()
 		cwd = s.meta.Cwd
 		s.removed = true

@@ -76,23 +76,27 @@ fun ClaudeManageBlocks(conn: HostConnection, reload: Int, onReload: () -> Unit) 
     val snack = LocalSnack.current
     val scope = rememberCoroutineScope()
     val ex = LocalExtra.current
-    var info by remember { mutableStateOf<JsonObject?>(null) }
-    var usage by remember { mutableStateOf<JsonObject?>(null) }
-    var catalog by remember { mutableStateOf<JsonObject?>(null) }
-    var settings by remember { mutableStateOf<JsonObject?>(null) }
-    var mcp by remember { mutableStateOf<List<JsonObject>?>(null) }
-    var mcpErr by remember { mutableStateOf<String?>(null) }
-    var showMcp by remember { mutableStateOf(false) }
-    var confirmUpdate by remember { mutableStateOf(false) }
-    var busy by remember { mutableStateOf<String?>(null) }
-    LaunchedEffect(conn, reload) {
+    var info by remember(conn.config.id) { mutableStateOf<JsonObject?>(null) }
+    var usage by remember(conn.config.id) { mutableStateOf<JsonObject?>(null) }
+    var catalog by remember(conn.config.id) { mutableStateOf<JsonObject?>(null) }
+    var settings by remember(conn.config.id) { mutableStateOf<JsonObject?>(null) }
+    var mcp by remember(conn.config.id) { mutableStateOf<List<JsonObject>?>(null) }
+    var mcpErr by remember(conn.config.id) { mutableStateOf<String?>(null) }
+    var showMcp by remember(conn.config.id) { mutableStateOf(false) }
+    var confirmUpdate by remember(conn.config.id) { mutableStateOf(false) }
+    var busy by remember(conn.config.id) { mutableStateOf<String?>(null) }
+    LaunchedEffect(conn.config.id, reload) {
+        info = null
+        usage = null
+        catalog = null
+        settings = null
         runCatching { info = conn.rpc.call("claude.info").jsonObject }
         if (info?.get("available")?.let { (it as? JsonPrimitive)?.booleanOrNull } != true) return@LaunchedEffect
         runCatching { settings = conn.rpc.call("claude.settings.get").jsonObject }
         runCatching { catalog = conn.rpc.call("claude.catalog", timeoutMs = 120_000).jsonObject }
         runCatching { usage = conn.rpc.call("claude.usage", timeoutMs = 120_000).jsonObject }
     }
-    LaunchedEffect(showMcp, reload) {
+    LaunchedEffect(conn.config.id, showMcp, reload) {
         if (!showMcp) return@LaunchedEffect
         mcp = null; mcpErr = null
         runCatching { mcp = conn.rpc.call("claude.query", params { put("subtype", "mcp_status") }, timeoutMs = 120_000).ca("mcpServers") }
@@ -148,7 +152,7 @@ fun ClaudeManageBlocks(conn: HostConnection, reload: Int, onReload: () -> Unit) 
         usage.cs("error")?.let { Text("Usage: $it", style = MaterialTheme.typography.labelSmall, color = ex.muted) }
         Row(Modifier.horizontalScroll(rememberScrollState()).padding(top = 6.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             OutlinedButton(onClick = { confirmUpdate = true }, enabled = busy == null) { Text("Update Claude Code") }
-            i.cs("settingsPath")?.let { p -> OutlinedButton(onClick = { nav.navigate(Routes.file(p, edit = true)) }) { Text("Edit settings.json") } }
+            i.cs("settingsPath")?.let { p -> OutlinedButton(onClick = { nav.navigate(Routes.file(p, edit = true, host = conn.config.id)) }) { Text("Edit settings.json") } }
         }
     }
 

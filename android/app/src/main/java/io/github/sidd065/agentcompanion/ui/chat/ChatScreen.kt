@@ -85,6 +85,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import io.github.sidd065.agentcompanion.core.AppSettings
 import io.github.sidd065.agentcompanion.core.Artifact
 import io.github.sidd065.agentcompanion.core.CompleteHit
 import io.github.sidd065.agentcompanion.core.Item
@@ -103,6 +104,7 @@ import io.github.sidd065.agentcompanion.ui.activeConnection
 import io.github.sidd065.agentcompanion.ui.components.ConfirmDialog
 import io.github.sidd065.agentcompanion.ui.components.LoadingBox
 import io.github.sidd065.agentcompanion.ui.components.LocalSnack
+import io.github.sidd065.agentcompanion.ui.components.ModelPickerSheet
 import io.github.sidd065.agentcompanion.ui.components.StatusDot
 import io.github.sidd065.agentcompanion.ui.components.TextPromptDialog
 import io.github.sidd065.agentcompanion.ui.components.baseName
@@ -110,6 +112,7 @@ import io.github.sidd065.agentcompanion.ui.components.copyText
 import io.github.sidd065.agentcompanion.ui.components.fmtBytes
 import io.github.sidd065.agentcompanion.ui.components.fmtTokens
 import io.github.sidd065.agentcompanion.ui.components.relTime
+import io.github.sidd065.agentcompanion.ui.components.rememberHomeDir
 import io.github.sidd065.agentcompanion.ui.components.shortPath
 import io.github.sidd065.agentcompanion.ui.sessions.ConnectionBanner
 import io.github.sidd065.agentcompanion.ui.sessions.DirectoryPicker
@@ -142,14 +145,14 @@ fun ChatScreen(sessionId: String, prefill: String) {
     val items = store.items
     // The draft lives outside the screen, so it survives opening a diff, a file or side questions.
     val composer = remember(conn, sessionId) { Drafts.of(conn.config.id, sessionId) }
-    var prefillUsed by rememberSaveable(sessionId) { mutableStateOf(false) }
-    LaunchedEffect(sessionId) {
+    var prefillUsed by rememberSaveable(conn.config.id, sessionId) { mutableStateOf(false) }
+    LaunchedEffect(conn.config.id, sessionId) {
         if (prefill.isNotEmpty() && !prefillUsed) composer.setText(prefill)
         prefillUsed = true
     }
     val focus = remember { FocusRequester() }
     val listState = rememberLazyListState()
-    val home = conn.homeDir()
+    val home = conn.rememberHomeDir()
 
     var sheet by remember { mutableStateOf<String?>(null) } // model|effort|mode|usage|artifacts|help|rewind
     var menu by remember { mutableStateOf(false) }
@@ -160,9 +163,9 @@ fun ChatScreen(sessionId: String, prefill: String) {
     var rewindTarget by remember { mutableStateOf<Item?>(null) }
     var hostPick by remember { mutableStateOf(false) }
 
-    DisposableEffect(store) {
+    DisposableEffect(store, conn.config.id) {
         store.attach()
-        val hide = g.showSession(sessionId)
+        val hide = g.showSession(sessionId, hostId = conn.config.id)
         g.notifier.cancelFor(conn.config.id, sessionId)
         onDispose {
             store.detach()
@@ -178,6 +181,12 @@ fun ChatScreen(sessionId: String, prefill: String) {
     val label = s?.agentLabel ?: "agy"
     val terms by conn.terms.collectAsState()
     val isClaude = s?.isClaude == true
+    val isCodex = s?.isCodex == true
+    val providerModels by conn.providerModels.collectAsState()
+    val codexCatalog = providerModels["codex"]
+    LaunchedEffect(conn.config.id, isCodex) {
+        if (isCodex) runCatching { conn.fetchProviderModels("codex", refresh = false) }
+    }
     // Live state: background shells, subagents, artifacts, agent messages.
     var live by remember { mutableStateOf<io.github.sidd065.agentcompanion.core.LiveState?>(null) }
     var activityTab by remember { mutableStateOf<String?>(null) }
@@ -198,14 +207,14 @@ fun ChatScreen(sessionId: String, prefill: String) {
     }
     val busy = s?.state == "running" || s?.state == "starting" || s?.state == "waiting"
     val agents by conn.agents.collectAsState()
-    // Side questions: Claude Code always; agy when this computer's agentc does them.
-    val sideQuestions = isClaude || agents.firstOrNull { it.id == s?.agent }?.features?.contains("asides") == true
+    // Side questions: Claude Code & Codex always; agy/others when advertised in agent features.
+    val sideQuestions = isClaude || isCodex || conn.agentHasFeature(s?.agent, "asides") || conn.agentHasFeature(s?.agent, "sideQuestion")
     val asides by store.asides.collectAsState()
     val asideCount = asides.size
     val unseenAside by store.unseenAside.collectAsState()
     LaunchedEffect(store, sideQuestions) { if (sideQuestions) runCatching { store.refreshAsides() } }
-    val rows by remember(settings.showThoughts) { derivedStateOf { buildRows(items.toList(), settings.showThoughts) } }
-    val activeId by remember { derivedStateOf { activeAttentionId(items.toList(), store.summary.value?.attention) } }
+    val rows by remember(store, settings.showThoughts) { derivedStateOf { buildRows(items.toList(), settings.showThoughts) } }
+    val activeId by remember(store) { derivedStateOf { activeAttentionId(items.toList(), store.summary.value?.attention) } }
 
     // Reversed list: index 0 is the bottom. Stay pinned there while new items
     // arrive unless the user has scrolled up to read.
@@ -228,13 +237,13 @@ fun ChatScreen(sessionId: String, prefill: String) {
                     runCatching { st.askAside(q) }.onFailure { snack.showSnackbar(it.message ?: "Side question failed") }
                 }
             }
-            nav.navigate(Routes.asides(sessionId))
+            nav.navigate(Routes.asides(sessionId, host = conn.config.id))
             return
         }
         if (t.startsWith("/") && !t.contains(' ')) {
             val name = t.drop(1)
             if (localCommands.any { it.name == name } && extras.commands.none { it.name == name }) {
-                composer.clear(); runLocal(name, ctx = ctx, conn = conn, sessionId = sessionId, summary = s, items = items.toList(), setSheet = { sheet = it },
+                composer.clear(); runLocal(name, ctx = ctx, conn = conn, settings = settings, sessionId = sessionId, summary = s, items = items.toList(), setSheet = { sheet = it },
                     setRenaming = { renaming = true }, nav = { nav.navigate(it) }, rpc = ::rpc, sideQuestions = sideQuestions, snack = { m -> scope.launch { snack.showSnackbar(m) } })
                 return
             }
@@ -282,7 +291,7 @@ fun ChatScreen(sessionId: String, prefill: String) {
         }
     }
 
-    val actions = remember(conn, sessionId) {
+    val actions = remember(conn, sessionId, s?.agent, extras.modes) {
         TranscriptActions(
             conn = conn, sessionId = sessionId,
             toolFor = { cid -> items.lastOrNull { it.tool?.callId == cid }?.tool },
@@ -292,8 +301,8 @@ fun ChatScreen(sessionId: String, prefill: String) {
             onPrefill = { composer.setText(it); runCatching { focus.requestFocus() } },
             onOpenFile = {
                 // Files in the conversation's brain folder (agy) or Claude's plans are artifacts: open the reviewer.
-                if (it.contains("/.gemini/antigravity-cli/brain/$sessionId/") || it.contains("/.claude/plans/")) nav.navigate(Routes.artifact(sessionId, it))
-                else nav.navigate(Routes.file(it))
+                if (it.contains("/.gemini/antigravity-cli/brain/$sessionId/") || it.contains("/.claude/plans/")) nav.navigate(Routes.artifact(sessionId, it, host = conn.config.id))
+                else nav.navigate(Routes.file(it, host = conn.config.id))
             },
             onQueueAction = { it2, action ->
                 if (action == "edit") {
@@ -305,10 +314,16 @@ fun ChatScreen(sessionId: String, prefill: String) {
                 val t = live?.tasks?.firstOrNull { it.description.trim() == cmd.trim() } ?: live?.tasks?.singleOrNull()
                 if (t != null) { focusTask = t.id; activityTab = "tasks" } else scope.launch { snack.showSnackbar("Live output appears once the command runs in the background") }
             },
-            agent = summary?.agent ?: "agy",
+            agent = s?.agent ?: "agy",
             onApprovePlan = { switch ->
                 rpc("Approve") {
-                    if (switch) conn.rpc.call("session.setMode", params { put("id", sessionId); put("mode", "accept-edits") })
+                    if (switch) {
+                        val acceptMode = planApprovalAcceptModeId(
+                            s?.agent,
+                            extras.modes?.availableModes?.map { it.id }.orEmpty(),
+                        )
+                        conn.rpc.call("session.setMode", params { put("id", sessionId); put("mode", acceptMode) })
+                    }
                     conn.rpc.call("session.prompt", params { put("id", sessionId); put("text", "The plan looks good. Proceed with the implementation.") })
                 }
             },
@@ -344,9 +359,21 @@ fun ChatScreen(sessionId: String, prefill: String) {
         scope.launch { uris.forEach { u -> runCatching { composer.attachments.add(AttachmentUtil.fromUri(ctx, u)) }.onFailure { snack.showSnackbar(it.message ?: "attach failed") } } }
     }
 
-    val modelLabel = s?.modelName?.takeIf { it.isNotBlank() } ?: extras.models?.availableModels?.firstOrNull { it.modelId == s?.model }?.name ?: s?.model
+    val modelLabel = s?.modelName?.takeIf { it.isNotBlank() }
+        ?: extras.models?.availableModels?.firstOrNull { it.modelId == s?.model }?.name?.takeIf { it.isNotBlank() }
+        ?: (if (isCodex) codexCatalog?.models?.firstOrNull { it.modelId == s.model }?.name?.takeIf { it.isNotBlank() } else null)
+        ?: s?.model?.takeIf { it.isNotBlank() }
+        ?: (if (isCodex) codexCatalog?.defaultModelId?.takeIf { it.isNotBlank() } else null)
     val thoughtOpt = extras.configOptions.firstOrNull { it.id == "thought_level" }
-    val modeLabel = extras.modes?.availableModes?.firstOrNull { it.id == s?.mode }?.name ?: s?.mode
+    val thoughtLabel = thoughtOpt?.let { o -> o.options.firstOrNull { it.value == o.currentValue }?.name ?: o.currentValue }
+        ?: if (isCodex) (s.thought?.takeIf { it.isNotBlank() } ?: "Effort") else null
+    val modeLabel = extras.modes?.availableModes?.firstOrNull { it.id == s?.mode }?.name?.takeIf { it.isNotBlank() }
+        ?: (if (isCodex) codexCatalog?.availableModes?.firstOrNull { it.id == s.mode }?.name?.takeIf { it.isNotBlank() } else null)
+        ?: s?.mode?.takeIf { it.isNotBlank() }
+    val canFork = conn.agentHasFeature(s?.agent, "fork")
+    val canRewind = conn.agentHasFeature(s?.agent, "rewind")
+    val canTerminal = conn.agentHasFeature(s?.agent, "terminal")
+    val defaultSteer = isClaude || isCodex || conn.agentHasFeature(s?.agent, "steer")
     val cmds = remember(extras.commands) {
         localCommands + extras.commands.filter { c -> localCommands.none { it.name == c.name } }.map { CmdEntry(it.name, it.description, false) }
     }
@@ -389,24 +416,24 @@ fun ChatScreen(sessionId: String, prefill: String) {
                 navigationIcon = { IconButton(onClick = { nav.popBackStack() }) { Icon(Icons.AutoMirrored.Filled.ArrowBack, null) } },
                 actions = {
                     ContextRing(s) { sheet = "usage" }
-                    IconButton(onClick = { nav.navigate(Routes.diff(sessionId)) }) { Icon(Icons.Outlined.Difference, "Changes") }
+                    IconButton(onClick = { nav.navigate(Routes.diff(sessionId, host = conn.config.id)) }) { Icon(Icons.Outlined.Difference, "Changes") }
                     Box {
                         IconButton(onClick = { menu = true }) { Icon(Icons.Outlined.MoreVert, "More") }
                         DropdownMenu(menu, { menu = false }) {
                             MenuRow(Icons.Outlined.Inventory2, "Artifacts") { menu = false; activityTab = "artifacts" }
                             MenuRow(Icons.Outlined.Terminal, "Background shells & agents") { menu = false; activityTab = if (live?.subagents?.isNotEmpty() == true && live?.tasks.isNullOrEmpty()) "agents" else "tasks" }
-                            MenuRow(Icons.Outlined.FolderOpen, "Browse folder") { menu = false; s?.cwd?.let { nav.navigate(Routes.files(it)) } }
+                            MenuRow(Icons.Outlined.FolderOpen, "Browse folder") { menu = false; s?.cwd?.let { nav.navigate(Routes.files(it, host = conn.config.id)) } }
                             if (sideQuestions) MenuRow(Icons.Outlined.QuestionAnswer, "Side questions" + (asideCount.takeIf { it > 0 }?.let { " ($it)" } ?: "")) {
-                                menu = false; nav.navigate(Routes.asides(sessionId))
+                                menu = false; nav.navigate(Routes.asides(sessionId, host = conn.config.id))
                             }
                             if (isClaude) MenuRow(Icons.Outlined.DataUsage, "Context usage") { menu = false; sheet = "context" }
                             if (isClaude) MenuRow(Icons.Outlined.Extension, "MCP servers") { menu = false; sheet = "mcp" }
-                            MenuRow(Icons.Outlined.Terminal, "Continue in $label terminal") { menu = false; openInTerminal(conn, sessionId, s?.agent, nav = { nav.navigate(it) }, rpc = ::rpc) }
-                            MenuRow(Icons.AutoMirrored.Outlined.CallSplit, "Fork") { menu = false; fork(conn, sessionId, null, { nav.navigate(it) }, ::rpc, null) }
-                            MenuRow(Icons.AutoMirrored.Outlined.Undo, "Rewind…") { menu = false; sheet = "rewind" }
+                            if (canTerminal) MenuRow(Icons.Outlined.Terminal, "Continue in $label terminal") { menu = false; openInTerminal(conn, settings, sessionId, s?.agent, s?.skipPermissions ?: settings.skipPermissions(s?.agent), nav = { nav.navigate(it) }, rpc = ::rpc) }
+                            if (canFork) MenuRow(Icons.AutoMirrored.Outlined.CallSplit, "Fork") { menu = false; fork(conn, sessionId, null, { nav.navigate(it) }, ::rpc, null) }
+                            if (canRewind) MenuRow(Icons.AutoMirrored.Outlined.Undo, "Rewind…") { menu = false; sheet = "rewind" }
                             MenuRow(Icons.Outlined.DriveFileRenameOutline, "Rename") { menu = false; renaming = true }
                             MenuRow(Icons.Outlined.Share, "Export as Markdown") { menu = false; export(ctx, conn, sessionId, s?.displayTitle ?: "conversation", ::rpc) }
-                            MenuRow(Icons.Outlined.Refresh, if (isClaude) "Reload from disk" else "Reload from agy") { menu = false; rpc("Reload") { conn.rpc.call("session.reload", params { put("id", sessionId) }, timeoutMs = 300_000) } }
+                            MenuRow(Icons.Outlined.Refresh, if (s?.agent == "agy" || s?.agent.isNullOrBlank()) "Reload from agy" else "Reload from disk") { menu = false; rpc("Reload") { conn.rpc.call("session.reload", params { put("id", sessionId) }, timeoutMs = 300_000) } }
                             if (s?.live == true) MenuRow(Icons.Outlined.StopCircle, "Stop $label process") { menu = false; rpc("Stop") { conn.rpc.call("session.stop", params { put("id", sessionId) }) } }
                             MenuRow(Icons.Outlined.ContentCopy, "Copy session ID") { menu = false; ctx.copyText(sessionId) }
                             MenuRow(Icons.Outlined.Archive, if (s?.archived == true) "Unarchive" else "Archive") {
@@ -424,8 +451,8 @@ fun ChatScreen(sessionId: String, prefill: String) {
             ConnectionBanner(conn)
             StateBanner(s)
             val termHere = terms.firstOrNull { it.conversationId == sessionId && !it.dead }
-            LiveElsewhereBanner(s, onOpenTerminal = termHere?.let { t -> { nav.navigate(Routes.term(t.id)) } }) {
-                fork(conn, sessionId, null, { nav.navigate(it) }, ::rpc, null)
+            LiveElsewhereBanner(s, onOpenTerminal = termHere?.let { t -> { nav.navigate(Routes.term(t.id, host = conn.config.id)) } }) {
+                if (canFork) fork(conn, sessionId, null, { nav.navigate(it) }, ::rpc, null)
             }
             Box(Modifier.weight(1f)) {
                 if (!loaded && items.isEmpty()) {
@@ -448,9 +475,9 @@ fun ChatScreen(sessionId: String, prefill: String) {
                     }
                 }
             }
-            ActivityStrip(live, onOpen = { activityTab = it }, onReview = { nav.navigate(Routes.artifact(sessionId, it.path)) })
+            ActivityStrip(live, onOpen = { activityTab = it }, onReview = { nav.navigate(Routes.artifact(sessionId, it.path, host = conn.config.id)) })
             unseenAside?.let { u ->
-                SideAnswerBanner(u, onOpen = { nav.navigate(Routes.asides(sessionId)) }, onDismiss = { store.unseenAside.value = null })
+                SideAnswerBanner(u, onOpen = { nav.navigate(Routes.asides(sessionId, host = conn.config.id)) }, onDismiss = { store.unseenAside.value = null })
             }
             val suggestion = s?.suggestion
             if (!suggestion.isNullOrBlank() && !busy && composer.value.text.isBlank()) {
@@ -458,8 +485,8 @@ fun ChatScreen(sessionId: String, prefill: String) {
             }
             Composer(
                 agentName = label,
-                state = composer, busy = busy, delivery = settings.delivery.ifBlank { if (isClaude) "steer" else "queue" }, enterSends = settings.enterSends,
-                modelLabel = modelLabel, thoughtLabel = thoughtOpt?.let { o -> o.options.firstOrNull { it.value == o.currentValue }?.name ?: o.currentValue },
+                state = composer, busy = busy, delivery = settings.delivery.ifBlank { if (defaultSteer) "steer" else "queue" }, enterSends = settings.enterSends,
+                modelLabel = modelLabel, thoughtLabel = thoughtLabel,
                 modeLabel = modeLabel, skipPerms = s?.skipPermissions == true, commands = cmds, focus = focus,
                 onSend = ::send,
                 onStop = { rpc("Stop") { conn.rpc.call("session.cancel", params { put("id", sessionId) }) } },
@@ -470,7 +497,7 @@ fun ChatScreen(sessionId: String, prefill: String) {
                 onThinking = { sheet = "effort" },
                 onMode = { sheet = "mode" },
                 onLocalCommand = { name ->
-                    runLocal(name, ctx, conn, sessionId, s, items.toList(), { sheet = it }, { renaming = true }, { nav.navigate(it) }, ::rpc, sideQuestions) { m -> scope.launch { snack.showSnackbar(m) } }
+                    runLocal(name, ctx, conn, settings, sessionId, s, items.toList(), { sheet = it }, { renaming = true }, { nav.navigate(it) }, ::rpc, sideQuestions) { m -> scope.launch { snack.showSnackbar(m) } }
                 },
                 complete = { q ->
                     conn.rpc.call("fs.complete", params { put("cwd", s?.cwd ?: ""); put("query", q); put("max", 30) }).decode(ListSerializer(CompleteHit.serializer()))
@@ -481,27 +508,64 @@ fun ChatScreen(sessionId: String, prefill: String) {
 
     // ---- sheets & dialogs ----
     when (sheet) {
-        "model" -> PickerSheet(
-            "Model",
-            extras.models?.availableModels?.map { it.modelId to (it.name + (it.description?.takeIf { d -> d.isNotBlank() && isClaude }?.let { d -> " — $d" } ?: "")) }.orEmpty(),
-            s?.model, onDismiss = { sheet = null }, agentName = label,
-        ) { id -> rpc("Model") { conn.rpc.call("session.setModel", params { put("id", sessionId); put("model", id) }) } }
-        "effort" -> PickerSheet(
-            if (isClaude) "Effort" else "Thinking level", thoughtOpt?.options?.map { it.value to it.name }.orEmpty(), thoughtOpt?.currentValue, onDismiss = { sheet = null },
-            agentName = label,
-        ) { v -> rpc("Thinking level") { conn.rpc.call("session.setConfig", params { put("id", sessionId); put("configId", "thought_level"); put("value", v) }) } }
-        "mode" -> PickerSheet(
-            "Mode", extras.modes?.availableModes?.map { it.id to (it.name + (it.description?.let { d -> " — $d" } ?: "")) }.orEmpty(), s?.mode, onDismiss = { sheet = null },
-            agentName = label,
-        ) { v -> rpc("Mode") { conn.rpc.call("session.setMode", params { put("id", sessionId); put("mode", v) }) } }
+        "model" -> if (isCodex || conn.agentHasFeature(s?.agent, "customModels")) {
+            ModelPickerSheet(
+                conn = conn,
+                currentModelId = s?.model,
+                provider = s?.agent?.takeIf { it.isNotBlank() } ?: "codex",
+                allowDefault = false,
+                fallbackModels = extras.models?.availableModels.orEmpty(),
+                onDismiss = { sheet = null },
+                onSelect = { id ->
+                    if (id.isNotBlank()) {
+                        g.scope.launch { g.prefs.update { it.withRecentCodexModel(id) } }
+                        rpc("Model") { conn.rpc.call("session.setModel", params { put("id", sessionId); put("model", id) }) }
+                    }
+                },
+            )
+        } else {
+            PickerSheet(
+                "Model",
+                extras.models?.availableModels?.map { it.modelId to (it.name + (it.description?.takeIf { d -> d.isNotBlank() && isClaude }?.let { d -> " — $d" } ?: "")) }.orEmpty(),
+                s?.model, onDismiss = { sheet = null }, agentName = label,
+            ) { id -> rpc("Model") { conn.rpc.call("session.setModel", params { put("id", sessionId); put("model", id) }) } }
+        }
+        "effort" -> {
+            val effortOptions = thoughtOpt?.options?.map { it.value to it.name }?.takeIf { it.isNotEmpty() }
+                ?: if (isCodex) {
+                    (codexCatalog?.reasoningEfforts?.ifEmpty { listOf("low", "medium", "high", "xhigh") }
+                        ?: listOf("low", "medium", "high", "xhigh"))
+                        .map { it to it.replaceFirstChar { c -> c.uppercase() } }
+                } else emptyList()
+            val curEffort = thoughtOpt?.currentValue ?: s?.thought
+            val effortTitle = if (isClaude || isCodex) "Effort" else "Thinking level"
+            PickerSheet(
+                effortTitle, effortOptions, curEffort, onDismiss = { sheet = null },
+                agentName = label,
+            ) { v -> rpc(effortTitle) { conn.rpc.call("session.setConfig", params { put("id", sessionId); put("configId", "thought_level"); put("value", v) }) } }
+        }
+        "mode" -> {
+            val modeOptions = extras.modes?.availableModes
+                ?.map { it.id to (it.name + (it.description?.takeIf { d -> d.isNotBlank() }?.let { d -> " — $d" } ?: "")) }
+                ?.takeIf { it.isNotEmpty() }
+                ?: if (isCodex) {
+                    codexCatalog?.availableModes.orEmpty().map { m ->
+                        m.id to (m.name + (m.description.takeIf { d -> d.isNotBlank() }?.let { d -> " — $d" } ?: ""))
+                    }
+                } else emptyList()
+            PickerSheet(
+                "Mode", modeOptions, s?.mode, onDismiss = { sheet = null },
+                agentName = label,
+            ) { v -> rpc("Mode") { conn.rpc.call("session.setMode", params { put("id", sessionId); put("mode", v) }) } }
+        }
         "usage" -> UsageSheet(s, onDismiss = { sheet = null }, onCompact = { send("/compact", emptyList(), null) }, onContext = if (isClaude) ({ sheet = "context" }) else null)
         "context" -> ContextUsageSheet(conn, sessionId, onDismiss = { sheet = null }, onCompact = { send("/compact", emptyList(), null) })
         "mcp" -> McpStatusSheet(conn, sessionId, onDismiss = { sheet = null })
         "artifacts" -> activityTab = "artifacts"
         "tasks" -> { sheet = null; activityTab = if (live?.tasks.isNullOrEmpty() && live?.subagents?.isNotEmpty() == true) "agents" else "tasks" }
-        "status" -> StatusSheet(s, extras, agents.firstOrNull { it.id == s?.agent }?.version, conn.config.label, onDismiss = { sheet = null })
+        "status" -> StatusSheet(s, extras, agents.firstOrNull { it.id == s?.agent }?.version, conn.config.label, onDismiss = { sheet = null }, codexCatalog = codexCatalog)
         "permissions" -> PermissionRulesSheet(conn, sessionId, onDismiss = { sheet = null })
-        "memory" -> MemorySheet(conn, s?.cwd ?: "", home, onOpen = { p -> sheet = null; nav.navigate(Routes.file(p, edit = true)) }, onDismiss = { sheet = null })
+        "memory" -> MemorySheet(conn, s?.cwd ?: "", home, onOpen = { p -> sheet = null; nav.navigate(Routes.file(p, edit = true, host = conn.config.id)) }, onDismiss = { sheet = null })
         "help" -> HelpSheet(cmds, label, onDismiss = { sheet = null }) { c -> sheet = null; composer.setText("/$c ") }
         "rewind" -> RewindPickerSheet(items.toList(), onDismiss = { sheet = null }) { rewindTarget = it; sheet = null }
     }
@@ -510,7 +574,7 @@ fun ChatScreen(sessionId: String, prefill: String) {
             onDismiss = { activityTab = null; focusTask = null }, initialTaskId = focusTask) { a ->
             activityTab = null
             if (a.kind == "url" && a.url != null) runCatching { ctx.startActivity(android.content.Intent(android.content.Intent.ACTION_VIEW, android.net.Uri.parse(a.url))) }
-            else nav.navigate(Routes.artifact(sessionId, a.path))
+            else nav.navigate(Routes.artifact(sessionId, a.path, host = conn.config.id))
         }
     }
     userAction?.let { it ->
@@ -518,9 +582,9 @@ fun ChatScreen(sessionId: String, prefill: String) {
             it, isUser = true, onDismiss = { userAction = null },
             onCopy = { ctx.copyText(it.text.orEmpty()) },
             onSelect = { nav.navigate(Routes.select(TextHolder.put("Your message", it.text.orEmpty()))) },
-            onEdit = { rewindTarget = it },
-            onFork = { fork(conn, sessionId, it.id, { r -> nav.navigate(r) }, ::rpc) { p -> composer.setText(p) } },
-            onRewind = { rewindTarget = it },
+            onEdit = if (canRewind) ({ rewindTarget = it }) else null,
+            onFork = if (canFork) ({ fork(conn, sessionId, it.id, { r -> nav.navigate(r) }, ::rpc) { p -> composer.setText(p) } }) else null,
+            onRewind = if (canRewind) ({ rewindTarget = it }) else null,
         )
     }
     agentAction?.let { it ->
@@ -529,8 +593,8 @@ fun ChatScreen(sessionId: String, prefill: String) {
             onCopy = { ctx.copyText(it.text.orEmpty()) },
             onSelect = { nav.navigate(Routes.select(TextHolder.put("$label's response", it.text.orEmpty()))) },
             onEdit = null,
-            onFork = { fork(conn, sessionId, it.id, { r -> nav.navigate(r) }, ::rpc, null) },
-            onRewind = { rewindTarget = it },
+            onFork = if (canFork) ({ fork(conn, sessionId, it.id, { r -> nav.navigate(r) }, ::rpc, null) }) else null,
+            onRewind = if (canRewind) ({ rewindTarget = it }) else null,
             onShare = {
                 ctx.startActivity(Intent.createChooser(Intent(Intent.ACTION_SEND).setType("text/plain").putExtra(Intent.EXTRA_TEXT, it.text.orEmpty()), "Share"))
             },
@@ -613,6 +677,7 @@ private fun runLocal(
     name: String,
     ctx: android.content.Context,
     conn: HostConnection,
+    settings: AppSettings,
     sessionId: String,
     summary: SessionSummary?,
     items: List<Item>,
@@ -624,6 +689,8 @@ private fun runLocal(
     snack: (String) -> Unit,
 ) {
     val claude = summary?.isClaude == true
+    val codex = summary?.isCodex == true
+    val agentName = summary?.agentLabel ?: "this agent"
     when (name) {
         "model" -> setSheet("model")
         "effort" -> setSheet("effort")
@@ -631,19 +698,19 @@ private fun runLocal(
         "context", "usage" -> setSheet("usage")
         "artifacts" -> setSheet("artifacts")
         "help" -> setSheet("help")
-        "rewind" -> setSheet("rewind")
-        "btw" -> if (sideQuestions) nav(Routes.asides(sessionId)) else snack("Side questions for agy need agentc 0.3.2 or newer on this computer")
-        "mcp" -> if (claude) setSheet("mcp") else nav(Routes.MANAGE) // agy's MCP servers are on the Host screen
+        "rewind" -> if (conn.agentHasFeature(summary?.agent, "rewind")) setSheet("rewind") else snack("Rewind isn't supported by $agentName")
+        "btw" -> if (sideQuestions) nav(Routes.asides(sessionId, host = conn.config.id)) else snack("Side questions for $agentName need agentc 0.3.2 or newer on this computer")
+        "mcp" -> if (claude) setSheet("mcp") else nav(Routes.MANAGE) // agy/Codex MCP servers are on the Host screen
         "tasks" -> setSheet("tasks")
         "status" -> setSheet("status")
-        "permissions" -> if (claude) setSheet("permissions") else snack("agy asks for permission per action; set its rules in agy's settings.json")
+        "permissions" -> if (claude) setSheet("permissions") else if (codex) snack("Codex permission policy is configured via Mode or Codex flags") else snack("agy asks for permission per action; set its rules in agy's settings.json")
         "memory" -> if (claude) setSheet("memory") else snack("/memory is a Claude Code feature")
         "rename" -> setRenaming()
-        "new", "clear" -> nav(Routes.newSession(summary?.cwd ?: ""))
-        "fork" -> fork(conn, sessionId, null, nav, rpc, null)
-        "diff" -> nav(Routes.diff(sessionId))
-        "files" -> summary?.cwd?.let { nav(Routes.files(it)) }
-        "terminal" -> openInTerminal(conn, sessionId, summary?.agent, nav, rpc)
+        "new", "clear" -> nav(Routes.newSession(summary?.cwd ?: "", host = conn.config.id))
+        "fork" -> if (conn.agentHasFeature(summary?.agent, "fork")) fork(conn, sessionId, null, nav, rpc, null) else snack("Fork isn't supported by $agentName")
+        "diff" -> nav(Routes.diff(sessionId, host = conn.config.id))
+        "files" -> summary?.cwd?.let { nav(Routes.files(it, host = conn.config.id)) }
+        "terminal" -> if (conn.agentHasFeature(summary?.agent, "terminal")) openInTerminal(conn, settings, sessionId, summary?.agent, summary?.skipPermissions ?: settings.skipPermissions(summary?.agent), nav, rpc) else snack("Terminal resume isn't supported by $agentName")
         "export" -> export(ctx, conn, sessionId, summary?.displayTitle ?: "conversation", rpc)
         "copy" -> {
             val last = items.lastOrNull { it.kind == "agent" && !it.text.isNullOrBlank() }
@@ -659,19 +726,18 @@ private fun fork(conn: HostConnection, sessionId: String, itemId: String?, nav: 
         val r = conn.rpc.call("session.fork", params { put("id", sessionId); if (itemId != null) put("itemId", itemId) }, timeoutMs = 300_000).jsonObject
         val id = r["session"]?.jsonObject?.get("id")?.jsonPrimitive?.content ?: error("no session")
         val prefill = r["prefill"]?.jsonPrimitive?.content.orEmpty()
-        nav(Routes.chat(id, prefill))
+        nav(Routes.chat(id, prefill, host = conn.config.id))
         if (prefill.isNotEmpty()) onPrefill?.invoke("")
     }
 }
 
-private fun openInTerminal(conn: HostConnection, sessionId: String, agent: String?, nav: (String) -> Unit, rpc: (String, suspend () -> Unit) -> Any) {
+private fun openInTerminal(conn: HostConnection, settings: AppSettings, sessionId: String, agent: String?, skipPerms: Boolean = settings.skipPermissions(agent), nav: (String) -> Unit, rpc: (String, suspend () -> Unit) -> Any) {
     rpc("Open in terminal") {
-        val st = io.github.sidd065.agentcompanion.App.instance.graph.prefs.value
         val t = conn.rpc.call("session.openInTerminal", params {
-            put("id", sessionId); put("skipPermissions", st.skipPermissions(agent))
-            put("args", kotlinx.serialization.json.JsonArray(st.tuiResumeArgs(agent).map { kotlinx.serialization.json.JsonPrimitive(it) }))
+            put("id", sessionId); put("skipPermissions", skipPerms)
+            put("args", kotlinx.serialization.json.JsonArray(settings.tuiResumeArgs(agent).map { kotlinx.serialization.json.JsonPrimitive(it) }))
         }).decode(Term.serializer())
-        nav(Routes.term(t.id))
+        nav(Routes.term(t.id, host = conn.config.id))
     }
 }
 
@@ -738,9 +804,9 @@ private fun UsageSheet(s: SessionSummary?, onDismiss: () -> Unit, onCompact: () 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun ArtifactsSheet(conn: HostConnection, sessionId: String, onDismiss: () -> Unit, onOpen: (String) -> Unit) {
-    var list by remember { mutableStateOf<List<Artifact>?>(null) }
-    var err by remember { mutableStateOf<String?>(null) }
-    LaunchedEffect(Unit) {
+    var list by remember(conn.config.id, sessionId) { mutableStateOf<List<Artifact>?>(null) }
+    var err by remember(conn.config.id, sessionId) { mutableStateOf<String?>(null) }
+    LaunchedEffect(conn.config.id, sessionId) {
         runCatching { list = conn.rpc.call("session.artifacts", params { put("id", sessionId) }).decode(ListSerializer(Artifact.serializer())) }
             .onFailure { err = it.message }
     }
@@ -801,8 +867,8 @@ private fun MessageActionSheet(
     onCopy: () -> Unit,
     onSelect: () -> Unit,
     onEdit: (() -> Unit)?,
-    onFork: () -> Unit,
-    onRewind: () -> Unit,
+    onFork: (() -> Unit)?,
+    onRewind: (() -> Unit)?,
     onShare: (() -> Unit)? = null,
 ) {
     AppSheet(onDismissRequest = onDismiss, sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)) {
@@ -816,10 +882,10 @@ private fun MessageActionSheet(
                 leadingContent = { Icon(Icons.Outlined.SelectAll, null) }, modifier = Modifier.clickable { onDismiss(); onSelect() })
             if (onEdit != null) ListItem(headlineContent = { Text("Edit & resend") }, supportingContent = { Text("Rewinds the conversation to before this message") },
                 leadingContent = { Icon(Icons.Outlined.Edit, null) }, modifier = Modifier.clickable { onDismiss(); onEdit() })
-            ListItem(headlineContent = { Text(if (isUser) "Fork from here" else "Fork after this response") },
+            if (onFork != null) ListItem(headlineContent = { Text(if (isUser) "Fork from here" else "Fork after this response") },
                 supportingContent = { Text(if (isUser) "New session ending before this message" else "New session that continues from here") },
                 leadingContent = { Icon(Icons.AutoMirrored.Outlined.CallSplit, null) }, modifier = Modifier.clickable { onDismiss(); onFork() })
-            ListItem(headlineContent = { Text(if (isUser) "Rewind to before this" else "Rewind to here") }, leadingContent = { Icon(Icons.AutoMirrored.Outlined.Undo, null) },
+            if (onRewind != null) ListItem(headlineContent = { Text(if (isUser) "Rewind to before this" else "Rewind to here") }, leadingContent = { Icon(Icons.AutoMirrored.Outlined.Undo, null) },
                 modifier = Modifier.clickable { onDismiss(); onRewind() })
             if (onShare != null) ListItem(headlineContent = { Text("Share") }, leadingContent = { Icon(Icons.Outlined.Share, null) }, modifier = Modifier.clickable { onDismiss(); onShare() })
         }
@@ -879,9 +945,9 @@ private fun RewindDialog(conn: HostConnection, sessionId: String, target: Item, 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun HostFilePicker(conn: HostConnection, start: String, onDismiss: () -> Unit, onPick: (String) -> Unit) {
-    var path by remember { mutableStateOf(start) }
-    var entries by remember { mutableStateOf<io.github.sidd065.agentcompanion.core.FsList?>(null) }
-    LaunchedEffect(path) {
+    var path by remember(conn.config.id, start) { mutableStateOf(start.ifBlank { conn.homeDir() ?: "~" }) }
+    var entries by remember(conn.config.id) { mutableStateOf<io.github.sidd065.agentcompanion.core.FsList?>(null) }
+    LaunchedEffect(conn.config.id, path) {
         runCatching { entries = conn.rpc.call("fs.list", params { put("path", path) }).decode(io.github.sidd065.agentcompanion.core.FsList.serializer()) }
     }
     AppSheet(onDismissRequest = onDismiss) {
@@ -900,4 +966,11 @@ private fun HostFilePicker(conn: HostConnection, start: String, onDismiss: () ->
             }
         }
     }
+}
+
+fun planApprovalAcceptModeId(agent: String?, availableModeIds: List<String>): String {
+    for (candidate in listOf("acceptEdits", "accept-edits", "auto-edits")) {
+        if (availableModeIds.any { it == candidate }) return candidate
+    }
+    return if ((agent?.trim()?.ifEmpty { "agy" } ?: "agy") == "agy") "accept-edits" else "acceptEdits"
 }

@@ -1111,6 +1111,7 @@ func (m *Manager) deleteClaude(id string) error {
 	path, pathErr := m.claudeTranscript(id, cwd)
 	if s := m.Get(id); s != nil {
 		s.Hibernate()
+		s.stopTimers()
 		s.mu.Lock()
 		s.removed = true
 		s.mu.Unlock()
@@ -1565,8 +1566,9 @@ func (m *Manager) AskAside(ctx context.Context, id, question, followUp string) (
 	s.mu.Lock()
 	for _, a := range s.meta.Asides {
 		if a.State == "pending" {
+			label := s.agentLabelLocked()
 			s.mu.Unlock()
-			return nil, errors.New("Claude is still answering the previous side question")
+			return nil, errors.New(label + " is still answering the previous side question")
 		}
 	}
 	prompt := asidePrompt(s.meta.Asides, question, followUp)
@@ -1621,6 +1623,9 @@ func (m *Manager) AskAside(ctx context.Context, id, question, followUp string) (
 // answerAside gets the answer to a side question from the right place.
 func (m *Manager) answerAside(ctx context.Context, s *Session, id, prompt string, isClaude bool) (string, error) {
 	if !isClaude {
+		if s.isCodexSafe() {
+			return m.asideCodex(ctx, s, prompt)
+		}
 		if s.isAgySafe() {
 			return m.asideAgy(ctx, s, prompt)
 		}

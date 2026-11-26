@@ -32,18 +32,22 @@ export function applyOps(state: TranscriptState, ops: TranscriptOp[], explicitSe
   let seq = state.seq;
 
   for (const op of ops) {
-    if (op.seq && op.seq <= seq && op.op !== 'reset') {
+    if (op.op === 'reset') {
+      if (op.seq && op.seq <= seq) {
+        continue;
+      }
+      items = (op.items ?? []).map((it) => ({ ...it }));
+      byId = rebuildIndex(items);
+      seq = op.seq ?? 0;
+      continue;
+    }
+    if (op.seq && op.seq <= seq) {
       continue;
     }
     if (op.seq && op.seq > seq) {
       seq = op.seq;
     }
     switch (op.op) {
-      case 'reset': {
-        items = (op.items ?? []).map((it) => ({ ...it }));
-        byId = rebuildIndex(items);
-        break;
-      }
       case 'add': {
         if (!op.item) break;
         const existingIdx = byId[op.item.id];

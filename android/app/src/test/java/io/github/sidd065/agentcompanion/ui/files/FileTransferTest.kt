@@ -76,7 +76,8 @@ class FakeMediaStoreProvider : ContentProvider() {
             return null
         }
         val id = nextId++
-        val f = File.createTempFile("fake-ms-$id-", ".bin")
+        val scratchDir = File(ApplicationProvider.getApplicationContext<Context>().cacheDir, "fake-ms").apply { mkdirs() }
+        val f = File(scratchDir, "fake-ms-$id.bin").apply { writeBytes(ByteArray(0)) }
         val itemUri = Uri.withAppendedPath(uri, id.toString())
         val pending = v.getAsInteger(MediaStore.Downloads.IS_PENDING) ?: 0
         records.add(Record(id, itemUri, f, v, pending))
@@ -303,6 +304,14 @@ class FileTransferTest {
         assertEquals("application/vnd.debian.binary-package", FileTransfer.mimeOf("app.deb"))
         assertEquals("text/markdown", FileTransfer.mimeOf("README.md"))
         assertEquals("application/octet-stream", FileTransfer.mimeOf("noext"))
+
+        val hashA = FileTransfer.cachePathHash("/home/bob/subA/config.json")
+        val hashB = FileTransfer.cachePathHash("/home/bob/subB/config.json")
+        assertEquals(12, hashA.length)
+        assertEquals(12, hashB.length)
+        assertTrue(hashA.all { it in '0'..'9' || it in 'a'..'f' })
+        assertTrue(hashA != hashB)
+        assertEquals(hashA, FileTransfer.cachePathHash("/home/bob/subA/config.json"))
     }
 
     @Test
@@ -382,6 +391,51 @@ class FileTransferTest {
         } finally {
             blocker.complete(Unit)
             scope.cancel()
+        }
+    }
+
+    @Test
+    @Config(sdk = [34])
+    fun cancelDownload_beforeCoroutineDispatchesImmediatelyMarksCancelledAndAllowsDismiss() {
+        val ctx = ApplicationProvider.getApplicationContext<Context>()
+        val queued = ArrayDeque<Runnable>()
+        val pausedDispatcher = object : kotlinx.coroutines.CoroutineDispatcher() {
+            override fun dispatch(context: kotlin.coroutines.CoroutineContext, block: Runnable) {
+                queued.addLast(block)
+            }
+        }
+        val pausedScope = CoroutineScope(SupervisorJob() + pausedDispatcher)
+        var writerInvoked = false
+        try {
+            val task = FileTransfer.enqueueWithWriter(
+                ctx = ctx,
+                scope = pausedScope,
+                hostId = "host-race",
+                remotePath = "/repo/pre-dispatch.bin",
+                streamWriter = { _, _ ->
+                    writerInvoked = true
+                    42L
+                },
+            )
+            assertEquals(DownloadStatus.Running, FileTransfer.downloads.value.single { it.id == task.id }.status)
+
+            // Cancel BEFORE the queued coroutine ever begins executing on the dispatcher!
+            FileTransfer.cancelDownload(task.id)
+            val afterCancel = FileTransfer.downloads.value.single { it.id == task.id }
+            assertEquals(DownloadStatus.Cancelled, afterCancel.status)
+            assertNull(afterCancel.error)
+
+            // Dismiss immediately succeeds without waiting for dispatcher wakeup.
+            FileTransfer.dismissDownload(task.id)
+            assertTrue(FileTransfer.downloads.value.none { it.id == task.id })
+
+            // Drain queued runnables and verify cancelled coroutine never invokes streamWriter.
+            while (queued.isNotEmpty()) {
+                queued.removeFirst().run()
+            }
+            assertFalse("Cancelled pre-dispatch download must never invoke streamWriter", writerInvoked)
+        } finally {
+            pausedScope.cancel()
         }
     }
 }

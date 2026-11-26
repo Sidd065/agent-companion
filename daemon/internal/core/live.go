@@ -378,11 +378,11 @@ func (m *Manager) liveLS(ctx context.Context, id string) *lsapi.Client {
 
 // LiveState returns the current live state of a conversation.
 func (m *Manager) LiveState(ctx context.Context, id string) (*Live, error) {
-	if s := m.Get(id); s != nil && s.isClaudeSafe() {
+	if s := m.Get(id); s != nil && (s.isClaudeSafe() || s.isCodexSafe()) {
 		return m.claudeLive(s), nil
 	}
 	if !m.isAgyID(id) {
-		return &Live{}, nil
+		return &Live{Tasks: []Task{}, Artifacts: []ArtifactInfo{}, Subagents: []Subagent{}, Messages: []AgentMessage{}}, nil
 	}
 	live, err := m.ComputeLive(ctx, id, m.liveLS(ctx, id))
 	if err == nil {

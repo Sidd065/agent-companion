@@ -2,6 +2,7 @@ import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
   Activity,
   Clock,
+  Cpu,
   FileDiff,
   FolderGit2,
   FolderPlus,
@@ -27,13 +28,15 @@ interface PaletteAction {
   run: () => void;
 }
 
+type TaggedSearchHit = SearchHit & { hostId: string; hostName: string };
+
 export const CommandPalette: React.FC = () => {
   const {
     commandPaletteOpen,
     setCommandPaletteOpen,
+    hostList,
     allSessions,
     allProjects,
-    activeHostId,
     selectSession,
     openDraft,
     openRightTab,
@@ -48,8 +51,9 @@ export const CommandPalette: React.FC = () => {
 
   const [query, setQuery] = useState('');
   const [selectedIdx, setSelectedIdx] = useState(0);
-  const [remoteHits, setRemoteHits] = useState<SearchHit[]>([]);
+  const [remoteHits, setRemoteHits] = useState<TaggedSearchHit[]>([]);
   const inputRef = useRef<HTMLInputElement>(null);
+  const searchSeqRef = useRef(0);
 
   useEffect(() => {
     if (commandPaletteOpen) {
@@ -60,19 +64,36 @@ export const CommandPalette: React.FC = () => {
     }
   }, [commandPaletteOpen]);
 
-  // Remote full-text search across transcripts when typing >= 2 chars
+  // Remote full-text search across ALL connected hosts when typing >= 2 chars
   useEffect(() => {
-    if (!commandPaletteOpen || !activeHostId || query.trim().length < 2) {
+    const qTrim = query.trim();
+    const connectedHosts = hostList.filter((h) => h.state === 'connected');
+    if (!commandPaletteOpen || connectedHosts.length === 0 || qTrim.length < 2) {
       setRemoteHits([]);
       return;
     }
+    const seq = ++searchSeqRef.current;
     const timer = setTimeout(() => {
-      void callHost<SearchHit[]>(activeHostId, 'search.query', { query: query.trim(), limit: 10 })
-        .then((hits) => setRemoteHits(Array.isArray(hits) ? hits : []))
-        .catch(() => setRemoteHits([]));
+      void Promise.allSettled(
+        connectedHosts.map(async (h) => {
+          const hits = await callHost<SearchHit[]>(h.creds.id, 'search.query', { query: qTrim, limit: 10 });
+          return (Array.isArray(hits) ? hits : []).map((hit) => ({
+            ...hit,
+            hostId: h.creds.id,
+            hostName: h.creds.name,
+          }));
+        }),
+      ).then((results) => {
+        if (seq !== searchSeqRef.current) return;
+        const merged: TaggedSearchHit[] = [];
+        for (const r of results) {
+          if (r.status === 'fulfilled') merged.push(...r.value);
+        }
+        setRemoteHits(merged);
+      });
     }, 180);
     return () => clearTimeout(timer);
-  }, [commandPaletteOpen, activeHostId, query, callHost]);
+  }, [commandPaletteOpen, hostList, query, callHost]);
 
   const actions = useMemo<PaletteAction[]>(() => {
     const close = () => setCommandPaletteOpen(false);
@@ -80,11 +101,12 @@ export const CommandPalette: React.FC = () => {
       { id: 'new-thread', label: 'New Thread', group: 'Actions', icon: <Plus className="w-4 h-4" />, run: () => { openDraft(); close(); } },
       { id: 'add-project', label: 'Add Project (Folder / Init / Clone)', group: 'Actions', icon: <FolderPlus className="w-4 h-4" />, run: () => { setAddProjectModalOpen(true); close(); } },
       { id: 'pair-host', label: 'Pair / Manage Hosts', group: 'Actions', icon: <Server className="w-4 h-4" />, run: () => { setPairModalOpen(true); close(); } },
-      { id: 'open-diff', label: 'Open Diff Panel', group: 'Panels', icon: <FileDiff className="w-4 h-4" />, run: () => { openRightTab({ kind: 'diff', title: 'Diff', diffScope: 'uncommitted' }); close(); } },
-      { id: 'open-files', label: 'Open Files Explorer', group: 'Panels', icon: <FolderGit2 className="w-4 h-4" />, run: () => { openRightTab({ kind: 'files', title: 'Files' }); close(); } },
-      { id: 'open-side', label: 'Open Side Chat (/btw)', group: 'Panels', icon: <MessageSquare className="w-4 h-4" />, run: () => { openRightTab({ kind: 'side', title: 'Side Chat' }); close(); } },
-      { id: 'open-git', label: 'Open Source Control & Worktrees', group: 'Panels', icon: <GitBranch className="w-4 h-4" />, run: () => { openRightTab({ kind: 'git', title: 'Source Control' }); close(); } },
-      { id: 'open-pr', label: 'Open Pull Requests & Issues', group: 'Panels', icon: <GitBranch className="w-4 h-4" />, run: () => { openRightTab({ kind: 'pr', title: 'Pull Requests' }); close(); } },
+      { id: 'codex-openrouter', label: 'Configure Codex & OpenRouter', group: 'Actions', icon: <Cpu className="w-4 h-4" />, run: () => { openSettingsTab('providers'); close(); } },
+      { id: 'open-diff', label: 'Open Diff Panel', group: 'Panels', icon: <FileDiff className="w-4 h-4" />, run: () => { openRightTab({ id: 'diff', kind: 'diff', title: 'Diff', diffScope: 'uncommitted' }); close(); } },
+      { id: 'open-files', label: 'Open Files Explorer', group: 'Panels', icon: <FolderGit2 className="w-4 h-4" />, run: () => { openRightTab({ id: 'files', kind: 'files', title: 'Files' }); close(); } },
+      { id: 'open-side', label: 'Open Side Chat (/btw)', group: 'Panels', icon: <MessageSquare className="w-4 h-4" />, run: () => { openRightTab({ id: 'side', kind: 'side', title: 'Side Chat' }); close(); } },
+      { id: 'open-git', label: 'Open Source Control & Worktrees', group: 'Panels', icon: <GitBranch className="w-4 h-4" />, run: () => { openRightTab({ id: 'git', kind: 'git', title: 'Source Control' }); close(); } },
+      { id: 'open-pr', label: 'Open Pull Requests & Issues', group: 'Panels', icon: <GitBranch className="w-4 h-4" />, run: () => { openRightTab({ id: 'pr', kind: 'pr', title: 'Pull Requests' }); close(); } },
       { id: 'toggle-term', label: 'Toggle Terminal Drawer', group: 'Panels', icon: <TerminalSquare className="w-4 h-4" />, run: () => { setTerminalDrawerOpen((v) => !v); close(); } },
       { id: 'open-usage', label: 'Usage & Cost Dashboard', group: 'Views', icon: <Activity className="w-4 h-4" />, run: () => { setViewMode('usage'); close(); } },
       { id: 'open-schedules', label: 'Scheduled Tasks', group: 'Views', icon: <Clock className="w-4 h-4" />, run: () => { setViewMode('schedules'); close(); } },
@@ -128,16 +150,17 @@ export const CommandPalette: React.FC = () => {
       ? list.filter((a) => `${a.label} ${a.detail || ''} ${a.group}`.toLowerCase().includes(q))
       : list.slice(0, 24);
 
-    // Append message search hits from daemon
+    // Append message search hits across all connected daemons
     for (const hit of remoteHits) {
       if (hit.kind === 'message' && hit.sessionId) {
+        const prefix = hostList.length > 1 ? `${hit.hostName} · ` : '';
         filtered.push({
-          id: `hit-${hit.sessionId}-${hit.updatedAt}`,
+          id: `hit-${hit.hostId}-${hit.sessionId}-${hit.updatedAt}`,
           label: hit.title || hit.sessionId,
-          detail: hit.snippet,
+          detail: `${prefix}${hit.snippet || ''}`,
           group: 'Message Matches',
           icon: <Search className="w-4 h-4 text-[var(--accent)]" />,
-          run: () => { selectSession(activeHostId, hit.sessionId!); close(); },
+          run: () => { selectSession(hit.hostId, hit.sessionId!); close(); },
         });
       }
     }
@@ -145,7 +168,7 @@ export const CommandPalette: React.FC = () => {
   }, [
     allProjects,
     allSessions,
-    activeHostId,
+    hostList.length,
     openDraft,
     openRightTab,
     openSettingsTab,

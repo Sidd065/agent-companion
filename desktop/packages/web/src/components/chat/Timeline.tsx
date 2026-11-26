@@ -29,6 +29,7 @@ import type {
   TurnCheckpoint,
 } from '@agentc/protocol';
 import { useApp } from '../../state/appStore.js';
+import { extractToolInlineDiffs, extractToolOutputText } from '../../utils/diffParser.js';
 import { MarkdownRenderer } from '../markdown/MarkdownRenderer.js';
 
 function formatDuration(ms: number): string {
@@ -70,37 +71,6 @@ function stringifyVal(val: unknown): string {
   }
 }
 
-function extractInlineDiff(tool: ToolCall): { oldStr: string; newStr: string; path?: string } | null {
-  const inp = tool.input as Record<string, unknown> | undefined;
-  if (!inp || typeof inp !== 'object') return null;
-  const oldStr =
-    typeof inp.old_string === 'string'
-      ? inp.old_string
-      : typeof inp.oldText === 'string'
-        ? inp.oldText
-        : typeof inp.old === 'string'
-          ? inp.old
-          : null;
-  const newStr =
-    typeof inp.new_string === 'string'
-      ? inp.new_string
-      : typeof inp.newText === 'string'
-        ? inp.newText
-        : typeof inp.new === 'string'
-          ? inp.new
-          : typeof inp.content === 'string'
-            ? inp.content
-            : null;
-  if (oldStr === null && newStr === null) return null;
-  const path =
-    typeof inp.file_path === 'string'
-      ? inp.file_path
-      : typeof inp.path === 'string'
-        ? inp.path
-        : undefined;
-  return { oldStr: oldStr ?? '', newStr: newStr ?? '', path };
-}
-
 function extractCommand(tool: ToolCall): string | null {
   const inp = tool.input as Record<string, unknown> | undefined;
   if (inp && typeof inp === 'object' && typeof inp.command === 'string') return inp.command;
@@ -122,8 +92,8 @@ const ToolRow: React.FC<{ item: TranscriptItem; onCite: (label: string, content:
     const isRead = kind.includes('read') || kind.includes('search') || kind.includes('glob') || kind.includes('grep');
 
     const cmd = isExec ? extractCommand(tool) : null;
-    const inlineDiff = isEdit ? extractInlineDiff(tool) : null;
-    const outStr = stringifyVal(tool.output ?? tool.content);
+    const inlineDiffs = isEdit ? extractToolInlineDiffs(tool) : [];
+    const outStr = extractToolOutputText(tool);
     const inpStr = stringifyVal(tool.input);
     const durMs = tool.startTs && tool.endTs ? Math.max(0, tool.endTs - tool.startTs) : 0;
 
@@ -153,7 +123,7 @@ const ToolRow: React.FC<{ item: TranscriptItem; onCite: (label: string, content:
             {tool.name || tool.kind || 'Tool'}
           </span>
           <span className="font-mono text-[11px] text-[var(--text-secondary)] truncate flex-1">
-            {cmd ? `$ ${cmd}` : tool.title || inlineDiff?.path || ''}
+            {cmd ? `$ ${cmd}` : tool.title || inlineDiffs[0]?.path || ''}
           </span>
           {durMs > 0 && <span className="text-[10px] font-mono text-[var(--text-muted)]">{formatDuration(durMs)}</span>}
           {isRunning ? (
@@ -167,20 +137,33 @@ const ToolRow: React.FC<{ item: TranscriptItem; onCite: (label: string, content:
 
         {open && (
           <div className="border-t border-[var(--border)] px-3 py-2 space-y-2">
-            {inlineDiff ? (
-              <div className="rounded-md border border-[var(--border)] bg-[var(--bg-base)] overflow-x-auto font-mono text-[11.5px]">
-                {inlineDiff.oldStr &&
-                  inlineDiff.oldStr.split('\n').map((ln, idx) => (
-                    <div key={`d-${idx}`} className="px-2 py-0.5 bg-[var(--diff-del-bg)] text-[var(--diff-del-fg)] whitespace-pre">
-                      - {ln}
-                    </div>
-                  ))}
-                {inlineDiff.newStr &&
-                  inlineDiff.newStr.split('\n').map((ln, idx) => (
-                    <div key={`a-${idx}`} className="px-2 py-0.5 bg-[var(--diff-add-bg)] text-[var(--diff-add-fg)] whitespace-pre">
-                      + {ln}
-                    </div>
-                  ))}
+            {inlineDiffs.length > 0 ? (
+              <div className="space-y-1.5">
+                {inlineDiffs.map((df, dIdx) => (
+                  <div
+                    key={`${df.path || 'diff'}-${dIdx}`}
+                    data-testid="tool-inline-diff"
+                    className="rounded-md border border-[var(--border)] bg-[var(--bg-base)] overflow-x-auto font-mono text-[11.5px]"
+                  >
+                    {df.path && (
+                      <div className="border-b border-[var(--border)] bg-[var(--bg-elevated)] px-2 py-0.5 text-[10.5px] text-[var(--text-secondary)]">
+                        {df.path}
+                      </div>
+                    )}
+                    {df.oldStr &&
+                      df.oldStr.split('\n').map((ln, idx) => (
+                        <div key={`d-${idx}`} className="px-2 py-0.5 bg-[var(--diff-del-bg)] text-[var(--diff-del-fg)] whitespace-pre">
+                          - {ln}
+                        </div>
+                      ))}
+                    {df.newStr &&
+                      df.newStr.split('\n').map((ln, idx) => (
+                        <div key={`a-${idx}`} className="px-2 py-0.5 bg-[var(--diff-add-bg)] text-[var(--diff-add-fg)] whitespace-pre">
+                          + {ln}
+                        </div>
+                      ))}
+                  </div>
+                ))}
               </div>
             ) : (
               inpStr && (

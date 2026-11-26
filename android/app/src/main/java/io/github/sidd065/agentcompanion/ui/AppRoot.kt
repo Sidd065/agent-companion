@@ -40,7 +40,9 @@ import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.compose.rememberNavController
 import androidx.navigation.navArgument
 import io.github.sidd065.agentcompanion.core.AppSettings
+import io.github.sidd065.agentcompanion.core.Prefs
 import io.github.sidd065.agentcompanion.graph
+import io.github.sidd065.agentcompanion.net.ConnState
 import io.github.sidd065.agentcompanion.net.HostConnection
 import io.github.sidd065.agentcompanion.service.Notifier
 import io.github.sidd065.agentcompanion.ui.chat.ChatScreen
@@ -57,14 +59,29 @@ import io.github.sidd065.agentcompanion.ui.settings.SettingsScreen
 import io.github.sidd065.agentcompanion.ui.terminal.TerminalScreen
 import io.github.sidd065.agentcompanion.ui.terminal.TerminalsScreen
 import io.github.sidd065.agentcompanion.ui.theme.AppTheme
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.flow.MutableStateFlow
-import java.net.URLDecoder
-import java.net.URLEncoder
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.launch
 
 val LocalNav = staticCompositionLocalOf<NavHostController> { error("no nav") }
 
-fun enc(s: String): String = URLEncoder.encode(s, "UTF-8")
-fun dec(s: String?): String = s?.let { URLDecoder.decode(it, "UTF-8") } ?: ""
+/** Percent-encodes a query argument for Jetpack Navigation routes (`%20` for spaces, `%2B` for `+`, `%25` for `%`). */
+fun enc(s: String): String = Uri.encode(s)
+
+/**
+ * Single-pass inverse of [enc] for raw percent-encoded route substrings.
+ * Do NOT pass `NavBackStackEntry.arguments` values here — `NavController` already calls `Uri.decode` once.
+ */
+fun dec(s: String?): String = s?.let { Uri.decode(it) }.orEmpty()
+
+internal fun android.os.Bundle?.navString(key: String): String = this?.getString(key).orEmpty()
+
+internal fun resolveLocalFileUriPath(uri: String): String? = when {
+    uri.startsWith("file://") -> Uri.parse(uri).path ?: uri.removePrefix("file://").substringBefore('#')
+    uri.startsWith("/") -> uri.substringBefore('#')
+    else -> null
+}
 
 /**
  * The host of the screen on top. Host-scoped destinations set it while they're
@@ -76,6 +93,48 @@ object CurrentHost {
 
 val LocalHostId = staticCompositionLocalOf<String?> { null }
 
+/** Tracks a host explicitly picked by the user in this app session (even if currently offline). */
+object ExplicitHostChoice {
+    private val _flow = MutableStateFlow<String?>(null)
+    val flow: StateFlow<String?> = _flow
+
+    var hostId: String?
+        get() = _flow.value
+        set(value) { _flow.value = value }
+}
+
+fun selectActiveHost(prefs: Prefs, scope: CoroutineScope, hostId: String) {
+    ExplicitHostChoice.hostId = hostId
+    scope.launch { prefs.update { it.copy(activeHostId = hostId) } }
+}
+
+fun resolveEffectiveHostId(
+    explicitRouteHostId: String?,
+    settings: AppSettings,
+    conns: List<HostConnection>,
+    userPickedHostId: String? = ExplicitHostChoice.hostId,
+): String? {
+    val validRoute = explicitRouteHostId?.takeIf { id -> id.isNotBlank() && settings.hosts.any { it.id == id } }
+    if (validRoute != null) return validRoute
+    val picked = userPickedHostId?.takeIf { id -> id.isNotBlank() && settings.hosts.any { it.id == id } }
+    val saved = settings.activeHostId?.takeIf { id -> settings.hosts.any { it.id == id } }
+    if (saved != null) {
+        val savedConn = conns.firstOrNull { it.config.id == saved }
+        if (savedConn?.rpc?.isConnected == true || picked == saved) return saved
+    }
+    if (picked != null && settings.activeHostId == null) return picked
+    return conns.firstOrNull { it.rpc.isConnected }?.config?.id
+        ?: saved
+        ?: settings.hosts.firstOrNull()?.id
+}
+
+@Composable
+private fun observeConnStates(conns: List<HostConnection>): List<ConnState> =
+    conns.map { c ->
+        val st by androidx.compose.runtime.key(c.config.id) { c.rpc.state.collectAsState() }
+        st
+    }
+
 object Routes {
     const val SESSIONS = "sessions"
     const val FILES = "files"
@@ -85,7 +144,7 @@ object Routes {
     fun chat(id: String, prefill: String = "", host: String? = null) = "chat/$id?prefill=${enc(prefill)}&${h(host)}"
     fun newSession(cwd: String = "", text: String = "", host: String? = null) = "new?cwd=${enc(cwd)}&text=${enc(text)}&${h(host)}"
     fun file(path: String, edit: Boolean = false, host: String? = null) = "file?path=${enc(path)}&edit=$edit&${h(host)}"
-    fun files(path: String, host: String? = null) = "files?path=${enc(path)}&${h(host)}"
+    fun files(path: String, host: String? = null) = "folder?path=${enc(path)}&${h(host)}"
     fun term(id: String, host: String? = null) = "term/$id?${h(host)}"
     fun diff(sessionId: String = "-", path: String = "", host: String? = null) = "diff/$sessionId?path=${enc(path)}&${h(host)}"
     fun artifact(sessionId: String, path: String, host: String? = null) = "artifact/$sessionId?path=${enc(path)}&${h(host)}"
@@ -94,12 +153,23 @@ object Routes {
     fun asides(sessionId: String, host: String? = null) = "asides/$sessionId?${h(host)}"
 }
 
+internal const val ROUTE_FOLDER = "folder?path={path}&h={h}"
+internal const val ROUTE_CHAT = "chat/{sid}?prefill={prefill}&h={h}"
+internal const val ROUTE_NEW = "new?cwd={cwd}&text={text}&h={h}"
+internal const val ROUTE_FILE = "file?path={path}&edit={edit}&h={h}"
+internal const val ROUTE_TERM = "term/{tid}?h={h}"
+internal const val ROUTE_DIFF = "diff/{sid}?path={path}&h={h}"
+internal const val ROUTE_ARTIFACT = "artifact/{sid}?path={path}&h={h}"
+
 /** Provides [hostId] (blank = the selected host) to a host-scoped screen. */
 @Composable
 fun HostScope(hostId: String?, content: @Composable () -> Unit) {
     val g = LocalContext.current.graph
     val settings by g.prefs.flow.collectAsState()
-    val id = hostId?.takeIf { it.isNotBlank() && settings.hosts.any { h -> h.id == it } } ?: settings.activeHost?.id
+    val conns by g.connections.collectAsState()
+    val explicit by ExplicitHostChoice.flow.collectAsState()
+    observeConnStates(conns)
+    val id = resolveEffectiveHostId(hostId, settings, conns, explicit)
     androidx.compose.runtime.SideEffect { CurrentHost.id = id }
     CompositionLocalProvider(LocalHostId provides id) { content() }
 }
@@ -133,9 +203,9 @@ fun AppRoot() {
         val uriHandler = remember(nav) {
             object : UriHandler {
                 override fun openUri(uri: String) {
-                    if (uri.startsWith("file://") || uri.startsWith("/")) {
-                        val path = Uri.decode(uri.removePrefix("file://").substringBefore('#'))
-                        nav.navigate(Routes.file(path))
+                    val path = resolveLocalFileUriPath(uri)
+                    if (path != null) {
+                        nav.navigate(Routes.file(path, host = CurrentHost.id))
                     } else {
                         runCatching { external.openUri(uri) }
                     }
@@ -160,7 +230,9 @@ fun activeConnection(): HostConnection? {
     val g = LocalContext.current.graph
     val s by g.prefs.flow.collectAsState()
     val conns by g.connections.collectAsState()
-    val id = LocalHostId.current ?: s.activeHost?.id
+    val explicit by ExplicitHostChoice.flow.collectAsState()
+    observeConnStates(conns)
+    val id = LocalHostId.current ?: resolveEffectiveHostId(null, s, conns, explicit)
     return conns.firstOrNull { it.config.id == id } ?: conns.firstOrNull()
 }
 
@@ -227,54 +299,63 @@ private fun MainNav(nav: NavHostController, settings: AppSettings) {
     val hArg = navArgument("h") { type = NavType.StringType; defaultValue = "" }
     NavHost(nav, startDestination = Routes.SESSIONS) {
         composable(Routes.SESSIONS) { androidx.compose.runtime.SideEffect { CurrentHost.id = null }; SessionsScreen() }
-        composable(Routes.FILES) { HostScope(null) { androidx.compose.runtime.key(LocalHostId.current) { FilesScreen(initialPath = "") } } }
-        composable("files?path={path}&h={h}", arguments = listOf(navArgument("path") { type = NavType.StringType; defaultValue = "" }, hArg)) {
-            HostScope(it.arguments?.getString("h")) { FilesScreen(initialPath = dec(it.arguments?.getString("path")), standalone = true) }
+        composable(Routes.FILES) { HostScope(null) { FilesScreen(initialPath = "") } }
+        composable(ROUTE_FOLDER, arguments = listOf(navArgument("path") { type = NavType.StringType; defaultValue = "" }, hArg)) {
+            HostScope(it.arguments?.getString("h")) {
+                androidx.compose.runtime.key(LocalHostId.current) {
+                    FilesScreen(initialPath = it.arguments.navString("path"), standalone = true)
+                }
+            }
         }
         composable(Routes.TERMS) { androidx.compose.runtime.SideEffect { CurrentHost.id = null }; TerminalsScreen() }
-        composable(Routes.MANAGE) { HostScope(null) { ManageScreen() } }
+        composable(Routes.MANAGE) { HostScope(null) { androidx.compose.runtime.key(LocalHostId.current) { ManageScreen() } } }
         composable("settings") { SettingsScreen() }
         composable("hosts") { HostsScreen(firstRun = false) }
         composable(
-            "chat/{sid}?prefill={prefill}&h={h}",
+            ROUTE_CHAT,
             arguments = listOf(navArgument("sid") { type = NavType.StringType }, navArgument("prefill") { type = NavType.StringType; defaultValue = "" }, hArg),
         ) {
             HostScope(it.arguments?.getString("h")) {
-                ChatScreen(sessionId = it.arguments?.getString("sid") ?: "", prefill = dec(it.arguments?.getString("prefill")))
+                ChatScreen(sessionId = it.arguments.navString("sid"), prefill = it.arguments.navString("prefill"))
             }
         }
         composable(
-            "new?cwd={cwd}&text={text}&h={h}",
+            ROUTE_NEW,
             arguments = listOf(navArgument("cwd") { type = NavType.StringType; defaultValue = "" }, navArgument("text") { type = NavType.StringType; defaultValue = "" }, hArg),
         ) {
-            NewSessionScreen(initialCwd = dec(it.arguments?.getString("cwd")), initialText = dec(it.arguments?.getString("text")),
-                initialHost = it.arguments?.getString("h").orEmpty())
+            NewSessionScreen(
+                initialCwd = it.arguments.navString("cwd"),
+                initialText = it.arguments.navString("text"),
+                initialHost = it.arguments.navString("h"),
+            )
         }
         composable(
-            "file?path={path}&edit={edit}&h={h}",
+            ROUTE_FILE,
             arguments = listOf(navArgument("path") { type = NavType.StringType; defaultValue = "" }, navArgument("edit") { type = NavType.BoolType; defaultValue = false }, hArg),
         ) {
             HostScope(it.arguments?.getString("h")) {
-                FileScreen(path = dec(it.arguments?.getString("path")), startEditing = it.arguments?.getBoolean("edit") == true)
+                androidx.compose.runtime.key(LocalHostId.current) {
+                    FileScreen(path = it.arguments.navString("path"), startEditing = it.arguments?.getBoolean("edit") == true)
+                }
             }
         }
-        composable("term/{tid}?h={h}", arguments = listOf(navArgument("tid") { type = NavType.StringType }, hArg)) {
-            HostScope(it.arguments?.getString("h")) { TerminalScreen(termId = it.arguments?.getString("tid") ?: "") }
+        composable(ROUTE_TERM, arguments = listOf(navArgument("tid") { type = NavType.StringType }, hArg)) {
+            HostScope(it.arguments?.getString("h")) { TerminalScreen(termId = it.arguments.navString("tid")) }
         }
         composable(
-            "diff/{sid}?path={path}&h={h}",
+            ROUTE_DIFF,
             arguments = listOf(navArgument("sid") { type = NavType.StringType }, navArgument("path") { type = NavType.StringType; defaultValue = "" }, hArg),
         ) {
             HostScope(it.arguments?.getString("h")) {
-                DiffScreen(sessionId = it.arguments?.getString("sid")?.takeIf { s -> s != "-" }, path = dec(it.arguments?.getString("path")))
+                DiffScreen(sessionId = it.arguments?.getString("sid")?.takeIf { s -> s != "-" }, path = it.arguments.navString("path"))
             }
         }
         composable(
-            "artifact/{sid}?path={path}&h={h}",
+            ROUTE_ARTIFACT,
             arguments = listOf(navArgument("sid") { type = NavType.StringType }, navArgument("path") { type = NavType.StringType; defaultValue = "" }, hArg),
         ) {
             HostScope(it.arguments?.getString("h")) {
-                io.github.sidd065.agentcompanion.ui.chat.ArtifactScreen(sessionId = it.arguments?.getString("sid") ?: "", path = dec(it.arguments?.getString("path")))
+                io.github.sidd065.agentcompanion.ui.chat.ArtifactScreen(sessionId = it.arguments.navString("sid"), path = it.arguments.navString("path"))
             }
         }
         composable("text/{key}", arguments = listOf(navArgument("key") { type = NavType.StringType })) {

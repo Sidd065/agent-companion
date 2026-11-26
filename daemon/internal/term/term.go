@@ -37,6 +37,11 @@ type Manager struct {
 	AgyPath   string
 	// ClaudePath is the claude executable for Claude Code terminals.
 	ClaudePath string
+	// CodexPath is the codex executable for Codex terminals.
+	CodexPath string
+	// CodexLaunch builds the command and extra tmux env vars for `codex` terminals
+	// (injecting CODEX_HOME and loopback OpenRouter bridge flags without exposing raw keys).
+	CodexLaunch func(convID string, skip bool, extraArgs []string) (bin string, args []string, extraEnv map[string]string)
 	// DefaultSkip is used for agy terminals when the client doesn't say
 	// (the app always sends its saved flag).
 	DefaultSkip bool
@@ -46,19 +51,19 @@ type Manager struct {
 
 // Term is one terminal.
 type Term struct {
-	ID       string `json:"id"`
-	Name     string `json:"name"`
-	Kind     string `json:"kind"` // shell|agy|claude|cmd
-	Cwd      string `json:"cwd"`
-	Command  string `json:"command"`
-	Created  int64  `json:"created"`
-	Attached int    `json:"attached"`
-	Width    int    `json:"width"`
-	Height   int    `json:"height"`
-	State    string `json:"state,omitempty"`
-	Msg      string `json:"msg,omitempty"`
-	Origin   string `json:"origin,omitempty"`
-	ConvID   string `json:"conversationId,omitempty"`
+	ID           string `json:"id"`
+	Name         string `json:"name"`
+	Kind         string `json:"kind"` // shell|agy|claude|codex|cmd
+	Cwd          string `json:"cwd"`
+	Command      string `json:"command"`
+	Created      int64  `json:"created"`
+	Attached     int    `json:"attached"`
+	Width        int    `json:"width"`
+	Height       int    `json:"height"`
+	State        string `json:"state,omitempty"`
+	Msg          string `json:"msg,omitempty"`
+	Origin       string `json:"origin,omitempty"`
+	ConvID       string `json:"conversationId,omitempty"`
 	Current      string `json:"currentCommand,omitempty"`
 	Dead         bool   `json:"dead"`
 	SessionID    string `json:"sessionId,omitempty"`
@@ -205,14 +210,14 @@ func (m *Manager) Get(ctx context.Context, id string) (*Term, error) {
 
 // CreateOpts describe a new terminal.
 type CreateOpts struct {
-	Kind    string   `json:"kind"` // shell|agy|cmd
-	Cwd     string   `json:"cwd"`
-	Name    string   `json:"name"`
-	Command string   `json:"command"` // for cmd
-	Args    []string `json:"args"`    // extra agy args
-	Cols    int      `json:"cols"`
-	Rows    int      `json:"rows"`
-	Origin  string   `json:"origin"`
+	Kind         string   `json:"kind"` // shell|agy|cmd
+	Cwd          string   `json:"cwd"`
+	Name         string   `json:"name"`
+	Command      string   `json:"command"` // for cmd
+	Args         []string `json:"args"`    // extra agy args
+	Cols         int      `json:"cols"`
+	Rows         int      `json:"rows"`
+	Origin       string   `json:"origin"`
 	ConvID       string   `json:"conversationId"`
 	SessionID    string   `json:"sessionId,omitempty"`
 	ScriptID     string   `json:"scriptId,omitempty"`
@@ -256,6 +261,7 @@ func (m *Manager) Create(ctx context.Context, o CreateOpts) (*Term, error) {
 	}
 	id := newID()
 	var command string
+	var extraEnv map[string]string
 	switch o.Kind {
 	case "claude":
 		bin := m.ClaudePath
@@ -318,6 +324,48 @@ func (m *Manager) Create(ctx context.Context, o CreateOpts) (*Term, error) {
 		if o.Name == "" {
 			o.Name = "agy · " + filepath.Base(o.Cwd)
 		}
+	case "codex":
+		skip := m.DefaultSkip
+		if o.Skip != nil {
+			skip = *o.Skip
+		}
+		if m.CodexLaunch != nil {
+			bin, launchArgs, envMap := m.CodexLaunch(o.ConvID, skip, o.Args)
+			extraEnv = envMap
+			if bin == "" {
+				bin = "codex"
+			}
+			parts := []string{shq(bin)}
+			for _, a := range launchArgs {
+				parts = append(parts, shq(a))
+			}
+			command = strings.Join(parts, " ")
+		} else {
+			bin := m.CodexPath
+			if bin == "" {
+				bin = "codex"
+			}
+			parts := []string{shq(bin)}
+			hasBypass := false
+			for _, a := range o.Args {
+				if a == "--dangerously-bypass-approvals-and-sandbox" || a == "--full-auto" {
+					hasBypass = true
+				}
+			}
+			if skip && !hasBypass {
+				parts = append(parts, "--dangerously-bypass-approvals-and-sandbox")
+			}
+			if o.ConvID != "" {
+				parts = append(parts, "resume", shq(o.ConvID))
+			}
+			for _, a := range o.Args {
+				parts = append(parts, shq(a))
+			}
+			command = strings.Join(parts, " ")
+		}
+		if o.Name == "" {
+			o.Name = "codex · " + filepath.Base(o.Cwd)
+		}
 	case "cmd":
 		if strings.TrimSpace(o.Command) == "" {
 			return nil, errors.New("command is empty")
@@ -337,7 +385,22 @@ func (m *Manager) Create(ctx context.Context, o CreateOpts) (*Term, error) {
 		}
 	}
 	args := []string{"new-session", "-d", "-s", id, "-x", strconv.Itoa(o.Cols), "-y", strconv.Itoa(o.Rows), "-c", o.Cwd,
-		"-e", "AGY_CLI_OSC7501=on", "-e", "AGENTC_TERM_ID=" + id, "-e", "COLORTERM=truecolor", command}
+		"-e", "AGY_CLI_OSC7501=on", "-e", "AGENTC_TERM_ID=" + id, "-e", "COLORTERM=truecolor"}
+	spawnCmd := command
+	if len(extraEnv) > 0 {
+		keys := make([]string, 0, len(extraEnv))
+		for k := range extraEnv {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		for _, k := range keys {
+			args = append(args, "-e", k+"="+extraEnv[k])
+		}
+		if p := extraEnv["PATH"]; p != "" && o.Kind != "shell" && o.Kind != "cmd" {
+			spawnCmd = "export PATH=" + shq(p) + "; exec " + command
+		}
+	}
+	args = append(args, spawnCmd)
 	if _, err := m.tmux(ctx, args...); err != nil {
 		return nil, fmt.Errorf("tmux new-session: %w", err)
 	}

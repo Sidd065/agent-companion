@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { FileText, MessageSquarePlus, RefreshCw, Send } from 'lucide-react';
 import type { ArtifactInfo } from '@agentc/protocol';
 import { useApp } from '../../state/appStore.js';
@@ -6,6 +6,9 @@ import { MarkdownRenderer } from '../markdown/MarkdownRenderer.js';
 
 export const ArtifactsPanel: React.FC = () => {
   const { activeHost, activeSession, callHost, addComposerChip, pushToast } = useApp();
+  const hostId = activeHost?.creds.id ?? '';
+  const sessionId = activeSession?.id ?? '';
+
   const [artifacts, setArtifacts] = useState<ArtifactInfo[]>([]);
   const [selected, setSelected] = useState<ArtifactInfo | null>(null);
   const [content, setContent] = useState('');
@@ -13,44 +16,62 @@ export const ArtifactsPanel: React.FC = () => {
 
   const [commentBlockIdx, setCommentBlockIdx] = useState<number | null>(null);
   const [commentText, setCommentText] = useState('');
+  const reqSeqRef = useRef(0);
 
   const loadList = useCallback(async () => {
-    if (!activeHost || !activeSession) return;
+    if (!hostId || !sessionId) return;
+    const seq = ++reqSeqRef.current;
     setLoading(true);
     try {
-      const list = await callHost<ArtifactInfo[]>(activeHost.creds.id, 'session.artifacts', {
-        id: activeSession.id,
+      const list = await callHost<ArtifactInfo[]>(hostId, 'session.artifacts', {
+        id: sessionId,
       });
+      if (seq !== reqSeqRef.current) return;
       const arr = Array.isArray(list) ? list : [];
       setArtifacts(arr);
-      if (arr.length > 0 && !selected) {
-        setSelected(arr[0]);
-      }
+      setSelected((prev) => (prev && arr.some((x) => x.path === prev.path) ? prev : arr[0] ?? null));
     } catch {
+      if (seq !== reqSeqRef.current) return;
       setArtifacts([]);
+      setSelected(null);
     } finally {
-      setLoading(false);
+      if (seq === reqSeqRef.current) {
+        setLoading(false);
+      }
     }
-  }, [activeHost, activeSession, callHost, selected]);
+  }, [hostId, sessionId, callHost]);
 
   useEffect(() => {
+    reqSeqRef.current++;
+    setArtifacts([]);
     setSelected(null);
     setContent('');
-    void loadList();
-  }, [activeSession?.id]); // eslint-disable-line react-hooks/exhaustive-deps
+    setCommentBlockIdx(null);
+    setCommentText('');
+    if (hostId && sessionId) {
+      void loadList();
+    }
+  }, [hostId, sessionId, loadList]);
 
   useEffect(() => {
-    if (!activeHost || !activeSession || !selected) return;
-    void callHost<{ text?: string; content?: string } | string>(activeHost.creds.id, 'session.artifact', {
-      id: activeSession.id,
+    if (!hostId || !sessionId || !selected) {
+      setContent('');
+      return;
+    }
+    const guardSeq = reqSeqRef.current;
+    void callHost<{ text?: string; content?: string } | string>(hostId, 'session.artifact', {
+      id: sessionId,
       path: selected.path,
     })
       .then((res) => {
+        if (guardSeq !== reqSeqRef.current) return;
         if (typeof res === 'string') setContent(res);
         else setContent(res?.text ?? res?.content ?? '');
       })
-      .catch(() => setContent(''));
-  }, [activeHost, activeSession, selected, callHost]);
+      .catch(() => {
+        if (guardSeq === reqSeqRef.current) setContent('');
+      });
+  }, [hostId, sessionId, selected, callHost]);
 
   if (!activeHost || !activeSession) {
     return (

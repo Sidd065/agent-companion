@@ -29,7 +29,13 @@ data class HostConfig(
     val pairedAt: Long = 0,
     val notify: Boolean = true,
 ) {
-    val label: String get() = name.ifBlank { url.removePrefix("https://").substringBefore('.') }
+    val label: String
+        get() = name.ifBlank {
+            val stripped = url.removePrefix("https://").removePrefix("http://").substringBefore('/')
+            val hostPart = stripped.substringBefore(':')
+            val isIpOrLocal = hostPart == "localhost" || hostPart.all { it.isDigit() || it == '.' || it == '[' || it == ']' }
+            if (isIpOrLocal) stripped else stripped.substringBefore('.')
+        }
 }
 
 @Serializable
@@ -94,7 +100,8 @@ data class SessionSummary(
     val needsInput: Boolean get() = !attention.isNullOrEmpty() || state == "waiting"
     val displayTitle: String get() = title.ifBlank { "Untitled conversation" }
     val isClaude: Boolean get() = agent == "claude"
-    /** How the agent is named in messages ("agy", "Claude"). */
+    val isCodex: Boolean get() = agent == "codex"
+    /** How the agent is named in messages ("agy", "Claude", "Codex"). */
     val agentLabel: String get() = agentLabel(agent)
 }
 
@@ -108,7 +115,7 @@ fun agentLabel(agent: String?): String = when {
 fun agentProduct(agent: String?): String = when {
     agent.isNullOrBlank() || agent == "agy" -> "agy"
     agent == "claude" -> "Claude Code"
-    agent == "codex" -> "OpenAI Codex"
+    agent == "codex" -> "Codex / OpenRouter"
     else -> agent.replaceFirstChar { it.uppercase() }
 }
 
@@ -414,7 +421,13 @@ data class ConfigFileInfo(
 )
 
 @Serializable
-data class SkillInfo(val name: String, val description: String = "", val path: String = "", val source: String = "")
+data class SkillInfo(
+    val name: String,
+    val description: String = "",
+    val path: String = "",
+    val source: String = "",
+    val scope: String = "",
+)
 
 @Serializable
 data class AgyModel(val id: String, val name: String = "", val default: Boolean = false)
@@ -590,6 +603,167 @@ data class ClaudeFlags(
         if (addDirs.isNotEmpty()) put("addDirs", kotlinx.serialization.json.JsonArray(addDirs.map { kotlinx.serialization.json.JsonPrimitive(it) }))
         val extra = headlessExtraArgs()
         if (extra.isNotEmpty()) put("extraArgs", kotlinx.serialization.json.JsonArray(extra.map { kotlinx.serialization.json.JsonPrimitive(it) }))
+    }
+}
+
+/**
+ * Codex / OpenRouter launch flags chosen on the phone. Saved in app settings and
+ * applied to every new Codex chat session (`codex app-server` behind the daemon),
+ * Codex terminal (`codex …`) and resumed conversation.
+ */
+/**
+ * Normalizes a Codex model slug for `codex` TUI `-m <slug>`, matching daemon
+ * `codex.NormalizeOpenRouterSlug` + `ResolveProviderAndModel`:
+ * - Preserves single-slash OpenRouter router slugs (`"openrouter/free"`, `"openrouter/auto"`,
+ *   case-normalizing `"OpenRouter/auto:nitro"` -> `"openrouter/auto:nitro"`).
+ * - Normalizes bare trailing-slash `"openrouter/"` / `"OpenRouter/   "` -> `""`.
+ * - Strips leading case-insensitive `"openrouter/"` on 2+-slash vendor slugs
+ *   (`"OpenRouter/google/gemini-2.5-flash"` -> `"google/gemini-2.5-flash"`).
+ * - Strips leading case-insensitive `"openai/"` when `provider` is `"openai"` / `"native"`.
+ */
+fun normalizeCodexTuiModelSlug(rawModel: String, provider: String = ""): String {
+    val s = rawModel.trim()
+    if (s.isEmpty()) return ""
+    val prefix = "openrouter/"
+    var norm = if (s.length >= prefix.length && s.substring(0, prefix.length).equals(prefix, ignoreCase = true)) {
+        val rest = s.substring(prefix.length).trim()
+        when {
+            rest.isEmpty() -> ""
+            rest.contains('/') -> rest
+            else -> prefix + rest
+        }
+    } else {
+        s
+    }
+    val fp = provider.trim().lowercase()
+    if (fp == "openai" || fp == "native") {
+        val oaPrefix = "openai/"
+        if (norm.length >= oaPrefix.length && norm.substring(0, oaPrefix.length).equals(oaPrefix, ignoreCase = true)) {
+            norm = norm.substring(oaPrefix.length).trim()
+        }
+    }
+    return norm
+}
+
+@Serializable
+data class CodexFlags(
+    val skipPermissions: Boolean = false,
+    val model: String = "",
+    val effort: String = "",          // "" | "low" | "medium" | "high" | "xhigh"
+    val mode: String = "",            // "" | "default" | "plan" | "acceptEdits" | "auto" | "full-access"
+    val approvalPolicy: String = "",  // "" | "untrusted" | "on-request" | "never"
+    val sandbox: String = "",         // "" | "read-only" | "workspace-write" | "danger-full-access"
+    val provider: String = "",        // "" (auto) | "openrouter" | "openai"
+    val addDirs: List<String> = emptyList(),
+    val extraArgs: String = "",
+    val tuiExtra: String = "",
+) {
+    val effectiveSkipPermissions: Boolean
+        get() = skipPermissions || mode.trim() == "full-access" ||
+            (approvalPolicy.trim() == "never" && sandbox.trim() == "danger-full-access")
+
+    /** Extra flags for `codex app-server` sessions. */
+    fun headlessExtraArgs(): List<String> = splitArgs(extraArgs)
+
+    /**
+     * Flags for `codex` TUI in a terminal (note: `--dangerously-bypass-approvals-and-sandbox`
+     * is added by the daemon when `skipPermissions` is true and no explicit policy is passed).
+     * Verified against `codex-cli 0.172.0`:
+     * - Explicit `provider` (`"openai"` / `"openrouter"`) emits `-c model_provider="<provider>"`
+     *   (overriding `CodexTermLaunch`'s prepended `-c model_provider="openrouter"` when `"openai"` is chosen).
+     * - `-m <slug>` strips leading `openrouter/` unless `provider == "openai"`.
+     * - Reasoning effort uses `-c model_reasoning_effort="<effort>"` (no `--effort` CLI flag exists).
+     * - `approval_policy = "untrusted"` was removed from `codex-cli 0.172.0` CLI/TUI config parsing,
+     *   so both `"on-request"` and `"untrusted"` map to `-a on-request` (`"never"` -> `-a never`).
+     */
+    fun tuiArgs(): List<String> = buildList {
+        val cleanProvider = provider.trim().lowercase()
+        when (cleanProvider) {
+            "openai", "native" -> { add("-c"); add("model_provider=\"openai\"") }
+            "openrouter" -> { add("-c"); add("model_provider=\"openrouter\"") }
+        }
+        val cleanModel = normalizeCodexTuiModelSlug(model, cleanProvider)
+        if (cleanModel.isNotBlank()) { add("-m"); add(cleanModel) }
+        if (effort.isNotBlank()) {
+            add("-c"); add("model_reasoning_effort=\"${effort.trim()}\"")
+        }
+        val effSandbox = sandbox.trim().ifBlank {
+            when (mode.trim()) {
+                "plan" -> "read-only"
+                "acceptEdits", "auto" -> "workspace-write"
+                "full-access" -> "danger-full-access"
+                else -> ""
+            }
+        }
+        val effApproval = approvalPolicy.trim().ifBlank {
+            when (mode.trim()) {
+                "default", "plan", "acceptEdits" -> "on-request"
+                "auto", "full-access" -> "never"
+                else -> ""
+            }
+        }
+        if (!effectiveSkipPermissions) {
+            if (effSandbox.isNotBlank()) { add("-s"); add(effSandbox) }
+            when (effApproval) {
+                "on-request", "untrusted" -> { add("-a"); add("on-request") }
+                "never" -> { add("-a"); add("never") }
+            }
+        }
+        addDirs.filter { it.isNotBlank() }.forEach { add("--add-dir"); add(it) }
+        addAll(splitArgs(extraArgs))
+        addAll(splitArgs(tuiExtra))
+    }
+
+    /** Terminal flags for continuing an existing Codex conversation (`codex resume <id>`). */
+    fun tuiResumeArgs(): List<String> =
+        copy(provider = "", model = "", effort = "", mode = "", approvalPolicy = "", sandbox = "").tuiArgs()
+
+    fun tuiPreview(): String = (
+        listOf("codex") +
+            (if (effectiveSkipPermissions) listOf("--dangerously-bypass-approvals-and-sandbox") else emptyList()) +
+            tuiArgs().map(::shellQuote)
+        ).joinToString(" ")
+
+    fun headlessPreview(): String {
+        val base = (listOf("codex", "app-server") + headlessExtraArgs().map(::shellQuote)).joinToString(" ")
+        val meta = listOfNotNull(
+            provider.takeIf { it.isNotBlank() }?.let { "provider=${it.trim()}" },
+            model.takeIf { it.isNotBlank() }?.let { "model=${it.trim()}" },
+            effort.takeIf { it.isNotBlank() }?.let { "effort=${it.trim()}" },
+            mode.takeIf { it.isNotBlank() }?.let { "mode=${it.trim()}" },
+            approvalPolicy.takeIf { it.isNotBlank() }?.let { "approval=${it.trim()}" },
+            sandbox.takeIf { it.isNotBlank() }?.let { "sandbox=${it.trim()}" },
+            if (effectiveSkipPermissions) "full-access" else null,
+        ).joinToString(", ")
+        return if (meta.isEmpty()) base else "$base  ($meta)"
+    }
+
+    /**
+     * JSON for the daemon's `session.create` / `session.subscribe` `"flags"`.
+     * Emits `{}` when completely untouched so daemon/provider defaults apply;
+     * explicitly emits `"skipPermissions": false` when a non-bypass mode/policy/sandbox
+     * is chosen so daemon `DefaultSkip=true` does NOT override Supervised/Plan into `danger-full-access`.
+     */
+    fun daemonJson(): kotlinx.serialization.json.JsonObject = kotlinx.serialization.json.buildJsonObject {
+        if (effectiveSkipPermissions) {
+            put("skipPermissions", kotlinx.serialization.json.JsonPrimitive(true))
+        } else if (mode.isNotBlank() || approvalPolicy.isNotBlank() || sandbox.isNotBlank()) {
+            put("skipPermissions", kotlinx.serialization.json.JsonPrimitive(false))
+        }
+        if (provider.isNotBlank()) put("provider", kotlinx.serialization.json.JsonPrimitive(provider.trim()))
+        if (model.isNotBlank()) put("model", kotlinx.serialization.json.JsonPrimitive(model.trim()))
+        if (mode.isNotBlank()) put("mode", kotlinx.serialization.json.JsonPrimitive(mode.trim()))
+        if (effort.isNotBlank()) put("effort", kotlinx.serialization.json.JsonPrimitive(effort.trim()))
+        if (approvalPolicy.isNotBlank()) put("approvalPolicy", kotlinx.serialization.json.JsonPrimitive(approvalPolicy.trim()))
+        if (sandbox.isNotBlank()) put("sandbox", kotlinx.serialization.json.JsonPrimitive(sandbox.trim()))
+        val cleanDirs = addDirs.filter { it.isNotBlank() }
+        if (cleanDirs.isNotEmpty()) {
+            put("addDirs", kotlinx.serialization.json.JsonArray(cleanDirs.map { kotlinx.serialization.json.JsonPrimitive(it) }))
+        }
+        val ex = headlessExtraArgs()
+        if (ex.isNotEmpty()) {
+            put("extraArgs", kotlinx.serialization.json.JsonArray(ex.map { kotlinx.serialization.json.JsonPrimitive(it) }))
+        }
     }
 }
 

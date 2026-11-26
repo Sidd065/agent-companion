@@ -18,6 +18,8 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -28,6 +30,7 @@ import (
 
 	"agentc/internal/agycli"
 	"agentc/internal/core"
+	"agentc/internal/providers"
 	"agentc/internal/push"
 	"agentc/internal/qrterm"
 	"agentc/internal/secure"
@@ -58,6 +61,11 @@ type Config struct {
 	AgyPath       string `json:"agyPath,omitempty"`
 	// ClaudePath is the Claude Code executable (default ~/.local/bin/claude or PATH).
 	ClaudePath string `json:"claudePath,omitempty"`
+	// CodexPath is the OpenAI Codex CLI executable (default ~/.local/bin/codex or PATH).
+	CodexPath            string            `json:"codexPath,omitempty"`
+	OpenRouterAPIKey     string            `json:"openRouterApiKey,omitempty"`
+	OpenRouterAPIKeyFile string            `json:"openRouterApiKeyFile,omitempty"`
+	Env                  map[string]string `json:"env,omitempty"`
 	// ClaudrArgs are the default claude flags `claudr` adds.
 	ClaudrArgs *[]string `json:"claudrArgs,omitempty"`
 	// AgyrArgs are the default agy flags `agyr` adds (configurable; --safe drops
@@ -153,9 +161,23 @@ func findAgy(home string) string {
 	return "agy"
 }
 
+func expandHomePath(home, p string) string {
+	p = strings.TrimSpace(p)
+	if p == "" {
+		return ""
+	}
+	if p == "~" && home != "" {
+		return home
+	}
+	if strings.HasPrefix(p, "~/") && home != "" {
+		return filepath.Join(home, p[2:])
+	}
+	return p
+}
+
 func findClaude(home, configured string) string {
-	if configured != "" {
-		return configured
+	if c := expandHomePath(home, configured); c != "" {
+		return c
 	}
 	cand := filepath.Join(home, ".local", "bin", "claude")
 	if _, err := os.Stat(cand); err == nil {
@@ -165,6 +187,75 @@ func findClaude(home, configured string) string {
 		return p
 	}
 	return "claude"
+}
+
+func findCodex(home, configured string) string {
+	if c := expandHomePath(home, configured); c != "" {
+		return c
+	}
+	if envBin := expandHomePath(home, os.Getenv("AGENTC_CODEX_PATH")); envBin != "" {
+		return envBin
+	}
+	cand := filepath.Join(home, ".local", "bin", "codex")
+	if st, err := os.Stat(cand); err == nil && !st.IsDir() && st.Mode()&0o111 != 0 {
+		return cand
+	}
+	if p, err := exec.LookPath("codex"); err == nil {
+		return p
+	}
+	return "codex"
+}
+
+func readKeyFileStrict(home, path string) (string, error) {
+	full := expandHomePath(home, path)
+	b, err := os.ReadFile(full)
+	if err != nil {
+		return "", err
+	}
+	for _, line := range strings.Split(string(b), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		line = strings.TrimPrefix(line, "export ")
+		line = strings.TrimPrefix(line, "OPENROUTER_API_KEY=")
+		line = strings.Trim(line, `"'`)
+		if line != "" {
+			return strings.TrimSpace(line), nil
+		}
+	}
+	return "", fmt.Errorf("key file %s is empty", full)
+}
+
+func resolveOpenRouterKey(flagKey, flagKeyFile string, cfg Config, home string) (string, error) {
+	if v := strings.TrimSpace(flagKey); v != "" && v != providers.RedactedSecret {
+		return v, nil
+	}
+	if strings.TrimSpace(flagKeyFile) != "" {
+		return readKeyFileStrict(home, flagKeyFile)
+	}
+	if v := strings.TrimSpace(os.Getenv("OPENROUTER_API_KEY")); v != "" && v != providers.RedactedSecret {
+		return v, nil
+	}
+	if envFile := strings.TrimSpace(os.Getenv("OPENROUTER_API_KEY_FILE")); envFile != "" {
+		if v, err := readKeyFileStrict(home, envFile); err == nil && v != "" {
+			return v, nil
+		}
+	}
+	if v := strings.TrimSpace(cfg.OpenRouterAPIKey); v != "" && v != providers.RedactedSecret {
+		return v, nil
+	}
+	if cfg.Env != nil {
+		if v := strings.TrimSpace(cfg.Env["OPENROUTER_API_KEY"]); v != "" && v != providers.RedactedSecret {
+			return v, nil
+		}
+	}
+	if strings.TrimSpace(cfg.OpenRouterAPIKeyFile) != "" {
+		if v, err := readKeyFileStrict(home, cfg.OpenRouterAPIKeyFile); err == nil && v != "" {
+			return v, nil
+		}
+	}
+	return "", nil
 }
 
 func selfExe() string {
@@ -184,7 +275,7 @@ func termManager(p paths, c Config, env func() []string) *term.Manager {
 		skip = *c.DefaultSkipPermissions
 	}
 	return &term.Manager{Sock: p.tmuxSock(), Conf: p.tmuxConf(), SelfExe: selfExe(), LocalSock: p.localSock(), AgyPath: c.AgyPath,
-		ClaudePath: findClaude(p.home, c.ClaudePath), DefaultSkip: skip, Env: env}
+		ClaudePath: findClaude(p.home, c.ClaudePath), CodexPath: findCodex(p.home, c.CodexPath), DefaultSkip: skip, Env: env}
 }
 
 func main() {
@@ -223,6 +314,8 @@ func main() {
 		os.Exit(devicesCmd(args[1:]))
 	case "tunnel":
 		os.Exit(tunnelCmd(args[1:]))
+	case "config":
+		os.Exit(configCmd(args[1:]))
 	case "install":
 		os.Exit(install(args[1:]))
 	case "osc-watch":
@@ -247,7 +340,8 @@ usage:
   agentc status                      show the daemon, tunnel and paired devices
   agentc devices [revoke ID]         list paired devices, or unpair one
   agentc tunnel stop                 stop the Cloudflare tunnel process (a new URL is made on restart)
-  agentc serve [--listen ADDR]       run the daemon (normally via systemd)
+  agentc serve [--listen ADDR] [--openrouter-api-key KEY] [--openrouter-api-key-file FILE] [--codex-path PATH]
+  agentc config set|get|list         view or update ~/.config/agentc/config.json
   agentc term ls | attach ID | kill ID   manage shared terminals
   claudr [claude args...]            run Claude Code in a shared terminal the phone can see
                                      (adds "claudrArgs"; --safe drops --dangerously-skip-permissions)
@@ -267,13 +361,46 @@ type multiFlag []string
 func (m *multiFlag) String() string     { return strings.Join(*m, ",") }
 func (m *multiFlag) Set(v string) error { *m = append(*m, v); return nil }
 
+type serveOptions struct {
+	listen            string
+	apk               string
+	openRouterKey     string
+	openRouterKeyFile string
+	codexPath         string
+}
+
+func parseServeArgs(cfg Config, defaultAPK string, args []string) (serveOptions, error) {
+	fs := flag.NewFlagSet("serve", flag.ContinueOnError)
+	var opts serveOptions
+	fs.StringVar(&opts.listen, "listen", cfg.listenAddr(), "local listen address (cloudflared connects here)")
+	fs.StringVar(&opts.apk, "apk", defaultAPK, "companion APK offered on pairing pages")
+	fs.StringVar(&opts.openRouterKey, "openrouter-api-key", "", "OpenRouter API key (held in daemon memory)")
+	fs.StringVar(&opts.openRouterKeyFile, "openrouter-api-key-file", "", "path to file containing OpenRouter API key")
+	fs.StringVar(&opts.codexPath, "codex-path", "", "path to codex executable")
+	if err := fs.Parse(args); err != nil {
+		return opts, err
+	}
+	return opts, nil
+}
+
 func serve(args []string) int {
 	p := getPaths()
 	cfg := loadConfig(p)
-	fs := flag.NewFlagSet("serve", flag.ExitOnError)
-	listen := fs.String("listen", cfg.listenAddr(), "local listen address (cloudflared connects here)")
-	apk := fs.String("apk", p.apk(), "companion APK offered on pairing pages")
-	_ = fs.Parse(args)
+	opts, err := parseServeArgs(cfg, p.apk(), args)
+	if err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return 0
+		}
+		return 2
+	}
+	listen := &opts.listen
+	apk := &opts.apk
+	resolvedORKey, err := resolveOpenRouterKey(opts.openRouterKey, opts.openRouterKeyFile, cfg, p.home)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "serve: openrouter key file: %v\n", err)
+		return 1
+	}
+	codexBin := findCodex(p.home, firstNonEmpty(opts.codexPath, cfg.CodexPath))
 
 	for _, d := range []string{p.state, p.runtime, p.config, p.share} {
 		_ = os.MkdirAll(d, 0o700)
@@ -302,11 +429,16 @@ func serve(args []string) int {
 	}
 	hub := core.NewHub()
 	mgr := core.NewManager(core.Config{
-		AgyPath: cfg.AgyPath, ClaudePath: findClaude(p.home, cfg.ClaudePath), StateDir: p.state, ConfigDir: p.config, WorktreeDir: filepath.Join(p.share, "worktrees"), HomeDir: p.home,
+		AgyPath: cfg.AgyPath, ClaudePath: findClaude(p.home, cfg.ClaudePath), CodexPath: codexBin,
+		OpenRouterAPIKey: resolvedORKey, OpenRouterAPIKeyFile: firstNonEmpty(opts.openRouterKeyFile, cfg.OpenRouterAPIKeyFile),
+		Env:      cfg.Env,
+		StateDir: p.state, ConfigDir: p.config, WorktreeDir: filepath.Join(p.share, "worktrees"), HomeDir: p.home,
 		AgyDataDir: filepath.Join(p.home, ".gemini", "antigravity-cli"), IdleHibernate: time.Duration(cfg.IdleHibernateMinutes) * time.Minute,
 		MaxLive: cfg.MaxLive, DefaultSkip: skip,
 	}, hub)
 	terms := termManager(p, cfg, mgr.AgyEnv)
+	terms.CodexPath = codexBin
+	terms.CodexLaunch = mgr.CodexTermLaunch
 	if err := terms.Init(); err != nil {
 		log.Printf("terminal init: %v", err)
 	}
@@ -363,7 +495,9 @@ func serve(args []string) int {
 		cfgMu.Lock()
 		defer cfgMu.Unlock()
 		return map[string]any{"listen": *listen, "tunnel": mode, "publicUrl": srv.PublicURL(), "idleHibernateMinutes": cfg.IdleHibernateMinutes,
-			"maxLive": cfg.MaxLive, "defaultSkipPermissions": skip, "agyPath": cfg.AgyPath, "pushContent": pusher.Content, "firebaseServiceAccount": saPath}
+			"maxLive": cfg.MaxLive, "defaultSkipPermissions": skip, "agyPath": cfg.AgyPath, "claudePath": findClaude(p.home, cfg.ClaudePath),
+			"codexPath": codexBin, "openRouterConfigured": mgr.OpenRouterConfigured(),
+			"pushContent": pusher.Content, "firebaseServiceAccount": saPath}
 	}
 	srv.ConfigSet = func(in map[string]any) (map[string]any, error) {
 		cfgMu.Lock()
@@ -1152,4 +1286,203 @@ func firstNonEmpty(v ...string) string {
 		}
 	}
 	return ""
+}
+
+// ---- config subcommand ----
+
+func configCmd(args []string) int {
+	p := getPaths()
+	cfg := loadConfig(p)
+	if len(args) == 0 || args[0] == "list" || args[0] == "ls" {
+		m := redactedConfigMap(cfg)
+		keys := make([]string, 0, len(m))
+		for k := range m {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		for _, k := range keys {
+			fmt.Printf("%s=%v\n", k, m[k])
+		}
+		return 0
+	}
+	switch args[0] {
+	case "get":
+		if len(args) < 2 {
+			b, _ := json.MarshalIndent(redactedConfigMap(cfg), "", "  ")
+			fmt.Println(string(b))
+			return 0
+		}
+		val, ok := getConfigField(cfg, args[1])
+		if !ok {
+			fmt.Fprintf(os.Stderr, "unknown config key %q\n", args[1])
+			return 1
+		}
+		fmt.Println(val)
+		return 0
+	case "set":
+		if len(args) < 3 {
+			fmt.Fprintln(os.Stderr, "usage: agentc config set <key> <value>")
+			return 2
+		}
+		if err := setConfigField(&cfg, args[1], args[2]); err != nil {
+			fmt.Fprintln(os.Stderr, "config set:", err)
+			return 1
+		}
+		if err := saveConfig(p, cfg); err != nil {
+			fmt.Fprintln(os.Stderr, "save config:", err)
+			return 1
+		}
+		return 0
+	default:
+		fmt.Fprintf(os.Stderr, "unknown config subcommand %q (expected set, get, or list)\n", args[0])
+		return 2
+	}
+}
+
+func normalizeConfigKey(k string) string {
+	s := strings.ToLower(strings.TrimSpace(k))
+	s = strings.ReplaceAll(s, "-", "_")
+	return s
+}
+
+func setConfigField(cfg *Config, rawKey, val string) error {
+	if strings.HasPrefix(strings.ToLower(strings.TrimSpace(rawKey)), "env.") {
+		envKey := strings.TrimSpace(rawKey[4:])
+		if envKey == "" {
+			return errors.New("empty env variable name")
+		}
+		if cfg.Env == nil {
+			cfg.Env = map[string]string{}
+		}
+		if val == "" {
+			delete(cfg.Env, envKey)
+		} else {
+			cfg.Env[envKey] = val
+		}
+		return nil
+	}
+	switch normalizeConfigKey(rawKey) {
+	case "openrouter_api_key", "openrouterapikey":
+		cfg.OpenRouterAPIKey = strings.TrimSpace(val)
+	case "openrouter_api_key_file", "openrouterapikeyfile":
+		cfg.OpenRouterAPIKeyFile = strings.TrimSpace(val)
+	case "codex_path", "codexpath":
+		cfg.CodexPath = strings.TrimSpace(val)
+	case "claude_path", "claudepath":
+		cfg.ClaudePath = strings.TrimSpace(val)
+	case "agy_path", "agypath":
+		cfg.AgyPath = strings.TrimSpace(val)
+	case "listen":
+		cfg.Listen = strings.TrimSpace(val)
+	case "tunnel":
+		cfg.Tunnel = strings.TrimSpace(val)
+	case "public_url", "publicurl":
+		cfg.PublicURL = strings.TrimSpace(val)
+	case "port":
+		n, err := strconv.Atoi(strings.TrimSpace(val))
+		if err != nil || n <= 0 || n > 65535 {
+			return fmt.Errorf("invalid port %q", val)
+		}
+		cfg.Port = n
+	case "idle_hibernate_minutes", "idlehibernateminutes":
+		n, err := strconv.Atoi(strings.TrimSpace(val))
+		if err != nil || n < 1 {
+			return fmt.Errorf("invalid idleHibernateMinutes %q", val)
+		}
+		cfg.IdleHibernateMinutes = n
+	case "max_live", "maxlive":
+		n, err := strconv.Atoi(strings.TrimSpace(val))
+		if err != nil || n < 1 {
+			return fmt.Errorf("invalid maxLive %q", val)
+		}
+		cfg.MaxLive = n
+	default:
+		return fmt.Errorf("unsupported config key %q", rawKey)
+	}
+	return nil
+}
+
+func getConfigField(cfg Config, rawKey string) (string, bool) {
+	if strings.HasPrefix(strings.ToLower(strings.TrimSpace(rawKey)), "env.") {
+		envKey := strings.TrimSpace(rawKey[4:])
+		if cfg.Env == nil {
+			return "", true
+		}
+		v := cfg.Env[envKey]
+		if v != "" && providers.IsSecretEnvKey(envKey) {
+			return providers.RedactedSecret, true
+		}
+		return v, true
+	}
+	switch normalizeConfigKey(rawKey) {
+	case "openrouter_api_key", "openrouterapikey":
+		if strings.TrimSpace(cfg.OpenRouterAPIKey) != "" {
+			return providers.RedactedSecret, true
+		}
+		return "", true
+	case "openrouter_api_key_file", "openrouterapikeyfile":
+		return cfg.OpenRouterAPIKeyFile, true
+	case "codex_path", "codexpath":
+		return cfg.CodexPath, true
+	case "claude_path", "claudepath":
+		return cfg.ClaudePath, true
+	case "agy_path", "agypath":
+		return cfg.AgyPath, true
+	case "listen":
+		return cfg.Listen, true
+	case "tunnel":
+		return cfg.Tunnel, true
+	case "public_url", "publicurl":
+		return cfg.PublicURL, true
+	case "port":
+		return strconv.Itoa(cfg.Port), true
+	case "idle_hibernate_minutes", "idlehibernateminutes":
+		return strconv.Itoa(cfg.IdleHibernateMinutes), true
+	case "max_live", "maxlive":
+		return strconv.Itoa(cfg.MaxLive), true
+	default:
+		return "", false
+	}
+}
+
+func redactedConfigMap(cfg Config) map[string]any {
+	m := map[string]any{
+		"port":                 cfg.Port,
+		"idleHibernateMinutes": cfg.IdleHibernateMinutes,
+		"maxLive":              cfg.MaxLive,
+		"agyPath":              cfg.AgyPath,
+	}
+	if cfg.Listen != "" {
+		m["listen"] = cfg.Listen
+	}
+	if cfg.Tunnel != "" {
+		m["tunnel"] = cfg.Tunnel
+	}
+	if cfg.PublicURL != "" {
+		m["publicUrl"] = cfg.PublicURL
+	}
+	if cfg.ClaudePath != "" {
+		m["claudePath"] = cfg.ClaudePath
+	}
+	if cfg.CodexPath != "" {
+		m["codexPath"] = cfg.CodexPath
+	}
+	if cfg.OpenRouterAPIKeyFile != "" {
+		m["openRouterApiKeyFile"] = cfg.OpenRouterAPIKeyFile
+	}
+	if strings.TrimSpace(cfg.OpenRouterAPIKey) != "" {
+		m["openRouterApiKey"] = providers.RedactedSecret
+	}
+	if len(cfg.Env) > 0 {
+		red := make(map[string]string, len(cfg.Env))
+		for k, v := range cfg.Env {
+			if v != "" && providers.IsSecretEnvKey(k) {
+				red[k] = providers.RedactedSecret
+			} else {
+				red[k] = v
+			}
+		}
+		m["env"] = red
+	}
+	return m
 }

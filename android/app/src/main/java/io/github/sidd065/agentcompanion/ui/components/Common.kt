@@ -30,6 +30,7 @@ import androidx.compose.material.icons.outlined.ErrorOutline
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
@@ -38,6 +39,7 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -52,9 +54,14 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import io.github.sidd065.agentcompanion.net.ConnState
+import io.github.sidd065.agentcompanion.net.HostConnection
 import io.github.sidd065.agentcompanion.ui.theme.LocalExtra
 import io.github.sidd065.agentcompanion.ui.theme.codeStyle
+import kotlinx.serialization.json.contentOrNull
+import kotlinx.serialization.json.jsonPrimitive
 import java.text.SimpleDateFormat
 import java.util.Calendar
 import java.util.Date
@@ -309,5 +316,58 @@ fun CodeBox(text: String, modifier: Modifier = Modifier, wrap: Boolean = false, 
 fun Pill(text: String, color: Color, modifier: Modifier = Modifier) {
     Box(modifier.clip(RoundedCornerShape(50)).background(color.copy(alpha = 0.16f)).padding(horizontal = 8.dp, vertical = 2.dp)) {
         Text(text, style = MaterialTheme.typography.labelSmall, color = color)
+    }
+}
+
+@Composable
+fun HostConnection.rememberHomeDir(): String? {
+    val h by hello.collectAsState()
+    return h?.get("home")?.jsonPrimitive?.contentOrNull
+}
+
+@Composable
+fun HostSelectorBar(
+    conns: List<HostConnection>,
+    activeHostId: String?,
+    onSelect: (String) -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    if (conns.size <= 1) return
+    val ex = LocalExtra.current
+    Row(
+        modifier = modifier
+            .fillMaxWidth()
+            .horizontalScroll(rememberScrollState())
+            .padding(horizontal = 12.dp, vertical = 4.dp),
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        conns.forEach { c ->
+            val st by androidx.compose.runtime.key(c.config.id) { c.rpc.state.collectAsState() }
+            val dotColor = when (st) {
+                is ConnState.Connected -> ex.success
+                is ConnState.Connecting -> ex.warning
+                is ConnState.Failed, is ConnState.Idle -> ex.danger
+            }
+            FilterChip(
+                selected = c.config.id == activeHostId,
+                onClick = { onSelect(c.config.id) },
+                leadingIcon = {
+                    Box(
+                        Modifier
+                            .size(8.dp)
+                            .clip(CircleShape)
+                            .background(dotColor),
+                    )
+                },
+                label = {
+                    Text(
+                        c.config.label,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                },
+            )
+        }
     }
 }

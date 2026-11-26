@@ -115,7 +115,7 @@ export const RightPanel: React.FC<{ widthPx: number }> = ({ widthPx }) => {
                       type="button"
                       onClick={() => {
                         setPickerOpen(false);
-                        openRightTab({ id: ch.kind, kind: ch.kind, title: ch.title });
+                        openRightTab({ ...(ch.kind === 'terminal' ? {} : { id: ch.kind }), kind: ch.kind, title: ch.title });
                       }}
                       className="flex w-full items-center gap-2 rounded-lg px-2.5 py-1.5 text-left text-xs text-[var(--text-secondary)] hover:bg-[var(--bg-hover)] hover:text-[var(--text-primary)] cursor-pointer"
                     >
@@ -162,7 +162,7 @@ export const RightPanel: React.FC<{ widthPx: number }> = ({ widthPx }) => {
                 <button
                   key={ch.kind}
                   type="button"
-                  onClick={() => openRightTab({ id: ch.kind, kind: ch.kind, title: ch.title })}
+                  onClick={() => openRightTab({ ...(ch.kind === 'terminal' ? {} : { id: ch.kind }), kind: ch.kind, title: ch.title })}
                   className="rounded-lg border border-[var(--border)] bg-[var(--bg-surface)] px-2.5 py-1.5 text-xs hover:bg-[var(--bg-hover)] cursor-pointer"
                 >
                   {ch.title}
@@ -183,7 +183,7 @@ export const RightPanel: React.FC<{ widthPx: number }> = ({ widthPx }) => {
         ) : activeTab.kind === 'git' ? (
           <SourceControlPanel />
         ) : activeTab.kind === 'terminal' ? (
-          <TerminalPanel initialTermId={activeTab.termId} />
+          <TerminalPanel tab={activeTab} initialTermId={activeTab.termId} />
         ) : (
           <BrowserPanel tab={activeTab} />
         )}

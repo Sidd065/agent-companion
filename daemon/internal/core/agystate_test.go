@@ -33,7 +33,8 @@ func newAgyTestSession(t *testing.T) *Session {
 	dir := t.TempDir()
 	_ = os.MkdirAll(filepath.Join(dir, "sessions"), 0o700)
 	m := &Manager{cfg: Config{StateDir: dir, IdleHibernate: time.Minute}, hub: NewHub(), sessions: map[string]*Session{},
-		liveWatches: map[string]*liveWatch{}}
+		stopCh: make(chan struct{}), liveWatches: map[string]*liveWatch{}}
+	t.Cleanup(m.Shutdown)
 	s := newSession(m, SessionMeta{ID: "c1", Agent: "agy"})
 	s.proc = &fakeProc{exited: make(chan struct{})}
 	m.sessions["c1"] = s

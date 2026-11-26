@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
   CheckCircle2,
   CircleDot,
@@ -15,12 +15,19 @@ import {
 } from 'lucide-react';
 import type { GitHubIssue, PullRequest } from '@agentc/protocol';
 import { useApp } from '../../state/appStore.js';
+import { resolveHostScopedCwd } from '../../utils/multiHost.js';
 import { MarkdownRenderer } from '../markdown/MarkdownRenderer.js';
 
 export const PullRequestPanel: React.FC = () => {
   const { activeHost, activeSession, draft, callHost, openDraft, setComposerPrefill, pushToast } = useApp();
   const hostId = activeHost?.creds.id ?? '';
-  const cwd = activeSession?.worktreePath || activeSession?.cwd || draft.cwd || '';
+  const cwd = resolveHostScopedCwd({
+    hostId,
+    activeSession,
+    activeSessionHostId: hostId,
+    draft,
+    fallback: '',
+  });
 
   const [subTab, setSubTab] = useState<'prs' | 'issues'>('prs');
   const [prs, setPrs] = useState<PullRequest[]>([]);
@@ -34,35 +41,53 @@ export const PullRequestPanel: React.FC = () => {
   const [newTitle, setNewTitle] = useState('');
   const [newBody, setNewBody] = useState('');
   const [newDraft, setNewDraft] = useState(false);
+  const reqSeqRef = useRef(0);
 
   const loadData = useCallback(async () => {
     if (!hostId || !cwd) return;
+    const seq = ++reqSeqRef.current;
     setLoading(true);
     setError('');
     try {
       if (subTab === 'prs') {
         const list = await callHost<PullRequest[]>(hostId, 'pr.list', { path: cwd, state: 'open', limit: 30 });
+        if (seq !== reqSeqRef.current) return;
         setPrs(Array.isArray(list) ? list : []);
       } else {
         const list = await callHost<GitHubIssue[]>(hostId, 'issues.list', { path: cwd, state: 'open', limit: 30 });
+        if (seq !== reqSeqRef.current) return;
         setIssues(Array.isArray(list) ? list : []);
       }
     } catch (e) {
+      if (seq !== reqSeqRef.current) return;
       setError((e as Error).message);
     } finally {
-      setLoading(false);
+      if (seq === reqSeqRef.current) {
+        setLoading(false);
+      }
     }
   }, [hostId, cwd, subTab, callHost]);
+
+  useEffect(() => {
+    reqSeqRef.current++;
+    setSelectedPR(null);
+    setPrs([]);
+    setIssues([]);
+    setError('');
+  }, [hostId, cwd]);
 
   useEffect(() => {
     void loadData();
   }, [loadData]);
 
   const inspectPR = async (num: number) => {
+    const guardSeq = reqSeqRef.current;
     try {
       const full = await callHost<PullRequest>(hostId, 'pr.get', { path: cwd, number: num, includeDiff: false });
+      if (guardSeq !== reqSeqRef.current) return;
       setSelectedPR(full);
     } catch (e) {
+      if (guardSeq !== reqSeqRef.current) return;
       pushToast({ text: (e as Error).message, level: 'error' });
     }
   };

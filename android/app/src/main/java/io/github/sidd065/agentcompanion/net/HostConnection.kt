@@ -12,8 +12,12 @@ import io.github.sidd065.agentcompanion.core.Op
 import io.github.sidd065.agentcompanion.core.SessionExtras
 import io.github.sidd065.agentcompanion.core.SessionSummary
 import io.github.sidd065.agentcompanion.BuildConfig
+import io.github.sidd065.agentcompanion.core.CustomModel
 import io.github.sidd065.agentcompanion.core.DeviceKeys
 import io.github.sidd065.agentcompanion.core.Project
+import io.github.sidd065.agentcompanion.core.ProviderConfig
+import io.github.sidd065.agentcompanion.core.ProviderModelsResult
+import io.github.sidd065.agentcompanion.core.ProvidersListResult
 import io.github.sidd065.agentcompanion.core.Term
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -30,6 +34,7 @@ import kotlinx.serialization.builtins.ListSerializer
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.booleanOrNull
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
@@ -52,9 +57,10 @@ class HostConnection(
     private val lastNotifSeq: () -> Long,
     private val onConnectedHook: suspend (HostConnection) -> Unit = {},
     val flagsProvider: (agent: String) -> JsonObject? = { null },
+    private val keyPairProvider: (HostConfig) -> Noise.KeyPair = DeviceKeys::keyPair,
 ) {
     val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
-    val rpc = RpcClient(config, http, scope, deviceName)
+    val rpc = RpcClient(config, http, scope, deviceName, keyPairProvider)
     private val deviceName = deviceName
 
     private val _sessions = MutableStateFlow<List<SessionSummary>>(emptyList())
@@ -68,6 +74,8 @@ class HostConnection(
     val agents: StateFlow<List<AgentProfile>> = _agents
     private val _projects = MutableStateFlow<List<Project>>(emptyList())
     val projects: StateFlow<List<Project>> = _projects
+    private val _providerModels = MutableStateFlow<Map<String, ProviderModelsResult>>(emptyMap())
+    val providerModels: StateFlow<Map<String, ProviderModelsResult>> = _providerModels
     private val _notifications = MutableSharedFlow<AgentNotification>(extraBufferCapacity = 64)
     val notifications: SharedFlow<AgentNotification> = _notifications
 
@@ -102,6 +110,10 @@ class HostConnection(
             st.summaryFrom(_sessions.value.firstOrNull { it.id == st.id })
             if (st.isAttached) st.subscribe()
             if (st.asidesLoaded) scope.launch { runCatching { st.refreshAsides() } }
+        }
+        _providerModels.value = emptyMap()
+        if (_agents.value.any { it.id == "codex" && it.available }) {
+            scope.launch { runCatching { fetchProviderModels("codex", refresh = false) } }
         }
         scope.launch { refreshTerms() }
         scope.launch { runCatching { refreshProjects() } }
@@ -167,6 +179,10 @@ class HostConnection(
             }
             "providers.changed" -> {
                 runCatching { _agents.value = ev.data.decode(ListSerializer(AgentProfile.serializer())) }
+                _providerModels.value = emptyMap()
+                if (_agents.value.any { it.id == "codex" && it.available }) {
+                    scope.launch { runCatching { fetchProviderModels("codex", refresh = false) } }
+                }
             }
         }
     }
@@ -201,6 +217,82 @@ class HostConnection(
         return arr.any { it.jsonPrimitive.content == cap }
     }
 
+    val openRouterConfigured: Boolean
+        get() = _hello.value?.get("openRouterConfigured")?.jsonPrimitive?.booleanOrNull == true ||
+            _providerModels.value["codex"]?.openRouterConfigured == true
+
+    fun agentHasFeature(agent: String?, feature: String): Boolean {
+        val id = agent?.ifBlank { "agy" } ?: "agy"
+        val profile = _agents.value.firstOrNull { it.id == id }
+        if (profile != null && profile.features.isNotEmpty()) {
+            return feature in profile.features
+        }
+        return when (id) {
+            "agy" -> feature in setOf("fork", "rewind", "terminal", "modes", "effort")
+            "claude" -> feature in setOf("fork", "rewind", "terminal", "steer", "asides", "sideQuestion", "effort", "modes")
+            "codex" -> feature in setOf(
+                "fork", "rewind", "terminal", "steer", "asides", "sideQuestion",
+                "effort", "modes", "openrouter", "customModels", "thinking", "diffs",
+                "permissions", "questions", "plans",
+            )
+            else -> false
+        }
+    }
+
+    suspend fun fetchProviderModels(provider: String = "codex", refresh: Boolean = false): ProviderModelsResult {
+        if (!refresh) {
+            _providerModels.value[provider]?.takeIf { it.models.isNotEmpty() || it.customModels.isNotEmpty() }?.let { return it }
+        }
+        val res = rpc.call(
+            "providers.models",
+            params { put("provider", provider); if (refresh) put("refresh", true) },
+            timeoutMs = 60_000,
+        ).decode(ProviderModelsResult.serializer())
+        _providerModels.value = _providerModels.value + (provider to res)
+        return res
+    }
+
+    /**
+     * Updates customModels (and optional defaultModel) on the daemon via `providers.upsert`
+     * while strictly preserving all existing env secrets (`"***"` or `env = null`).
+     */
+    suspend fun saveProviderCustomModels(
+        providerId: String = "codex",
+        customModels: List<CustomModel>,
+        defaultModel: String? = null,
+    ): ProviderModelsResult {
+        val list = rpc.call("providers.list").decode(ProvidersListResult.serializer())
+        val existing = list.configs.firstOrNull { it.id == providerId }
+        val agentProf = list.agents.firstOrNull { it.id == providerId }
+        val cleanedCustoms = customModels
+            .map { CustomModel(slug = it.slug.trim(), name = it.name.trim()) }
+            .filter { it.slug.isNotEmpty() }
+            .distinctBy { it.slug }
+        val merged = if (existing != null) {
+            existing.copy(
+                customModels = cleanedCustoms,
+                defaultModel = defaultModel ?: existing.defaultModel,
+                // CRITICAL: keep existing.env untouched so "***" secret values are preserved by daemon!
+            )
+        } else {
+            ProviderConfig(
+                id = providerId,
+                name = agentProf?.name?.ifBlank { "Codex" } ?: "Codex",
+                driver = agentProf?.driver?.ifBlank { providerId } ?: providerId,
+                enabled = true,
+                env = null, // null preserves any prior env in providers.go
+                defaultModel = defaultModel.orEmpty(),
+                customModels = cleanedCustoms,
+                builtin = agentProf?.builtin ?: (providerId == "codex"),
+                features = agentProf?.features.orEmpty(),
+            )
+        }
+        val payload = AppJson.encodeToJsonElement(ProviderConfig.serializer(), merged).jsonObject
+        rpc.call("providers.upsert", payload)
+        _providerModels.value = _providerModels.value - providerId
+        return fetchProviderModels(providerId, refresh = false)
+    }
+
     fun session(id: String): SessionSummary? = _sessions.value.firstOrNull { it.id == id }
 
     // ---- encrypted side channels & file transfer (all inside the secure channel) ----
@@ -211,7 +303,7 @@ class HostConnection(
             put("v", 1); put("name", deviceName); put("platform", "android"); put("app", BuildConfig.VERSION_NAME)
             hello.forEach { (k, v) -> put(k, v) }
         }
-        return SecureSocket(http, config.url, DeviceKeys.unb64url(config.hostKey), DeviceKeys.keyPair(config), full, listener).also { it.connect() }
+        return SecureSocket(http, config.url, DeviceKeys.unb64url(config.hostKey), keyPairProvider(config), full, listener).also { it.connect() }
     }
 
     /** Streams a remote file into [out] in 1 MiB chunks; returns the size. */
@@ -326,7 +418,10 @@ class SessionStore(val id: String, private val conn: HostConnection) {
             runCatching {
                 conn.rpc.call("session.subscribe", params {
                     put("id", id); put("since", since)
-                    conn.flagsProvider(summary.value?.agent ?: "agy")?.let { put("flags", it) }
+                    summary.value?.agent?.takeIf { it.isNotBlank() }
+                        ?.let { conn.flagsProvider(it) }
+                        ?.takeIf { it.isNotEmpty() }
+                        ?.let { put("flags", it) }
                 })
             }
                 .onFailure { Log.w("SessionStore", "subscribe $id: ${it.message}") }
@@ -419,8 +514,14 @@ class SessionStore(val id: String, private val conn: HostConnection) {
     var asidesLoaded = false
         private set
     private val keepsAsides: Boolean
-        get() = conn.agents.value.firstOrNull { it.id == (summary.value?.agent ?: "agy") }?.features?.contains("asides") == true
+        get() {
+            val agent = summary.value?.agent?.ifBlank { "agy" } ?: "agy"
+            val prof = conn.agents.value.firstOrNull { it.id == agent }
+            return if (prof != null) "asides" in prof.features else agent == "codex"
+        }
     private val isClaude: Boolean get() = summary.value?.agent == "claude"
+    private val isCodex: Boolean get() = summary.value?.agent == "codex"
+    val sideQuestions: Boolean get() = keepsAsides || isClaude || isCodex
 
     fun onAside(a: Aside, fromEvent: Boolean = false) {
         val cur = asides.value
@@ -453,8 +554,17 @@ class SessionStore(val id: String, private val conn: HostConnection) {
             return
         }
         // agentc 0.3.0: answer directly; the result stays on this phone.
-        if (!isClaude) throw RpcException("Side questions for agy need agentc 0.3.2 or newer on this computer")
-        if (asides.value.any { it.state == "pending" }) throw RpcException("Claude is still answering the previous side question")
+        val label = summary.value?.agentLabel ?: "this agent"
+        if (!isClaude && !isCodex) throw RpcException("Side questions for $label need agentc 0.3.2 or newer on this computer")
+        if (isCodex) {
+            val a = conn.rpc.call("session.aside", params {
+                put("id", id); put("question", question)
+                if (!followUp.isNullOrEmpty()) put("followUp", followUp)
+            }).decode(Aside.serializer())
+            withContext(Dispatchers.Main) { onAside(a) }
+            return
+        }
+        if (asides.value.any { it.state == "pending" }) throw RpcException("$label is still answering the previous side question")
         val a = Aside("local-" + System.nanoTime(), question, ts = System.currentTimeMillis(), followUp = followUp.orEmpty())
         withContext(Dispatchers.Main) { onAside(a) }
         conn.scope.launch {
@@ -462,7 +572,7 @@ class SessionStore(val id: String, private val conn: HostConnection) {
                 conn.rpc.call("session.control", params {
                     put("id", id); put("subtype", "side_question")
                     put("params", params { put("question", legacyAsidePrompt(asides.value, question, followUp)) })
-                }, timeoutMs = 300_000).jsonObject["response"]?.jsonPrimitive?.content?.takeIf { it.isNotBlank() } ?: throw RpcException("Claude returned no answer")
+                }, timeoutMs = 300_000).jsonObject["response"]?.jsonPrimitive?.content?.takeIf { it.isNotBlank() } ?: throw RpcException("$label returned no answer")
             }.fold({ a.copy(state = "done", answer = it, doneTs = System.currentTimeMillis()) },
                 { a.copy(state = "failed", error = it.message ?: "failed", doneTs = System.currentTimeMillis()) })
             withContext(Dispatchers.Main) { onAside(done, fromEvent = true) }

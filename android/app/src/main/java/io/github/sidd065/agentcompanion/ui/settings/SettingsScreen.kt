@@ -66,6 +66,7 @@ fun SettingsScreen() {
     var testMsg by remember { mutableStateOf<String?>(null) }
     var flagsOpen by remember { mutableStateOf(false) }
     var claudeFlagsOpen by remember { mutableStateOf(false) }
+    var codexFlagsOpen by remember { mutableStateOf(false) }
     fun upd(f: (AppSettings) -> AppSettings) = scope.launch { g.prefs.update(f) }
 
     Scaffold(
@@ -141,7 +142,10 @@ fun SettingsScreen() {
 
             Section("New sessions")
             io.github.sidd065.agentcompanion.ui.components.AgyFlagsCard(kind = "tui", onEdit = { flagsOpen = true })
+            Spacer(Modifier.height(8.dp))
             io.github.sidd065.agentcompanion.ui.components.AgentFlagsCard("claude", kind = "tui", onEdit = { claudeFlagsOpen = true })
+            Spacer(Modifier.height(8.dp))
+            io.github.sidd065.agentcompanion.ui.components.AgentFlagsCard("codex", kind = "tui", onEdit = { codexFlagsOpen = true })
 
             Section("Terminal")
             Text("Font size · ${s.terminalFontSize}", style = MaterialTheme.typography.bodyMedium)
@@ -160,6 +164,7 @@ fun SettingsScreen() {
     }
     if (flagsOpen) io.github.sidd065.agentcompanion.ui.components.AgyFlagsSheet(conn, onDismiss = { flagsOpen = false })
     if (claudeFlagsOpen) io.github.sidd065.agentcompanion.ui.components.ClaudeFlagsSheet(conn, onDismiss = { claudeFlagsOpen = false })
+    if (codexFlagsOpen) io.github.sidd065.agentcompanion.ui.components.CodexFlagsSheet(conn, onDismiss = { codexFlagsOpen = false })
 }
 
 @Composable

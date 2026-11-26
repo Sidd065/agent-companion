@@ -36,25 +36,72 @@ type Entry struct {
 	Children   int    `json:"children,omitempty"`
 }
 
-// Home is the user's home directory.
-var Home, _ = os.UserHomeDir()
+var startupHome = detectHome()
 
-// Resolve expands ~ and makes a path absolute (relative to home).
-func Resolve(p string) string {
-	p = strings.TrimSpace(p)
-	if p == "" || p == "~" {
+// Home is the user's home directory at startup (with passwd fallback if $HOME was unset).
+var Home = startupHome
+
+func detectHome() string {
+	if h, err := os.UserHomeDir(); err == nil && strings.TrimSpace(h) != "" {
+		return h
+	}
+	if u, err := user.Current(); err == nil && strings.TrimSpace(u.HomeDir) != "" {
+		return u.HomeDir
+	}
+	return "/"
+}
+
+func defaultHome() string {
+	if Home != "" && Home != startupHome {
 		return Home
 	}
+	return detectHome()
+}
+
+// FS scopes file manager operations to a specific host Home directory.
+type FS struct {
+	Home string
+}
+
+// New creates a host-scoped FS instance, falling back to current/configured Home when empty.
+func New(home string) FS {
+	h := strings.TrimSpace(home)
+	if h == "" {
+		h = defaultHome()
+	}
+	return FS{Home: filepath.Clean(h)}
+}
+
+// HomeDir returns the effective home directory for this FS instance.
+func (f FS) HomeDir() string {
+	if strings.TrimSpace(f.Home) != "" {
+		return filepath.Clean(f.Home)
+	}
+	return defaultHome()
+}
+
+// Resolve expands ~ and makes a path absolute (relative to f.HomeDir()).
+func (f FS) Resolve(p string) string {
+	home := f.HomeDir()
+	p = strings.TrimSpace(p)
+	if p == "" || p == "~" {
+		return home
+	}
 	if strings.HasPrefix(p, "~/") {
-		p = filepath.Join(Home, p[2:])
+		p = filepath.Join(home, p[2:])
 	}
 	if strings.HasPrefix(p, "file://") {
 		p = strings.TrimPrefix(p, "file://")
 	}
 	if !filepath.IsAbs(p) {
-		p = filepath.Join(Home, p)
+		p = filepath.Join(home, p)
 	}
 	return filepath.Clean(p)
+}
+
+// Resolve expands ~ and makes a path absolute (relative to current HOME).
+func Resolve(p string) string {
+	return New("").Resolve(p)
 }
 
 func entryFor(path string, info fs.FileInfo) Entry {
@@ -90,8 +137,8 @@ func entryFor(path string, info fs.FileInfo) Entry {
 }
 
 // List returns directory entries (dirs first).
-func List(p string, hidden bool) (map[string]any, error) {
-	p = Resolve(p)
+func (f FS) List(p string, hidden bool) (map[string]any, error) {
+	p = f.Resolve(p)
 	des, err := os.ReadDir(p)
 	if err != nil {
 		return nil, err
@@ -120,15 +167,23 @@ func List(p string, hidden bool) (map[string]any, error) {
 		parent = ""
 	}
 	git := ""
-	if b, err := exec.Command("git", "-C", p, "rev-parse", "--abbrev-ref", "HEAD").Output(); err == nil {
+	gctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	b, gerr := exec.CommandContext(gctx, "git", "-C", p, "rev-parse", "--abbrev-ref", "HEAD").Output()
+	cancel()
+	if gerr == nil {
 		git = strings.TrimSpace(string(b))
 	}
 	return map[string]any{"path": p, "parent": parent, "entries": out, "gitBranch": git}, nil
 }
 
+// List returns directory entries (dirs first).
+func List(p string, hidden bool) (map[string]any, error) {
+	return New("").List(p, hidden)
+}
+
 // Stat describes a single path.
-func Stat(p string) (Entry, error) {
-	p = Resolve(p)
+func (f FS) Stat(p string) (Entry, error) {
+	p = f.Resolve(p)
 	info, err := os.Lstat(p)
 	if err != nil {
 		return Entry{}, err
@@ -142,21 +197,26 @@ func Stat(p string) (Entry, error) {
 	return e, nil
 }
 
+// Stat describes a single path.
+func Stat(p string) (Entry, error) {
+	return New("").Stat(p)
+}
+
 // ReadResult is the content of a file.
 type ReadResult struct {
-	Path      string `json:"path"`
-	Size      int64  `json:"size"`
-	Mtime     int64  `json:"mtime"`
-	Text      string `json:"text,omitempty"`
-	Base64    string `json:"base64,omitempty"`
-	Binary    bool   `json:"binary"`
-	Truncated bool   `json:"truncated"`
-	Mime      string `json:"mime"`
+	Path      string  `json:"path"`
+	Size      int64   `json:"size"`
+	Mtime     int64   `json:"mtime"`
+	Text      *string `json:"text,omitempty"`
+	Base64    string  `json:"base64,omitempty"`
+	Binary    bool    `json:"binary"`
+	Truncated bool    `json:"truncated"`
+	Mime      string  `json:"mime"`
 }
 
 // Read returns up to max bytes of a file; text when it looks like UTF-8.
-func Read(p string, max int64) (*ReadResult, error) {
-	p = Resolve(p)
+func (fsys FS) Read(p string, max int64) (*ReadResult, error) {
+	p = fsys.Resolve(p)
 	if max <= 0 {
 		max = 2 << 20
 	}
@@ -182,18 +242,24 @@ func Read(p string, max int64) (*ReadResult, error) {
 		r.Mime = http.DetectContentType(b)
 	}
 	if IsText(b) {
-		r.Text = string(b)
+		txt := string(b)
 		if r.Truncated {
 			// Don't split a UTF-8 sequence.
-			for len(r.Text) > 0 && !utf8.ValidString(r.Text) {
-				r.Text = r.Text[:len(r.Text)-1]
+			for len(txt) > 0 && !utf8.ValidString(txt) {
+				txt = txt[:len(txt)-1]
 			}
 		}
+		r.Text = &txt
 	} else {
 		r.Binary = true
 		r.Base64 = base64.StdEncoding.EncodeToString(b)
 	}
 	return r, nil
+}
+
+// Read returns up to max bytes of a file; text when it looks like UTF-8.
+func Read(p string, max int64) (*ReadResult, error) {
+	return New("").Read(p, max)
 }
 
 // IsText guesses whether bytes are text.
@@ -227,8 +293,8 @@ type WriteParams struct {
 var ErrConflict = errors.New("file changed on disk since it was opened")
 
 // Write stores content atomically, preserving the file mode.
-func Write(w WriteParams) (Entry, error) {
-	p := Resolve(w.Path)
+func (f FS) Write(w WriteParams) (Entry, error) {
+	p := f.Resolve(w.Path)
 	data := []byte(w.Text)
 	if w.Base64 != "" {
 		b, err := base64.StdEncoding.DecodeString(w.Base64)
@@ -263,12 +329,17 @@ func Write(w WriteParams) (Entry, error) {
 		os.Remove(tmp)
 		return Entry{}, err
 	}
-	return Stat(p)
+	return f.Stat(p)
+}
+
+// Write stores content atomically, preserving the file mode.
+func Write(w WriteParams) (Entry, error) {
+	return New("").Write(w)
 }
 
 // Mkdir creates a directory.
-func Mkdir(p string, parents bool) (Entry, error) {
-	p = Resolve(p)
+func (f FS) Mkdir(p string, parents bool) (Entry, error) {
+	p = f.Resolve(p)
 	var err error
 	if parents {
 		err = os.MkdirAll(p, 0o755)
@@ -278,25 +349,38 @@ func Mkdir(p string, parents bool) (Entry, error) {
 	if err != nil {
 		return Entry{}, err
 	}
-	return Stat(p)
+	return f.Stat(p)
+}
+
+// Mkdir creates a directory.
+func Mkdir(p string, parents bool) (Entry, error) {
+	return New("").Mkdir(p, parents)
+}
+
+// Create makes an empty file (fails if it exists).
+func (f FS) Create(p string) (Entry, error) {
+	p = f.Resolve(p)
+	fh, err := os.OpenFile(p, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o644)
+	if err != nil {
+		return Entry{}, err
+	}
+	fh.Close()
+	return f.Stat(p)
 }
 
 // Create makes an empty file (fails if it exists).
 func Create(p string) (Entry, error) {
-	p = Resolve(p)
-	f, err := os.OpenFile(p, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o644)
-	if err != nil {
-		return Entry{}, err
-	}
-	f.Close()
-	return Stat(p)
+	return New("").Create(p)
 }
 
 // Rename moves a path (falls back to copy+delete across devices).
-func Rename(from, to string, overwrite bool) (Entry, error) {
-	from, to = Resolve(from), Resolve(to)
+func (f FS) Rename(from, to string, overwrite bool) (Entry, error) {
+	from, to = f.Resolve(from), f.Resolve(to)
 	if st, err := os.Stat(to); err == nil && st.IsDir() && to != from {
 		to = filepath.Join(to, filepath.Base(from)) // mv semantics: move into an existing directory
+	}
+	if strings.HasPrefix(to+"/", from+"/") {
+		return Entry{}, errors.New("cannot move a directory into itself")
 	}
 	if _, err := os.Lstat(to); err == nil && !overwrite {
 		return Entry{}, fmt.Errorf("%s already exists", to)
@@ -314,12 +398,17 @@ func Rename(from, to string, overwrite bool) (Entry, error) {
 			return Entry{}, err
 		}
 	}
-	return Stat(to)
+	return f.Stat(to)
+}
+
+// Rename moves a path (falls back to copy+delete across devices).
+func Rename(from, to string, overwrite bool) (Entry, error) {
+	return New("").Rename(from, to, overwrite)
 }
 
 // Copy copies files or directories recursively.
-func Copy(from, to string, overwrite bool) (Entry, error) {
-	from, to = Resolve(from), Resolve(to)
+func (f FS) Copy(from, to string, overwrite bool) (Entry, error) {
+	from, to = f.Resolve(from), f.Resolve(to)
 	if st, err := os.Stat(to); err == nil && st.IsDir() {
 		to = filepath.Join(to, filepath.Base(from))
 	}
@@ -344,7 +433,12 @@ func Copy(from, to string, overwrite bool) (Entry, error) {
 	if err := copyAll(from, to); err != nil {
 		return Entry{}, err
 	}
-	return Stat(to)
+	return f.Stat(to)
+}
+
+// Copy copies files or directories recursively.
+func Copy(from, to string, overwrite bool) (Entry, error) {
+	return New("").Copy(from, to, overwrite)
 }
 
 func copyAll(from, to string) error {
@@ -392,15 +486,20 @@ func copyFile(src, dst string, mode os.FileMode) error {
 }
 
 // Delete removes paths: to the desktop trash by default, permanently on request.
-func Delete(ctx context.Context, paths []string, permanent bool) error {
+func (f FS) Delete(ctx context.Context, paths []string, permanent bool) error {
+	home := f.HomeDir()
 	var errs []string
 	for _, p := range paths {
-		p = Resolve(p)
-		if p == "/" || p == Home {
+		p = f.Resolve(p)
+		if p == "/" || p == home {
 			errs = append(errs, "refusing to delete "+p)
 			continue
 		}
 		if !permanent {
+			if _, stErr := os.Lstat(p); stErr != nil {
+				errs = append(errs, stErr.Error())
+				continue
+			}
 			cctx, cancel := context.WithTimeout(ctx, 60*time.Second)
 			out, err := exec.CommandContext(cctx, "gio", "trash", "--", p).CombinedOutput()
 			cancel()
@@ -408,10 +507,31 @@ func Delete(ctx context.Context, paths []string, permanent bool) error {
 				continue
 			}
 			msg := strings.TrimSpace(string(out))
-			if strings.Contains(msg, "not supported") || strings.Contains(msg, "Unable to find or create trash") {
+			combined := strings.ToLower(msg + " " + err.Error())
+			tRashUnsupported := errors.Is(err, exec.ErrNotFound)
+			for _, sub := range []string{
+				"not supported",
+				"unable to find or create trash",
+				"trash portal",
+				"dbus",
+				"message bus",
+				"without x11",
+				"connection is closed",
+				"executable file not found",
+			} {
+				if strings.Contains(combined, sub) {
+					tRashUnsupported = true
+					break
+				}
+			}
+			if tRashUnsupported {
 				errs = append(errs, "TRASH_UNSUPPORTED: the trash isn't available for "+p+"; delete it permanently instead")
 			} else {
-				errs = append(errs, fmt.Sprintf("trash %s: %s", p, msg))
+				reason := msg
+				if reason == "" {
+					reason = err.Error()
+				}
+				errs = append(errs, fmt.Sprintf("trash %s: %s", p, reason))
 			}
 			continue
 		}
@@ -425,13 +545,18 @@ func Delete(ctx context.Context, paths []string, permanent bool) error {
 	return nil
 }
 
+// Delete removes paths: to the desktop trash by default, permanently on request.
+func Delete(ctx context.Context, paths []string, permanent bool) error {
+	return New("").Delete(ctx, paths, permanent)
+}
+
 var skipDirs = map[string]bool{".git": true, "node_modules": true, ".cache": true, "__pycache__": true, ".gradle": true,
 	"build": false, ".venv": true, "venv": true, ".idea": true, "target": false, ".npm": true, ".m2": true, ".cargo": true,
 	".rustup": true, ".local": false}
 
 // Search finds paths whose name contains query (case-insensitive).
-func Search(ctx context.Context, root, query string, max int, hidden bool) ([]Entry, error) {
-	root = Resolve(root)
+func (f FS) Search(ctx context.Context, root, query string, max int, hidden bool) ([]Entry, error) {
+	root = f.Resolve(root)
 	q := strings.ToLower(strings.TrimSpace(query))
 	if q == "" {
 		return nil, errors.New("empty query")
@@ -469,9 +594,14 @@ func Search(ctx context.Context, root, query string, max int, hidden bool) ([]En
 	return out, nil
 }
 
+// Search finds paths whose name contains query (case-insensitive).
+func Search(ctx context.Context, root, query string, max int, hidden bool) ([]Entry, error) {
+	return New("").Search(ctx, root, query, max, hidden)
+}
+
 // Complete returns workspace-relative paths fuzzily matching a query (for @mentions).
-func Complete(ctx context.Context, cwd, query string, max int) ([]map[string]any, error) {
-	cwd = Resolve(cwd)
+func (f FS) Complete(ctx context.Context, cwd, query string, max int) ([]map[string]any, error) {
+	cwd = f.Resolve(cwd)
 	if max <= 0 {
 		max = 40
 	}
@@ -526,6 +656,11 @@ func Complete(ctx context.Context, cwd, query string, max int) ([]map[string]any
 	return out, nil
 }
 
+// Complete returns workspace-relative paths fuzzily matching a query (for @mentions).
+func Complete(ctx context.Context, cwd, query string, max int) ([]map[string]any, error) {
+	return New("").Complete(ctx, cwd, query, max)
+}
+
 func subseq(s, q string) bool {
 	i := 0
 	for j := 0; j < len(s) && i < len(q); j++ {
@@ -537,19 +672,25 @@ func subseq(s, q string) bool {
 }
 
 // HomeInfo describes the host for the file browser.
-func HomeInfo() map[string]any {
+func (f FS) HomeInfo() map[string]any {
+	home := f.HomeDir()
 	u, _ := user.Current()
 	name := ""
 	if u != nil {
 		name = u.Username
 	}
 	host, _ := os.Hostname()
-	roots := []map[string]string{{"name": "Home", "path": Home}, {"name": "Root", "path": "/"}, {"name": "Temp", "path": os.TempDir()}}
+	roots := []map[string]string{{"name": "Home", "path": home}, {"name": "Root", "path": "/"}, {"name": "Temp", "path": os.TempDir()}}
 	for _, d := range []string{"Desktop", "Documents", "Downloads", "Projects", "code", "src"} {
-		p := filepath.Join(Home, d)
+		p := filepath.Join(home, d)
 		if st, err := os.Stat(p); err == nil && st.IsDir() {
 			roots = append(roots, map[string]string{"name": d, "path": p})
 		}
 	}
-	return map[string]any{"home": Home, "user": name, "host": host, "roots": roots, "sep": "/"}
+	return map[string]any{"home": home, "user": name, "host": host, "roots": roots, "sep": "/"}
+}
+
+// HomeInfo describes the host for the file browser.
+func HomeInfo() map[string]any {
+	return New("").HomeInfo()
 }

@@ -11,6 +11,7 @@ import {
   RefreshCw,
   Server,
   Sparkles,
+  TerminalSquare,
   Upload,
   X,
 } from 'lucide-react';
@@ -38,6 +39,8 @@ export const ThreadInfoCard: React.FC<Props> = ({ hostId, session, detail }) => 
     settings,
     updateSettings,
     callHost,
+    upsertHostTerminal,
+    refreshHostTerminals,
     openRightTab,
     setTerminalDrawerOpen,
     selectSession,
@@ -123,6 +126,9 @@ export const ThreadInfoCard: React.FC<Props> = ({ hostId, session, detail }) => 
         scriptId: sc.id,
         sessionId: session.id,
       });
+      if (term?.id) {
+        upsertHostTerminal(hostId, term);
+      }
       setTerminalDrawerOpen(true);
       pushToast({ text: `Started script "${sc.name}" (${term?.name || sc.command})`, level: 'info' });
     } catch (e) {
@@ -207,6 +213,33 @@ export const ThreadInfoCard: React.FC<Props> = ({ hostId, session, detail }) => 
       pushToast({ text: `Handoff failed: ${(e as Error).message}`, level: 'error' });
     } finally {
       setHandoffBusy(false);
+    }
+  };
+
+  const handleOpenInTerminal = async () => {
+    try {
+      const term = await callHost<TerminalInfo>(hostId, 'session.openInTerminal', {
+        id: session.id,
+        cols: 100,
+        rows: 28,
+      });
+      if (term?.id) {
+        upsertHostTerminal(hostId, term);
+        void refreshHostTerminals(hostId);
+        openRightTab({
+          id: `term-${term.id}`,
+          kind: 'terminal',
+          title: term.name || `CLI: ${session.agent}`,
+          termId: term.id,
+          hostId,
+        });
+      } else {
+        void refreshHostTerminals(hostId);
+        setTerminalDrawerOpen(true);
+      }
+      pushToast({ text: `Opened ${session.agent} session in terminal`, level: 'info' });
+    } catch (e) {
+      pushToast({ text: `Open in terminal failed: ${(e as Error).message}`, level: 'error' });
     }
   };
 
@@ -369,6 +402,18 @@ export const ThreadInfoCard: React.FC<Props> = ({ hostId, session, detail }) => 
               </button>
             </>
           )}
+
+          {/* Resume / Open Conversation in Integrated Terminal TUI */}
+          <button
+            type="button"
+            data-testid="info-open-terminal-btn"
+            onClick={() => void handleOpenInTerminal()}
+            title="Hibernate web turn and resume this conversation in the CLI terminal"
+            className="inline-flex items-center gap-1 rounded-md border border-[var(--border)] bg-[var(--bg-surface)] px-2 py-0.5 text-[11px] text-[var(--text-secondary)] hover:bg-[var(--bg-hover)] hover:text-[var(--text-primary)] cursor-pointer"
+          >
+            <TerminalSquare className="w-3 h-3 text-[var(--accent)]" />
+            <span>Open in Terminal</span>
+          </button>
 
           {/* Switch Provider / Portable Handoff */}
           <button

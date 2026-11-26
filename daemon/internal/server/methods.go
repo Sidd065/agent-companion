@@ -291,6 +291,14 @@ func (s *Server) registerMethods() {
 			Subtype string         `json:"subtype"`
 			Params  map[string]any `json:"params"`
 		}](p)
+		if in.Subtype == "compact" {
+			if ss, serr := s.session(ctx, in.ID); serr == nil && ss.Summary().Agent == "codex" {
+				if cerr := ss.Compact(ctx); cerr != nil {
+					return nil, cerr
+				}
+				return map[string]any{"ok": true}, nil
+			}
+		}
 		raw, err := s.Mgr.ClaudeControl(ctx, in.ID, in.Subtype, in.Params)
 		if err != nil {
 			return nil, err
@@ -559,15 +567,29 @@ func (s *Server) registerMethods() {
 		if in.SkipPermissions != nil {
 			skip = *in.SkipPermissions
 		}
-		if sum.Agent == "claude" {
+		var t *term.Term
+		switch sum.Agent {
+		case "claude":
 			if s.Mgr.ClaudeOpenElsewhere(sum.ID) {
 				return nil, errors.New("this conversation is already open in another Claude Code process")
 			}
-			return s.Terms.Create(ctx, term.CreateOpts{Kind: "claude", Cwd: sum.Cwd, ConvID: sum.ID, Name: "claude · " + sum.Title,
+			t, err = s.Terms.Create(ctx, term.CreateOpts{Kind: "claude", Cwd: sum.Cwd, ConvID: sum.ID, Name: "claude · " + sum.Title,
 				Cols: in.Cols, Rows: in.Rows, Skip: &skip, Args: in.Args})
+		case "codex":
+			t, err = s.Terms.Create(ctx, term.CreateOpts{Kind: "codex", Cwd: sum.Cwd, ConvID: sum.ID, Name: "codex · " + sum.Title,
+				Cols: in.Cols, Rows: in.Rows, Skip: &skip, Args: in.Args})
+		case "", "agy":
+			t, err = s.Terms.Create(ctx, term.CreateOpts{Kind: "agy", Cwd: sum.Cwd, ConvID: sum.ID, Name: "agy · " + sum.Title,
+				Cols: in.Cols, Rows: in.Rows, Skip: &skip, Args: in.Args})
+		default:
+			t, err = s.Terms.Create(ctx, term.CreateOpts{Kind: "shell", Cwd: sum.Cwd, ConvID: sum.ID, Name: sum.Agent + " · " + sum.Title,
+				Cols: in.Cols, Rows: in.Rows})
 		}
-		return s.Terms.Create(ctx, term.CreateOpts{Kind: "agy", Cwd: sum.Cwd, ConvID: sum.ID, Name: "agy · " + sum.Title,
-			Cols: in.Cols, Rows: in.Rows, Skip: &skip, Args: in.Args})
+		if err == nil {
+			terms, _ := s.Terms.List(ctx)
+			s.Mgr.Hub().Broadcast("terms.changed", terms)
+		}
+		return t, err
 	}
 	m["notifications.since"] = func(ctx context.Context, c *core.Client, p json.RawMessage) (any, error) {
 		in, _ := bind[struct {
@@ -578,7 +600,7 @@ func (s *Server) registerMethods() {
 
 	// ---- files ----
 	m["fs.home"] = func(ctx context.Context, c *core.Client, p json.RawMessage) (any, error) {
-		info := fsops.HomeInfo()
+		info := s.fs().HomeInfo()
 		var recent []string
 		seen := map[string]bool{}
 		for _, sm := range s.Mgr.List(ctx, false) {
@@ -595,20 +617,20 @@ func (s *Server) registerMethods() {
 			Path   string `json:"path"`
 			Hidden bool   `json:"hidden"`
 		}](p)
-		return fsops.List(in.Path, in.Hidden)
+		return s.fs().List(in.Path, in.Hidden)
 	}
 	m["fs.stat"] = func(ctx context.Context, c *core.Client, p json.RawMessage) (any, error) {
 		in, _ := bind[struct {
 			Path string `json:"path"`
 		}](p)
-		return fsops.Stat(in.Path)
+		return s.fs().Stat(in.Path)
 	}
 	m["fs.read"] = func(ctx context.Context, c *core.Client, p json.RawMessage) (any, error) {
 		in, _ := bind[struct {
 			Path string `json:"path"`
 			Max  int64  `json:"max"`
 		}](p)
-		return fsops.Read(in.Path, in.Max)
+		return s.fs().Read(in.Path, in.Max)
 	}
 	// Chunked transfers (all file bytes travel inside the encrypted channel).
 	m["fs.download"] = func(ctx context.Context, c *core.Client, p json.RawMessage) (any, error) {
@@ -617,7 +639,7 @@ func (s *Server) registerMethods() {
 			Offset int64  `json:"offset"`
 			Length int64  `json:"length"`
 		}](p)
-		return readChunk(fsops.Resolve(in.Path), in.Offset, in.Length)
+		return readChunk(s.fs().Resolve(in.Path), in.Offset, in.Length)
 	}
 	m["fs.uploadStart"] = func(ctx context.Context, c *core.Client, p json.RawMessage) (any, error) {
 		in, _ := bind[struct {
@@ -625,7 +647,7 @@ func (s *Server) registerMethods() {
 			Overwrite bool   `json:"overwrite"`
 			Mkdirs    bool   `json:"mkdirs"`
 		}](p)
-		id, err := s.uploads.start(fsops.Resolve(in.Path), in.Overwrite, in.Mkdirs)
+		id, err := s.uploads.start(s.fs().Resolve(in.Path), in.Overwrite, in.Mkdirs)
 		if err != nil {
 			return nil, err
 		}
@@ -653,7 +675,7 @@ func (s *Server) registerMethods() {
 		if err != nil {
 			return nil, err
 		}
-		e, _ := fsops.Stat(dest)
+		e, _ := s.fs().Stat(dest)
 		return map[string]any{"entry": e, "bytes": n}, nil
 	}
 	m["fs.uploadAbort"] = func(ctx context.Context, c *core.Client, p json.RawMessage) (any, error) {
@@ -678,20 +700,20 @@ func (s *Server) registerMethods() {
 		if err != nil {
 			return nil, err
 		}
-		return fsops.Write(in)
+		return s.fs().Write(in)
 	}
 	m["fs.mkdir"] = func(ctx context.Context, c *core.Client, p json.RawMessage) (any, error) {
 		in, _ := bind[struct {
 			Path    string `json:"path"`
 			Parents bool   `json:"parents"`
 		}](p)
-		return fsops.Mkdir(in.Path, in.Parents)
+		return s.fs().Mkdir(in.Path, in.Parents)
 	}
 	m["fs.create"] = func(ctx context.Context, c *core.Client, p json.RawMessage) (any, error) {
 		in, _ := bind[struct {
 			Path string `json:"path"`
 		}](p)
-		return fsops.Create(in.Path)
+		return s.fs().Create(in.Path)
 	}
 	m["fs.rename"] = func(ctx context.Context, c *core.Client, p json.RawMessage) (any, error) {
 		in, _ := bind[struct {
@@ -699,7 +721,7 @@ func (s *Server) registerMethods() {
 			To        string `json:"to"`
 			Overwrite bool   `json:"overwrite"`
 		}](p)
-		return fsops.Rename(in.From, in.To, in.Overwrite)
+		return s.fs().Rename(in.From, in.To, in.Overwrite)
 	}
 	m["fs.copy"] = func(ctx context.Context, c *core.Client, p json.RawMessage) (any, error) {
 		in, _ := bind[struct {
@@ -707,14 +729,14 @@ func (s *Server) registerMethods() {
 			To        string `json:"to"`
 			Overwrite bool   `json:"overwrite"`
 		}](p)
-		return fsops.Copy(in.From, in.To, in.Overwrite)
+		return s.fs().Copy(in.From, in.To, in.Overwrite)
 	}
 	m["fs.delete"] = func(ctx context.Context, c *core.Client, p json.RawMessage) (any, error) {
 		in, _ := bind[struct {
 			Paths     []string `json:"paths"`
 			Permanent bool     `json:"permanent"`
 		}](p)
-		return map[string]any{"ok": true}, fsops.Delete(ctx, in.Paths, in.Permanent)
+		return map[string]any{"ok": true}, s.fs().Delete(ctx, in.Paths, in.Permanent)
 	}
 	m["fs.search"] = func(ctx context.Context, c *core.Client, p json.RawMessage) (any, error) {
 		in, _ := bind[struct {
@@ -723,7 +745,7 @@ func (s *Server) registerMethods() {
 			Max    int    `json:"max"`
 			Hidden bool   `json:"hidden"`
 		}](p)
-		return fsops.Search(ctx, in.Root, in.Query, in.Max, in.Hidden)
+		return s.fs().Search(ctx, in.Root, in.Query, in.Max, in.Hidden)
 	}
 	m["fs.complete"] = func(ctx context.Context, c *core.Client, p json.RawMessage) (any, error) {
 		in, _ := bind[struct {
@@ -731,27 +753,27 @@ func (s *Server) registerMethods() {
 			Query string `json:"query"`
 			Max   int    `json:"max"`
 		}](p)
-		return fsops.Complete(ctx, in.Cwd, in.Query, in.Max)
+		return s.fs().Complete(ctx, in.Cwd, in.Query, in.Max)
 	}
 	m["git.diff"] = func(ctx context.Context, c *core.Client, p json.RawMessage) (any, error) {
 		in, _ := bind[struct {
 			Path string `json:"path"`
 		}](p)
-		return core.GitDiff(ctx, fsops.Resolve(in.Path))
+		return core.GitDiff(ctx, s.fs().Resolve(in.Path))
 	}
 	m["git.log"] = func(ctx context.Context, c *core.Client, p json.RawMessage) (any, error) {
 		in, _ := bind[struct {
 			Path  string `json:"path"`
 			Limit int    `json:"limit"`
 		}](p)
-		return core.GitLog(ctx, fsops.Resolve(in.Path), in.Limit)
+		return core.GitLog(ctx, s.fs().Resolve(in.Path), in.Limit)
 	}
 	m["git.show"] = func(ctx context.Context, c *core.Client, p json.RawMessage) (any, error) {
 		in, _ := bind[struct {
 			Path string `json:"path"`
 			SHA  string `json:"sha"`
 		}](p)
-		return core.GitShow(ctx, fsops.Resolve(in.Path), in.SHA)
+		return core.GitShow(ctx, s.fs().Resolve(in.Path), in.SHA)
 	}
 
 	// ---- terminals ----
@@ -763,7 +785,7 @@ func (s *Server) registerMethods() {
 		if err != nil {
 			return nil, err
 		}
-		in.Cwd = fsops.Resolve(in.Cwd)
+		in.Cwd = s.fs().Resolve(in.Cwd)
 		t, err := s.Terms.Create(ctx, in)
 		if err == nil {
 			terms, _ := s.Terms.List(ctx)

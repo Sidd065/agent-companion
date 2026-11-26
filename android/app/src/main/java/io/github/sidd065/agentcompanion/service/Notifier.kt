@@ -124,7 +124,7 @@ class Notifier(private val ctx: Context) {
             seen[dedupKey] = true
         }
         if (!g.prefs.value.notificationsEnabled) return
-        if (g.foreground.value && n0.sessionId != null && g.covers(n0.sessionId, n0.kind)) {
+        if (g.foreground.value && n0.sessionId != null && g.covers(n0.sessionId, n0.kind, conn.config.id)) {
             // On screen now; if the app goes to the background before it's answered, it notifies then.
             if (n0.kind in setOf("permission", "question", "plan")) synchronized(heldBack) { heldBack[conn.config.id + "/" + n0.sessionId] = conn to n0 }
             return
@@ -144,7 +144,7 @@ class Notifier(private val ctx: Context) {
         val g = ctx.graph
         // Leaving the app posts them all; switching screens posts those no longer on screen.
         val held = synchronized(heldBack) {
-            val due = heldBack.filterValues { (_, n) -> leaving || !g.foreground.value || !g.covers(n.sessionId ?: "", n.kind) }
+            val due = heldBack.filterValues { (c, n) -> leaving || !g.foreground.value || !g.covers(n.sessionId ?: "", n.kind, c.config.id) }
             due.keys.forEach { heldBack.remove(it) }
             due.values.toList()
         }

@@ -1,7 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
-  AlertTriangle,
   ArrowUp,
+  Brain,
   Check,
   ChevronDown,
   CornerDownLeft,
@@ -13,6 +13,8 @@ import {
   ListChecks,
   Paperclip,
   Play,
+  Plus,
+  RefreshCw,
   Shield,
   ShieldAlert,
   ShieldCheck,
@@ -26,15 +28,27 @@ import {
 } from 'lucide-react';
 import type {
   AgentProfile,
-  ModelInfo,
   PermCard,
   SessionDetail,
   SessionSummary,
   SkillEntry,
   SlashCommand,
+  ToolCall,
   TranscriptItem,
 } from '@agentc/protocol';
-import { useApp, type DraftConfig } from '../../state/appStore.js';
+import { customModelsScopeKey, providerCatalogKey, useApp, type DraftConfig } from '../../state/appStore.js';
+import {
+  agentSupportsCustomModels,
+  coerceSupportedMode,
+  filterAndRankModels,
+  formatContextWindow,
+  isFullAccessMode,
+  mergeAvailableModels,
+  resolveAvailableModes,
+  resolveEffortOptions,
+  type ResolvedModeOption,
+} from '../../utils/codexModels.js';
+import { extractToolInlineDiffs } from '../../utils/diffParser.js';
 import { MarkdownRenderer } from '../markdown/MarkdownRenderer.js';
 
 export interface PendingAttachment {
@@ -66,19 +80,6 @@ const BUILTIN_SLASH: BuiltinSlash[] = [
   { name: 'settle', description: 'Mark this thread as settled', builtin: true },
 ];
 
-const EFFORT_LEVELS = [
-  { id: 'low', label: 'Low' },
-  { id: 'medium', label: 'Medium' },
-  { id: 'high', label: 'High' },
-  { id: 'max', label: 'Max' },
-];
-
-const PERM_MODES = [
-  { id: 'supervised', label: 'Supervised', desc: 'Ask before running edits or commands', skip: false },
-  { id: 'acceptEdits', label: 'Auto-accept edits', desc: 'Auto-approve file edits, ask for shell', skip: false },
-  { id: 'auto', label: 'Full access', desc: 'Auto-approve all tool calls (skip permissions)', skip: true },
-];
-
 const LARGE_PASTE_BYTES = 32 * 1024;
 
 function readFileAsBase64(file: File): Promise<string> {
@@ -102,6 +103,7 @@ function utf8ToBase64(str: string): string {
 }
 
 interface QuestionSpec {
+  id?: string;
   question: string;
   header?: string;
   multiSelect?: boolean;
@@ -122,6 +124,14 @@ function isQuestionPerm(perm: PermCard): boolean {
 
 function isPlanPerm(perm: PermCard): boolean {
   return perm.kind === 'plan' || perm.tool === 'ExitPlanMode';
+}
+
+function extractLinkedToolCommand(tool?: ToolCall | null): string | null {
+  if (!tool) return null;
+  const inp = tool.input as Record<string, unknown> | undefined;
+  if (inp && typeof inp === 'object' && typeof inp.command === 'string') return inp.command;
+  if (typeof tool.title === 'string' && tool.title.startsWith('$ ')) return tool.title.slice(2);
+  return null;
 }
 
 export interface ComposerProps {
@@ -153,6 +163,10 @@ export const Composer: React.FC<ComposerProps> = ({
     hosts,
     settings,
     updateSettings,
+    providerCatalogs,
+    loadProviderModels,
+    saveCustomModelSlug,
+    removeCustomModelSlug,
     composerChips,
     removeComposerChip,
     clearComposerChips,
@@ -180,6 +194,7 @@ export const Composer: React.FC<ComposerProps> = ({
   const [modelPickerOpen, setModelPickerOpen] = useState(false);
   const [modelSearch, setModelSearch] = useState('');
   const [pickerAgent, setPickerAgent] = useState('');
+  const [catalogRefreshing, setCatalogRefreshing] = useState(false);
 
   // Autocomplete popover state
   const [acKind, setAcKind] = useState<'file' | 'slash' | 'skill' | null>(null);
@@ -198,12 +213,55 @@ export const Composer: React.FC<ComposerProps> = ({
   const modelPickerRef = useRef<HTMLDivElement | null>(null);
   const draftSaveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  // Restore saved draft when switching sessions
+  // Clear pending debounced draft timer on unmount
   useEffect(() => {
+    return () => {
+      if (draftSaveTimer.current) {
+        clearTimeout(draftSaveTimer.current);
+        draftSaveTimer.current = null;
+      }
+    };
+  }, []);
+
+  const currentAgentId =
+    mode === 'thread'
+      ? session?.agent || ''
+      : draftConfig?.agent || agents.find((a) => a.available)?.id || '';
+
+  // Restore saved draft and reset unsent attachments / transient popovers across session & host switches
+  const prevContextKeyRef = useRef(`${mode}:${hostId}:${session?.id ?? ''}`);
+  useEffect(() => {
+    const nextKey = `${mode}:${hostId}:${session?.id ?? ''}`;
+    const changed = prevContextKeyRef.current !== nextKey;
+    prevContextKeyRef.current = nextKey;
+
+    if (changed && draftSaveTimer.current) {
+      clearTimeout(draftSaveTimer.current);
+      draftSaveTimer.current = null;
+    }
     if (mode === 'thread' && session) {
       setText(session.draft ?? '');
     }
-  }, [mode, session?.id]); // eslint-disable-line react-hooks/exhaustive-deps
+    if (changed) {
+      setAttachments((prev) => {
+        for (const a of prev) {
+          if (a.previewUrl?.startsWith('blob:')) {
+            URL.revokeObjectURL(a.previewUrl);
+          }
+        }
+        return [];
+      });
+      setAcKind(null);
+      setModelSearch('');
+      setModelPickerOpen(false);
+      setPickerAgent(currentAgentId || '');
+    }
+  }, [mode, hostId, session?.id]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Keep pickerAgent synced whenever the active thread/draft agent changes
+  useEffect(() => {
+    setPickerAgent(currentAgentId || '');
+  }, [currentAgentId]);
 
   // Consume external composer prefill (e.g. from fork/rewind/starter chips)
   useEffect(() => {
@@ -214,12 +272,17 @@ export const Composer: React.FC<ComposerProps> = ({
     }
   }, [composerPrefill, setComposerPrefill]);
 
-  // Open model picker via keyboard shortcut
+  // Open model picker via keyboard shortcut (Ctrl+Shift+M), syncing pickerAgent first
+  const lastPickerSignalRef = useRef(openModelPickerSignal);
   useEffect(() => {
-    if (openModelPickerSignal > 0) {
-      setModelPickerOpen((v) => !v);
+    if (openModelPickerSignal !== lastPickerSignalRef.current) {
+      lastPickerSignalRef.current = openModelPickerSignal;
+      if (openModelPickerSignal > 0) {
+        setPickerAgent(currentAgentId || '');
+        setModelPickerOpen((v) => !v);
+      }
     }
-  }, [openModelPickerSignal]);
+  }, [openModelPickerSignal, currentAgentId]);
 
   // Close model picker on outside click or Escape
   useEffect(() => {
@@ -271,9 +334,12 @@ export const Composer: React.FC<ComposerProps> = ({
   const scheduleDraftSave = useCallback(
     (nextText: string) => {
       if (mode !== 'thread' || !session || !hostId) return;
+      const targetHostId = hostId;
+      const targetSessionId = session.id;
       if (draftSaveTimer.current) clearTimeout(draftSaveTimer.current);
       draftSaveTimer.current = setTimeout(() => {
-        void callHost(hostId, 'session.draft.set', { id: session.id, draft: nextText }).catch(() => {});
+        draftSaveTimer.current = null;
+        void callHost(targetHostId, 'session.draft.set', { id: targetSessionId, draft: nextText }).catch(() => {});
       }, 650);
     },
     [mode, session, hostId, callHost],
@@ -494,9 +560,9 @@ export const Composer: React.FC<ComposerProps> = ({
     [session, hostId, callHost, pushToast, scheduleDraftSave],
   );
 
-  // Queue actions
+  // Queue actions (daemon expects 'remove' | 'edit' | 'send')
   const handleQueueAction = useCallback(
-    async (itemId: string, action: 'cancel' | 'steer', pullText?: string) => {
+    async (itemId: string, action: 'remove' | 'send', pullText?: string) => {
       if (!session || !hostId) return;
       try {
         await callHost(hostId, 'session.queue', { id: session.id, itemId, action });
@@ -711,7 +777,7 @@ export const Composer: React.FC<ComposerProps> = ({
       if (e.altKey && e.key === 'ArrowUp' && queuedItems.length > 0 && !text.trim()) {
         e.preventDefault();
         const last = queuedItems[queuedItems.length - 1];
-        void handleQueueAction(last.id, 'cancel', last.text || '');
+        void handleQueueAction(last.id, 'remove', last.text || '');
         return;
       }
 
@@ -731,47 +797,166 @@ export const Composer: React.FC<ComposerProps> = ({
     [acKind, acCount, acIndex, acceptAutocomplete, queuedItems, text, handleQueueAction, settings.sendShortcut, handleSend],
   );
 
-  // Model & agent info for picker button
-  const currentAgentId = mode === 'thread' ? session?.agent || '' : draftConfig?.agent || agents.find((a) => a.available)?.id || '';
-  const currentModelId = mode === 'thread' ? session?.model || detail?.models?.currentModelId || '' : draftConfig?.model || '';
-  const currentModelLabel =
-    (mode === 'thread'
-      ? detail?.models?.availableModels.find((m) => m.modelId === currentModelId)?.name || session?.modelName || currentModelId
-      : draftConfig?.model) || 'Default model';
+  // Model & agent info for picker button (locked to currentAgentId in active thread mode)
+  const currentModelId =
+    mode === 'thread'
+      ? session?.model || detail?.models?.currentModelId || ''
+      : draftConfig?.model || '';
+  const activePickerAgent =
+    mode === 'thread'
+      ? currentAgentId || agents[0]?.id || ''
+      : pickerAgent || currentAgentId || agents[0]?.id || '';
+
+  const currentCatalog =
+    hostId && currentAgentId
+      ? providerCatalogs[providerCatalogKey(hostId, currentAgentId)]
+      : undefined;
+  const activeCatalog =
+    hostId && activePickerAgent
+      ? providerCatalogs[providerCatalogKey(hostId, activePickerAgent)]
+      : undefined;
+
+  // Preload dynamic provider catalog for BOTH currentAgentId and activePickerAgent
+  useEffect(() => {
+    if (!hostId || !currentAgentId) return;
+    void loadProviderModels(hostId, currentAgentId, false);
+  }, [hostId, currentAgentId, loadProviderModels]);
+
+  useEffect(() => {
+    if (!hostId || !activePickerAgent || activePickerAgent === currentAgentId) return;
+    void loadProviderModels(hostId, activePickerAgent, false);
+  }, [hostId, activePickerAgent, currentAgentId, loadProviderModels]);
+
+  useEffect(() => {
+    if (!modelPickerOpen || !hostId || !activePickerAgent) return;
+    void loadProviderModels(hostId, activePickerAgent, false);
+  }, [modelPickerOpen, hostId, activePickerAgent, loadProviderModels]);
+
   const currentAgentObj = agents.find((a) => a.id === currentAgentId);
-  const currentEffort = mode === 'thread' ? session?.thought || 'medium' : draftConfig?.thought || 'medium';
+
+  const scopedPickerCustomModels = useMemo(
+    () =>
+      hostId && activePickerAgent
+        ? settings.customModelsByScope?.[customModelsScopeKey(hostId, activePickerAgent)] ?? []
+        : [],
+    [hostId, activePickerAgent, settings.customModelsByScope],
+  );
+
+  const scopedCurrentCustomModels = useMemo(
+    () =>
+      hostId && currentAgentId
+        ? settings.customModelsByScope?.[customModelsScopeKey(hostId, currentAgentId)] ?? []
+        : [],
+    [hostId, currentAgentId, settings.customModelsByScope],
+  );
+
+  const availableModels = useMemo(
+    () =>
+      mergeAvailableModels({
+        mode,
+        agentId: activePickerAgent,
+        sessionAgentId: currentAgentId,
+        detailModels: detail?.models?.availableModels,
+        catalog: activeCatalog,
+        localCustomModels: scopedPickerCustomModels,
+        currentModelId: activePickerAgent === currentAgentId ? currentModelId : '',
+      }),
+    [
+      mode,
+      activePickerAgent,
+      currentAgentId,
+      detail?.models?.availableModels,
+      activeCatalog,
+      scopedPickerCustomModels,
+      currentModelId,
+    ],
+  );
+
+  const filteredResult = useMemo(
+    () => filterAndRankModels(availableModels, modelSearch, settings.favoriteModels, 80),
+    [availableModels, modelSearch, settings.favoriteModels],
+  );
+
+  const currentModelLabel = useMemo(() => {
+    if (mode === 'thread') {
+      const matched =
+        detail?.models?.availableModels?.find((m) => m.modelId === currentModelId)?.name ||
+        currentCatalog?.models.find((m) => m.modelId === currentModelId)?.name ||
+        currentCatalog?.customModels.find((c) => c.slug === currentModelId)?.name ||
+        scopedCurrentCustomModels.find((c) => c.slug === currentModelId)?.name ||
+        session?.modelName ||
+        currentModelId;
+      return matched || currentCatalog?.defaultModelId || 'Default model';
+    }
+    if (draftConfig?.model) {
+      const matched =
+        currentCatalog?.models.find((m) => m.modelId === draftConfig.model)?.name ||
+        currentCatalog?.customModels.find((c) => c.slug === draftConfig.model)?.name ||
+        scopedCurrentCustomModels.find((c) => c.slug === draftConfig.model)?.name;
+      return matched && matched !== draftConfig.model ? `${matched}` : draftConfig.model;
+    }
+    return currentCatalog?.defaultModelId ? `Default (${currentCatalog.defaultModelId})` : 'Default model';
+  }, [
+    mode,
+    currentModelId,
+    detail?.models?.availableModels,
+    currentCatalog,
+    scopedCurrentCustomModels,
+    session?.modelName,
+    draftConfig?.model,
+  ]);
+
+  const effortOptions = useMemo(
+    () =>
+      resolveEffortOptions(
+        activePickerAgent,
+        mode === 'thread' && activePickerAgent === currentAgentId ? detail?.configOptions : undefined,
+        activeCatalog?.reasoningEfforts,
+      ),
+    [activePickerAgent, mode, currentAgentId, detail?.configOptions, activeCatalog?.reasoningEfforts],
+  );
+
+  const currentEffort = useMemo(() => {
+    if (mode === 'thread') {
+      const optVal = detail?.configOptions?.find(
+        (o) => o.id === 'thought_level' || o.id === 'thought',
+      )?.currentValue;
+      if (optVal !== undefined) return optVal;
+      return session?.thought ?? '';
+    }
+    return draftConfig?.thought ?? 'medium';
+  }, [mode, detail?.configOptions, session?.thought, draftConfig?.thought]);
+
+  const availableModes = useMemo(
+    () =>
+      resolveAvailableModes({
+        agentId: activePickerAgent,
+        detailModes:
+          mode === 'thread' && activePickerAgent === currentAgentId
+            ? detail?.modes?.availableModes
+            : undefined,
+        catalogModes: activeCatalog?.availableModes,
+      }),
+    [activePickerAgent, mode, currentAgentId, detail?.modes?.availableModes, activeCatalog?.availableModes],
+  );
+
+  const currentToolbarModes = useMemo(
+    () =>
+      resolveAvailableModes({
+        agentId: currentAgentId,
+        detailModes: mode === 'thread' ? detail?.modes?.availableModes : undefined,
+        catalogModes: currentCatalog?.availableModes,
+      }),
+    [currentAgentId, mode, detail?.modes?.availableModes, currentCatalog?.availableModes],
+  );
+
   const currentSkipPerms = mode === 'thread' ? Boolean(session?.skipPermissions) : Boolean(draftConfig?.skipPermissions);
-  const currentPermMode = currentSkipPerms ? 'auto' : (mode === 'thread' ? session?.mode : draftConfig?.mode) || 'supervised';
-
-  const activePickerAgent = pickerAgent || currentAgentId || agents[0]?.id || '';
-  const availableModels: ModelInfo[] = useMemo(() => {
-    if (mode === 'thread' && activePickerAgent === currentAgentId && detail?.models?.availableModels?.length) {
-      return detail.models.availableModels;
-    }
-    if (activePickerAgent === 'claude') {
-      return [
-        { modelId: 'claude-sonnet-4-5', name: 'Claude Sonnet 4.5', description: 'Balanced speed and coding intelligence' },
-        { modelId: 'claude-opus-4-1', name: 'Claude Opus 4.1', description: 'Deep reasoning for hard architecture' },
-        { modelId: 'claude-haiku-4-5', name: 'Claude Haiku 4.5', description: 'Ultra-fast lightweight edits' },
-      ];
-    }
-    if (activePickerAgent === 'codex') {
-      return [
-        { modelId: 'gpt-5-codex', name: 'GPT-5 Codex', description: 'OpenAI Codex default model' },
-        { modelId: 'o3', name: 'o3', description: 'Reasoning model' },
-      ];
-    }
-    return [{ modelId: '', name: 'Provider Default', description: 'Use provider default model' }];
-  }, [mode, activePickerAgent, currentAgentId, detail?.models]);
-
-  const filteredModels = useMemo(() => {
-    const q = modelSearch.trim().toLowerCase();
-    const list = availableModels.filter(
-      (m) => !q || m.name.toLowerCase().includes(q) || m.modelId.toLowerCase().includes(q),
-    );
-    const favs = new Set(settings.favoriteModels);
-    return [...list].sort((a, b) => Number(favs.has(b.modelId)) - Number(favs.has(a.modelId)));
-  }, [availableModels, modelSearch, settings.favoriteModels]);
+  const rawModeId =
+    mode === 'thread'
+      ? detail?.modes?.currentModeId || session?.mode || ''
+      : draftConfig?.mode || '';
+  const activePermMode = coerceSupportedMode(rawModeId, currentSkipPerms, availableModes);
+  const toolbarPermMode = coerceSupportedMode(rawModeId, currentSkipPerms, currentToolbarModes);
 
   const toggleFavoriteModel = (modelId: string) => {
     if (!modelId) return;
@@ -781,19 +966,45 @@ export const Composer: React.FC<ComposerProps> = ({
     updateSettings({ favoriteModels: Array.from(set) });
   };
 
-  const selectModel = async (agentId: string, modelId: string) => {
+  const selectModel = async (agentId: string, modelId: string, persistAsCustom = false) => {
+    const exactSlug = modelId.trim();
+    if (persistAsCustom && exactSlug && agentSupportsCustomModels(agentId)) {
+      void saveCustomModelSlug(hostId, agentId, { slug: exactSlug, name: exactSlug });
+    }
     if (mode === 'draft') {
-      onDraftChange?.({ agent: agentId, model: modelId });
+      const nextModes = resolveAvailableModes({
+        agentId,
+        catalogModes: providerCatalogs[providerCatalogKey(hostId, agentId)]?.availableModes,
+      });
+      const coerced = coerceSupportedMode(draftConfig?.mode, draftConfig?.skipPermissions, nextModes);
+      onDraftChange?.({
+        agent: agentId,
+        model: exactSlug,
+        mode: coerced.id,
+        skipPermissions: coerced.skip,
+      });
+      setModelSearch('');
       setModelPickerOpen(false);
       return;
     }
-    if (session && hostId && modelId) {
+    if (session && hostId && exactSlug) {
       try {
-        await callHost(hostId, 'session.setModel', { id: session.id, model: modelId });
+        await callHost(hostId, 'session.setModel', { id: session.id, model: exactSlug });
+        setModelSearch('');
         setModelPickerOpen(false);
       } catch (e) {
         pushToast({ text: `Set model failed: ${(e as Error).message}`, level: 'error' });
       }
+    }
+  };
+
+  const handleRefreshCatalog = async () => {
+    if (!hostId || !activePickerAgent || catalogRefreshing) return;
+    setCatalogRefreshing(true);
+    try {
+      await loadProviderModels(hostId, activePickerAgent, true);
+    } finally {
+      setCatalogRefreshing(false);
     }
   };
 
@@ -804,14 +1015,18 @@ export const Composer: React.FC<ComposerProps> = ({
     }
     if (session && hostId) {
       try {
-        await callHost(hostId, 'session.setConfig', { id: session.id, configId: 'thought', value: level });
+        await callHost(hostId, 'session.setConfig', {
+          id: session.id,
+          configId: 'thought_level',
+          value: level,
+        });
       } catch (e) {
         pushToast({ text: `Set effort failed: ${(e as Error).message}`, level: 'error' });
       }
     }
   };
 
-  const selectPermMode = async (m: (typeof PERM_MODES)[number]) => {
+  const selectPermMode = async (m: ResolvedModeOption) => {
     setModelPickerOpen(false);
     if (mode === 'draft') {
       onDraftChange?.({ mode: m.id, skipPermissions: m.skip });
@@ -864,11 +1079,18 @@ export const Composer: React.FC<ComposerProps> = ({
               </div>
               <div className="space-y-3">
                 {questions.map((q, qi) => {
-                  const key = q.header || q.question || `q${qi}`;
+                  const key = q.id || q.question || q.header || `q${qi}`;
                   const chosen = selForReq[key] ?? [];
                   return (
                     <div key={key} className="space-y-1.5">
-                      <div className="text-xs font-medium text-[var(--text-primary)]">{q.question}</div>
+                      <div className="text-xs font-medium text-[var(--text-primary)]">
+                        {q.header && (
+                          <span className="mr-1.5 rounded bg-[var(--bg-elevated)] px-1.5 py-0.5 text-[10px] font-mono text-[var(--accent)]">
+                            {q.header}
+                          </span>
+                        )}
+                        {q.question}
+                      </div>
                       {q.options && q.options.length > 0 && (
                         <div className="flex flex-wrap gap-1.5">
                           {q.options.map((opt, oi) => {
@@ -938,10 +1160,15 @@ export const Composer: React.FC<ComposerProps> = ({
                   onClick={() => {
                     const answers: Record<string, string> = {};
                     questions.forEach((q, qi) => {
-                      const key = q.header || q.question || `q${qi}`;
+                      const key = q.id || q.question || q.header || `q${qi}`;
                       const parts = [...(selForReq[key] ?? [])];
                       if (customForReq[key]?.trim()) parts.push(customForReq[key].trim());
-                      if (parts.length > 0) answers[q.question || key] = parts.join(', ');
+                      if (parts.length > 0) {
+                        const joined = parts.join(', ');
+                        if (q.id) answers[q.id] = joined;
+                        if (q.question) answers[q.question] = joined;
+                        if (!q.id && !q.question) answers[key] = joined;
+                      }
                     });
                     const allowOpt = perm.options.find((o) => o.kind.startsWith('allow')) ?? perm.options[0];
                     if (allowOpt) void respondPermission(perm, allowOpt.optionId, answers);
@@ -999,13 +1226,21 @@ export const Composer: React.FC<ComposerProps> = ({
           );
         }
 
-        // Standard Tool Approval Card
+        // Standard Tool Approval Card (with perm.reason + linked ToolCall command/diff preview)
+        const linkedTool = perm.callId
+          ? transcriptItems.find((it) => it.kind === 'tool' && it.tool?.callId === perm.callId)?.tool
+          : undefined;
+        const linkedCmd = extractLinkedToolCommand(linkedTool);
+        const linkedDiffs = extractToolInlineDiffs(linkedTool);
         const inpPreview =
           typeof perm.input === 'string'
             ? perm.input
             : perm.input
               ? JSON.stringify(perm.input, null, 2).slice(0, 400)
-              : '';
+              : linkedCmd
+                ? `$ ${linkedCmd}`
+                : '';
+
         return (
           <div
             key={perm.reqId}
@@ -1027,6 +1262,9 @@ export const Composer: React.FC<ComposerProps> = ({
               )}
             </div>
             {perm.title && <div className="text-xs text-[var(--text-primary)] mb-1">{perm.title}</div>}
+            {perm.reason && perm.reason !== perm.title && (
+              <div className="text-[11.5px] text-[var(--text-secondary)] mb-1">{perm.reason}</div>
+            )}
             {perm.blockedPath && (
               <div className="text-[11px] font-mono text-[var(--text-muted)] mb-1">Path: {perm.blockedPath}</div>
             )}
@@ -1034,6 +1272,27 @@ export const Composer: React.FC<ComposerProps> = ({
               <pre className="max-h-28 overflow-auto rounded-lg bg-[var(--bg-base)] border border-[var(--border)] p-2 text-[11px] font-mono text-[var(--text-secondary)] mb-2">
                 {inpPreview}
               </pre>
+            )}
+            {!inpPreview && linkedDiffs.length > 0 && (
+              <div className="max-h-32 overflow-auto rounded-lg bg-[var(--bg-base)] border border-[var(--border)] p-1.5 font-mono text-[11px] mb-2 space-y-1">
+                {linkedDiffs.map((df, di) => (
+                  <div key={di}>
+                    {df.path && <div className="text-[10px] text-[var(--text-muted)] px-1">{df.path}</div>}
+                    {df.oldStr &&
+                      df.oldStr.split('\n').slice(0, 8).map((ln, li) => (
+                        <div key={`d-${li}`} className="px-1.5 bg-[var(--diff-del-bg)] text-[var(--diff-del-fg)] whitespace-pre">
+                          - {ln}
+                        </div>
+                      ))}
+                    {df.newStr &&
+                      df.newStr.split('\n').slice(0, 8).map((ln, li) => (
+                        <div key={`a-${li}`} className="px-1.5 bg-[var(--diff-add-bg)] text-[var(--diff-add-fg)] whitespace-pre">
+                          + {ln}
+                        </div>
+                      ))}
+                  </div>
+                ))}
+              </div>
             )}
             <div className="flex flex-wrap items-center justify-end gap-1.5">
               {perm.options.map((opt) => {
@@ -1083,15 +1342,15 @@ export const Composer: React.FC<ComposerProps> = ({
               <div className="flex items-center gap-1 shrink-0">
                 <button
                   type="button"
-                  onClick={() => void handleQueueAction(q.id, 'steer')}
-                  title="Steer now"
+                  onClick={() => void handleQueueAction(q.id, 'send')}
+                  title="Send now"
                   className="rounded px-1.5 py-0.5 text-[11px] text-[var(--accent)] hover:bg-[var(--accent-soft)] cursor-pointer"
                 >
                   Steer
                 </button>
                 <button
                   type="button"
-                  onClick={() => void handleQueueAction(q.id, 'cancel', q.text || '')}
+                  onClick={() => void handleQueueAction(q.id, 'remove', q.text || '')}
                   title="Pull back to edit"
                   className="rounded px-1.5 py-0.5 text-[11px] text-[var(--text-secondary)] hover:bg-[var(--bg-hover)] cursor-pointer"
                 >
@@ -1099,7 +1358,7 @@ export const Composer: React.FC<ComposerProps> = ({
                 </button>
                 <button
                   type="button"
-                  onClick={() => void handleQueueAction(q.id, 'cancel')}
+                  onClick={() => void handleQueueAction(q.id, 'remove')}
                   title="Cancel queued message"
                   className="rounded p-0.5 text-[var(--text-muted)] hover:text-[var(--danger)] cursor-pointer"
                 >
@@ -1212,6 +1471,7 @@ export const Composer: React.FC<ComposerProps> = ({
             {attachments.map((att) => (
               <span
                 key={att.id}
+                data-testid="composer-attachment-chip"
                 className="inline-flex items-center gap-1.5 rounded-lg border border-[var(--border)] bg-[var(--bg-elevated)] px-2 py-0.5 text-[11px] text-[var(--text-primary)] max-w-xs"
               >
                 {att.previewUrl ? (
@@ -1275,13 +1535,13 @@ export const Composer: React.FC<ComposerProps> = ({
                 <Cpu className="w-3.5 h-3.5 text-[var(--accent)]" />
                 <span className="font-medium text-[var(--text-primary)]">{currentAgentObj?.name || currentAgentId || 'Agent'}</span>
                 <span className="text-[var(--text-muted)]">·</span>
-                <span className="max-w-[140px] truncate">{currentModelLabel}</span>
+                <span className="max-w-[180px] truncate">{currentModelLabel}</span>
                 <ChevronDown className="w-3 h-3 opacity-60" />
               </button>
 
               {modelPickerOpen && (
-                <div className="absolute bottom-full left-0 mb-2 z-40 w-[440px] max-w-[92vw] rounded-xl border border-[var(--border-strong)] bg-[var(--bg-surface)] shadow-2xl overflow-hidden">
-                  <div className="grid grid-cols-[132px_1fr] min-h-[260px]">
+                <div className="absolute bottom-full left-0 mb-2 z-40 w-[490px] max-w-[94vw] rounded-xl border border-[var(--border-strong)] bg-[var(--bg-surface)] shadow-2xl overflow-hidden">
+                  <div className="grid grid-cols-[136px_1fr] min-h-[290px]">
                     {/* Provider Rail */}
                     <div className="border-r border-[var(--border)] bg-[var(--bg-sidebar)] p-2 space-y-1">
                       <div className="px-2 py-1 text-[10px] font-semibold uppercase tracking-wider text-[var(--text-muted)]">
@@ -1294,7 +1554,24 @@ export const Composer: React.FC<ComposerProps> = ({
                           disabled={mode === 'thread' && ag.id !== currentAgentId}
                           onClick={() => {
                             setPickerAgent(ag.id);
-                            if (mode === 'draft') onDraftChange?.({ agent: ag.id, model: '' });
+                            void loadProviderModels(hostId, ag.id, false);
+                            if (mode === 'draft') {
+                              const nextModes = resolveAvailableModes({
+                                agentId: ag.id,
+                                catalogModes: providerCatalogs[providerCatalogKey(hostId, ag.id)]?.availableModes,
+                              });
+                              const coerced = coerceSupportedMode(
+                                draftConfig?.mode,
+                                draftConfig?.skipPermissions,
+                                nextModes,
+                              );
+                              onDraftChange?.({
+                                agent: ag.id,
+                                model: '',
+                                mode: coerced.id,
+                                skipPermissions: coerced.skip,
+                              });
+                            }
                           }}
                           className={`flex w-full items-center justify-between gap-1.5 rounded-lg px-2 py-1.5 text-left text-xs transition cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed ${
                             activePickerAgent === ag.id
@@ -1323,18 +1600,85 @@ export const Composer: React.FC<ComposerProps> = ({
                     </div>
 
                     {/* Models + Effort + Permissions */}
-                    <div className="flex flex-col p-2.5 gap-2">
-                      <input
-                        type="text"
-                        value={modelSearch}
-                        onChange={(e) => setModelSearch(e.target.value)}
-                        placeholder="Search models..."
-                        className="w-full rounded-lg border border-[var(--border)] bg-[var(--bg-base)] px-2.5 py-1 text-xs text-[var(--text-primary)] outline-none focus:border-[var(--accent)]"
-                      />
-                      <div className="max-h-36 overflow-y-auto space-y-0.5">
-                        {filteredModels.map((m) => {
+                    <div className="flex flex-col p-2.5 gap-2 min-w-0">
+                      <div className="flex items-center gap-1.5">
+                        <input
+                          type="text"
+                          data-testid="model-search-input"
+                          value={modelSearch}
+                          onChange={(e) => setModelSearch(e.target.value)}
+                          onKeyDown={(e) => {
+                            if (e.key === 'Enter') {
+                              e.preventDefault();
+                              if (filteredResult.exactMatch) {
+                                void selectModel(activePickerAgent, modelSearch.trim());
+                              } else if (filteredResult.customCandidateSlug) {
+                                void selectModel(activePickerAgent, filteredResult.customCandidateSlug, true);
+                              } else if (filteredResult.visible[0]) {
+                                void selectModel(activePickerAgent, filteredResult.visible[0].modelId);
+                              }
+                            }
+                          }}
+                          placeholder="Search or enter OpenRouter slug (e.g. google/gemini-3-flash-preview)..."
+                          className="flex-1 min-w-0 rounded-lg border border-[var(--border)] bg-[var(--bg-base)] px-2.5 py-1 text-xs text-[var(--text-primary)] outline-none focus:border-[var(--accent)]"
+                        />
+                        <button
+                          type="button"
+                          data-testid="model-picker-refresh-btn"
+                          onClick={() => void handleRefreshCatalog()}
+                          title="Refresh live model catalog"
+                          className="rounded-lg border border-[var(--border)] bg-[var(--bg-base)] p-1.5 text-[var(--text-muted)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-hover)] cursor-pointer shrink-0"
+                        >
+                          <RefreshCw className={`w-3 h-3 ${catalogRefreshing ? 'animate-spin' : ''}`} />
+                        </button>
+                      </div>
+
+                      {/* Arbitrary Custom OpenRouter / Provider Slug Quick Entry */}
+                      {filteredResult.customCandidateSlug && (
+                        <div className="flex items-center justify-between gap-1.5 rounded-lg border border-[var(--accent)]/50 bg-[var(--accent-soft)]/70 px-2 py-1.5 text-xs">
+                          <button
+                            type="button"
+                            data-testid="use-custom-model-btn"
+                            onClick={() =>
+                              void selectModel(activePickerAgent, filteredResult.customCandidateSlug!, true)
+                            }
+                            className="flex items-center gap-1.5 min-w-0 flex-1 text-left font-medium text-[var(--accent)] hover:underline cursor-pointer"
+                          >
+                            <Plus className="w-3.5 h-3.5 shrink-0" />
+                            <span className="truncate">
+                              Use custom model &ldquo;{filteredResult.customCandidateSlug}&rdquo;
+                            </span>
+                          </button>
+                          {agentSupportsCustomModels(activePickerAgent) && (
+                            <button
+                              type="button"
+                              data-testid="save-custom-model-btn"
+                              onClick={() =>
+                                void saveCustomModelSlug(hostId, activePickerAgent, {
+                                  slug: filteredResult.customCandidateSlug!,
+                                  name: filteredResult.customCandidateSlug!,
+                                })
+                              }
+                              className="rounded-md border border-[var(--accent)]/40 bg-[var(--bg-surface)] px-2 py-0.5 text-[10.5px] font-semibold text-[var(--accent)] hover:bg-[var(--bg-hover)] shrink-0 cursor-pointer"
+                            >
+                              Save
+                            </button>
+                          )}
+                        </div>
+                      )}
+
+                      <div className="max-h-44 overflow-y-auto space-y-0.5">
+                        {filteredResult.visible.map((m) => {
                           const isFav = settings.favoriteModels.includes(m.modelId);
                           const isSel = m.modelId === currentModelId && activePickerAgent === currentAgentId;
+                          const ctxLabel = formatContextWindow(m.contextWindow);
+                          const provBadge = m.isCustom
+                            ? 'Custom'
+                            : m.provider === 'openrouter'
+                              ? 'OpenRouter'
+                              : m.provider === 'openai'
+                                ? 'OpenAI'
+                                : '';
                           return (
                             <div
                               key={m.modelId || 'default'}
@@ -1349,25 +1693,57 @@ export const Composer: React.FC<ComposerProps> = ({
                               >
                                 <div className="font-medium truncate flex items-center gap-1.5">
                                   {isSel && <Check className="w-3 h-3 text-[var(--accent)] shrink-0" />}
-                                  <span>{m.name}</span>
+                                  <span className="truncate">{m.name}</span>
+                                  {provBadge && (
+                                    <span className="rounded bg-[var(--bg-elevated)] px-1 py-0.2 text-[9.5px] font-mono text-[var(--text-muted)] shrink-0">
+                                      {provBadge}
+                                    </span>
+                                  )}
+                                  {m.supportsReasoning && (
+                                    <span title="Supports reasoning" className="shrink-0">
+                                      <Brain className="w-2.5 h-2.5 text-[var(--accent)]" />
+                                    </span>
+                                  )}
+                                  {ctxLabel && (
+                                    <span className="font-mono text-[9.5px] text-[var(--text-muted)] shrink-0">
+                                      {ctxLabel}
+                                    </span>
+                                  )}
                                 </div>
                                 {m.description && (
                                   <div className="text-[10px] text-[var(--text-muted)] truncate">{m.description}</div>
                                 )}
                               </button>
                               {m.modelId && (
-                                <button
-                                  type="button"
-                                  onClick={() => toggleFavoriteModel(m.modelId)}
-                                  className="p-1 text-[var(--text-muted)] hover:text-[var(--warning)] cursor-pointer"
-                                  title="Favorite model"
-                                >
-                                  <Star className={`w-3 h-3 ${isFav ? 'fill-[var(--warning)] text-[var(--warning)]' : ''}`} />
-                                </button>
+                                <div className="flex items-center gap-0.5 shrink-0">
+                                  {m.isCustom && (
+                                    <button
+                                      type="button"
+                                      onClick={() => void removeCustomModelSlug(hostId, activePickerAgent, m.modelId)}
+                                      className="p-1 text-[var(--text-muted)] hover:text-[var(--danger)] cursor-pointer"
+                                      title="Remove saved custom model"
+                                    >
+                                      <Trash2 className="w-3 h-3" />
+                                    </button>
+                                  )}
+                                  <button
+                                    type="button"
+                                    onClick={() => toggleFavoriteModel(m.modelId)}
+                                    className="p-1 text-[var(--text-muted)] hover:text-[var(--warning)] cursor-pointer"
+                                    title="Favorite model"
+                                  >
+                                    <Star className={`w-3 h-3 ${isFav ? 'fill-[var(--warning)] text-[var(--warning)]' : ''}`} />
+                                  </button>
+                                </div>
                               )}
                             </div>
                           );
                         })}
+                        {filteredResult.totalMatched > filteredResult.visible.length && (
+                          <div className="px-2 py-1 text-[10px] text-[var(--text-muted)] text-center">
+                            Showing {filteredResult.visible.length} of {filteredResult.totalMatched} models — refine search to filter
+                          </div>
+                        )}
                       </div>
 
                       {/* Effort Level */}
@@ -1375,13 +1751,14 @@ export const Composer: React.FC<ComposerProps> = ({
                         <div className="text-[10px] font-semibold uppercase tracking-wider text-[var(--text-muted)] mb-1">
                           Reasoning Effort
                         </div>
-                        <div className="grid grid-cols-4 gap-1">
-                          {EFFORT_LEVELS.map((lv) => (
+                        <div className="flex flex-wrap gap-1">
+                          {effortOptions.map((lv) => (
                             <button
-                              key={lv.id}
+                              key={lv.id || 'default'}
                               type="button"
+                              data-testid={`effort-btn-${lv.id || 'default'}`}
                               onClick={() => void selectEffort(lv.id)}
-                              className={`rounded-md py-1 text-[11px] font-medium cursor-pointer ${
+                              className={`flex-1 min-w-[54px] rounded-md px-1.5 py-1 text-[11px] font-medium cursor-pointer ${
                                 currentEffort === lv.id
                                   ? 'bg-[var(--accent)] text-[var(--accent-fg)]'
                                   : 'bg-[var(--bg-elevated)] text-[var(--text-secondary)] hover:bg-[var(--bg-hover)]'
@@ -1393,27 +1770,28 @@ export const Composer: React.FC<ComposerProps> = ({
                         </div>
                       </div>
 
-                      {/* Permission Mode */}
+                      {/* Permission / Collaboration Mode */}
                       <div className="border-t border-[var(--border)] pt-2">
                         <div className="text-[10px] font-semibold uppercase tracking-wider text-[var(--text-muted)] mb-1">
-                          Approval Mode
+                          Mode &amp; Permissions
                         </div>
-                        <div className="space-y-1">
-                          {PERM_MODES.map((pm) => {
-                            const active = currentPermMode === pm.id || (pm.id === 'auto' && currentSkipPerms);
+                        <div className="space-y-1 max-h-36 overflow-y-auto">
+                          {availableModes.map((pm) => {
+                            const active = activePermMode.id === pm.id;
                             return (
                               <button
                                 key={pm.id}
                                 type="button"
+                                data-testid={`mode-btn-${pm.id}`}
                                 onClick={() => void selectPermMode(pm)}
-                                className={`flex w-full items-center justify-between rounded-md px-2 py-1 text-left text-[11px] cursor-pointer ${
+                                className={`flex w-full items-center justify-between gap-2 rounded-md px-2 py-1 text-left text-[11px] cursor-pointer ${
                                   active
                                     ? 'bg-[var(--accent-soft)] text-[var(--text-primary)]'
                                     : 'text-[var(--text-secondary)] hover:bg-[var(--bg-hover)]'
                                 }`}
                               >
-                                <span className="font-medium">{pm.label}</span>
-                                <span className="text-[10px] text-[var(--text-muted)]">{pm.desc}</span>
+                                <span className="font-medium shrink-0">{pm.name}</span>
+                                <span className="text-[10px] text-[var(--text-muted)] truncate">{pm.desc}</span>
                               </button>
                             );
                           })}
@@ -1428,16 +1806,21 @@ export const Composer: React.FC<ComposerProps> = ({
             {/* Approval Mode Badge */}
             <button
               type="button"
-              onClick={() => setModelPickerOpen(true)}
-              title="Change permission mode"
+              data-testid="perm-mode-badge"
+              aria-label="Change mode and permissions"
+              onClick={() => {
+                setPickerAgent(currentAgentId);
+                setModelPickerOpen(true);
+              }}
+              title="Change mode & permissions"
               className="flex items-center gap-1 rounded-lg px-2 py-1 text-[11px] text-[var(--text-muted)] hover:bg-[var(--bg-hover)] hover:text-[var(--text-primary)] cursor-pointer"
             >
-              {currentSkipPerms ? (
+              {isFullAccessMode(toolbarPermMode.id) ? (
                 <ShieldCheck className="w-3.5 h-3.5 text-[var(--warning)]" />
               ) : (
                 <Shield className="w-3.5 h-3.5 text-[var(--success)]" />
               )}
-              <span>{currentSkipPerms ? 'Full access' : currentPermMode === 'acceptEdits' ? 'Auto edits' : 'Supervised'}</span>
+              <span>{toolbarPermMode.name}</span>
             </button>
 
             {/* Attach File Button */}
@@ -1451,6 +1834,7 @@ export const Composer: React.FC<ComposerProps> = ({
             </button>
             <input
               ref={fileInputRef}
+              data-testid="composer-attach-input"
               type="file"
               multiple
               className="hidden"

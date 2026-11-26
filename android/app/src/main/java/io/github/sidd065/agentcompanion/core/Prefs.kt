@@ -1,6 +1,7 @@
 package io.github.sidd065.agentcompanion.core
 
 import android.content.Context
+import androidx.datastore.core.DataStore
 import androidx.datastore.preferences.core.Preferences
 import androidx.datastore.preferences.core.booleanPreferencesKey
 import androidx.datastore.preferences.core.edit
@@ -9,11 +10,10 @@ import androidx.datastore.preferences.core.intPreferencesKey
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
 import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.flow.SharingStarted
+import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.first
-import kotlinx.coroutines.flow.map
-import kotlinx.coroutines.flow.stateIn
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.builtins.ListSerializer
@@ -43,23 +43,73 @@ data class AppSettings(
     val lastNotifSeq: Map<String, Long> = emptyMap(),
     val agyFlags: AgyFlags = AgyFlags(),
     val claudeFlags: ClaudeFlags = ClaudeFlags(),
+    val codexFlags: CodexFlags = CodexFlags(),
+    val customCodexModels: List<CustomModel> = emptyList(),
+    val recentCodexModels: List<String> = emptyList(),
     /** Agent preselected for new sessions and terminals. */
     val defaultAgent: String = "agy",
 ) {
     val activeHost: HostConfig? get() = hosts.firstOrNull { it.id == activeHostId } ?: hosts.firstOrNull()
 
     /** The saved launch flags for an agent, as the daemon's "flags" object. */
-    fun flagsJson(agent: String?): kotlinx.serialization.json.JsonObject =
-        if (agent == "claude") claudeFlags.daemonJson() else agyFlags.daemonJson()
+    fun flagsJson(agent: String?): kotlinx.serialization.json.JsonObject = when {
+        agent.isNullOrBlank() || agent == "agy" -> agyFlags.daemonJson()
+        agent == "claude" -> claudeFlags.daemonJson()
+        agent == "codex" -> codexFlags.daemonJson()
+        else -> kotlinx.serialization.json.buildJsonObject {}
+    }
+
+    fun addDirs(agent: String?): List<String> = when {
+        agent.isNullOrBlank() || agent == "agy" -> agyFlags.addDirs
+        agent == "claude" -> claudeFlags.addDirs
+        agent == "codex" -> codexFlags.addDirs
+        else -> emptyList()
+    }
 
     /** Terminal arguments for continuing a conversation of this agent. */
-    fun tuiResumeArgs(agent: String?): List<String> = if (agent == "claude") claudeFlags.tuiResumeArgs() else agyFlags.tuiResumeArgs()
+    fun tuiResumeArgs(agent: String?): List<String> = when {
+        agent.isNullOrBlank() || agent == "agy" -> agyFlags.tuiResumeArgs()
+        agent == "claude" -> claudeFlags.tuiResumeArgs()
+        agent == "codex" -> codexFlags.tuiResumeArgs()
+        else -> emptyList()
+    }
 
-    fun skipPermissions(agent: String?): Boolean = if (agent == "claude") claudeFlags.skipPermissions else agyFlags.skipPermissions
+    fun skipPermissions(agent: String?): Boolean = when {
+        agent.isNullOrBlank() || agent == "agy" -> agyFlags.skipPermissions
+        agent == "claude" -> claudeFlags.skipPermissions
+        agent == "codex" -> codexFlags.effectiveSkipPermissions
+        else -> false
+    }
+
+    fun withRecentCodexModel(slug: String, customName: String? = null, isCustom: Boolean = false): AppSettings {
+        val clean = slug.trim()
+        if (clean.isEmpty()) return this
+        val recents = (listOf(clean) + recentCodexModels.filterNot { it == clean }).take(12)
+        val customs = if (isCustom) {
+            val entry = CustomModel(slug = clean, name = customName?.trim()?.ifBlank { clean } ?: clean)
+            listOf(entry) + customCodexModels.filterNot { it.slug == clean }
+        } else {
+            customCodexModels
+        }
+        return copy(recentCodexModels = recents, customCodexModels = customs)
+    }
+
+    fun withoutCustomCodexModel(slug: String): AppSettings {
+        val clean = slug.trim()
+        if (clean.isEmpty()) return this
+        return copy(
+            customCodexModels = customCodexModels.filterNot { it.slug == clean },
+            recentCodexModels = recentCodexModels.filterNot { it == clean },
+        )
+    }
 }
 
 /** DataStore-backed settings exposed as a StateFlow. */
-class Prefs(private val context: Context, scope: CoroutineScope) {
+class Prefs(
+    private val context: Context,
+    scope: CoroutineScope,
+    private val store: DataStore<Preferences> = context.dataStore,
+) {
     private object K {
         val hosts = stringPreferencesKey("hosts_v2") // paired hosts (v1 = Tailscale-era entries, dropped)
         val hostsV1 = stringPreferencesKey("hosts")
@@ -81,11 +131,16 @@ class Prefs(private val context: Context, scope: CoroutineScope) {
         val notifSeq = stringPreferencesKey("notif_seq")
         val flags = stringPreferencesKey("agy_flags")
         val claudeFlags = stringPreferencesKey("claude_flags")
+        val codexFlags = stringPreferencesKey("codex_flags")
+        val customCodexModels = stringPreferencesKey("custom_codex_models")
+        val recentCodexModels = stringPreferencesKey("recent_codex_models")
         val defaultAgent = stringPreferencesKey("default_agent")
     }
 
     private val hostsSer = ListSerializer(HostConfig.serializer())
     private val seqSer = MapSerializer(String.serializer(), Long.serializer())
+    private val customModelsSer = ListSerializer(CustomModel.serializer())
+    private val stringListSer = ListSerializer(String.serializer())
 
     private fun read(p: Preferences): AppSettings = AppSettings(
         hosts = p[K.hosts]?.let { runCatching { AppJson.decodeFromString(hostsSer, it) }.getOrNull() } ?: emptyList(),
@@ -109,16 +164,25 @@ class Prefs(private val context: Context, scope: CoroutineScope) {
             // First run after the flags feature: carry over the older individual defaults.
             ?: AgyFlags(skipPermissions = p[K.skip] ?: true, model = p[K.model] ?: "", mode = p[K.mode] ?: ""),
         claudeFlags = p[K.claudeFlags]?.let { runCatching { AppJson.decodeFromString(ClaudeFlags.serializer(), it) }.getOrNull() } ?: ClaudeFlags(),
+        codexFlags = p[K.codexFlags]?.let { runCatching { AppJson.decodeFromString(CodexFlags.serializer(), it) }.getOrNull() } ?: CodexFlags(),
+        customCodexModels = p[K.customCodexModels]?.let { runCatching { AppJson.decodeFromString(customModelsSer, it) }.getOrNull() } ?: emptyList(),
+        recentCodexModels = p[K.recentCodexModels]?.let { runCatching { AppJson.decodeFromString(stringListSer, it) }.getOrNull() } ?: emptyList(),
         defaultAgent = p[K.defaultAgent] ?: "agy",
     )
 
-    val flow: StateFlow<AppSettings> = context.dataStore.data.map { read(it) }
-        .stateIn(scope, SharingStarted.Eagerly, runBlocking { read(context.dataStore.data.first()) })
+    private val _flow = MutableStateFlow(runBlocking { read(store.data.first()) })
+    val flow: StateFlow<AppSettings> = _flow
 
-    val value: AppSettings get() = flow.value
+    val value: AppSettings get() = _flow.value
+
+    init {
+        scope.launch {
+            store.data.collect { _flow.value = read(it) }
+        }
+    }
 
     suspend fun update(block: (AppSettings) -> AppSettings) {
-        context.dataStore.edit { p ->
+        val updated = store.edit { p ->
             val n = block(read(p))
             p[K.hosts] = AppJson.encodeToString(hostsSer, n.hosts)
             p.remove(K.hostsV1)
@@ -140,7 +204,11 @@ class Prefs(private val context: Context, scope: CoroutineScope) {
             p[K.notifSeq] = AppJson.encodeToString(seqSer, n.lastNotifSeq)
             p[K.flags] = AppJson.encodeToString(AgyFlags.serializer(), n.agyFlags)
             p[K.claudeFlags] = AppJson.encodeToString(ClaudeFlags.serializer(), n.claudeFlags)
+            p[K.codexFlags] = AppJson.encodeToString(CodexFlags.serializer(), n.codexFlags)
+            p[K.customCodexModels] = AppJson.encodeToString(customModelsSer, n.customCodexModels)
+            p[K.recentCodexModels] = AppJson.encodeToString(stringListSer, n.recentCodexModels)
             p[K.defaultAgent] = n.defaultAgent
         }
+        _flow.value = read(updated)
     }
 }

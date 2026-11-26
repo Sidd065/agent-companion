@@ -71,6 +71,8 @@ import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.saveable.Saver
+import androidx.compose.runtime.saveable.listSaver
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -84,6 +86,7 @@ import androidx.compose.ui.unit.dp
 import io.github.sidd065.agentcompanion.core.FsEntry
 import io.github.sidd065.agentcompanion.core.FsList
 import io.github.sidd065.agentcompanion.core.Term
+import io.github.sidd065.agentcompanion.net.ConnState
 import io.github.sidd065.agentcompanion.net.HostConnection
 import io.github.sidd065.agentcompanion.net.decode
 import io.github.sidd065.agentcompanion.net.params
@@ -94,15 +97,17 @@ import io.github.sidd065.agentcompanion.ui.activeConnection
 import io.github.sidd065.agentcompanion.ui.components.ConfirmDialog
 import io.github.sidd065.agentcompanion.ui.components.EmptyState
 import io.github.sidd065.agentcompanion.ui.components.ErrorBox
+import io.github.sidd065.agentcompanion.ui.components.HostSelectorBar
 import io.github.sidd065.agentcompanion.ui.components.LoadingBox
 import io.github.sidd065.agentcompanion.ui.components.LocalSnack
 import io.github.sidd065.agentcompanion.ui.components.TextPromptDialog
 import io.github.sidd065.agentcompanion.ui.components.copyText
 import io.github.sidd065.agentcompanion.ui.components.fmtBytes
+import io.github.sidd065.agentcompanion.ui.components.rememberHomeDir
 import io.github.sidd065.agentcompanion.ui.components.relTime
 import io.github.sidd065.agentcompanion.ui.components.shortPath
+import io.github.sidd065.agentcompanion.ui.selectActiveHost
 import io.github.sidd065.agentcompanion.ui.sessions.ConnectionBanner
-import io.github.sidd065.agentcompanion.ui.sessions.homeDir
 import io.github.sidd065.agentcompanion.ui.theme.LocalExtra
 import kotlinx.coroutines.launch
 import androidx.compose.foundation.clickable
@@ -125,44 +130,117 @@ fun entryIcon(e: FsEntry): ImageVector = when {
 val codeExts = setOf("kt", "kts", "java", "go", "py", "js", "ts", "tsx", "jsx", "rs", "c", "h", "cpp", "hpp", "cs", "rb", "php", "swift", "sh", "bash", "zsh",
     "json", "yaml", "yml", "toml", "xml", "html", "css", "scss", "md", "txt", "gradle", "sql", "lua", "dart", "vue", "svelte", "ini", "conf", "env", "mk", "dockerfile")
 
+class PerHostFilesState(initialPaths: Map<String, String> = emptyMap()) {
+    private val paths = LinkedHashMap<String, String>(initialPaths)
+
+    fun pathFor(hostId: String, initialPath: String = "", home: String? = null): String {
+        val cur = paths[hostId]
+        if (!cur.isNullOrBlank() && !(cur == "~" && !home.isNullOrBlank())) return cur
+        val resolved = initialPath.ifBlank { home ?: "~" }
+        paths[hostId] = resolved
+        return resolved
+    }
+
+    fun setPath(hostId: String, newPath: String) {
+        paths[hostId] = newPath
+    }
+
+    fun snapshot(): Map<String, String> = paths.toMap()
+}
+
+internal val PathsByHostSaver: Saver<Map<String, String>, Any> = listSaver(
+    save = { map -> map.entries.map { (k, v) -> "$k\u0000$v" } },
+    restore = { list ->
+        buildMap {
+            for (entry in list) {
+                val idx = entry.indexOf('\u0000')
+                if (idx > 0) put(entry.substring(0, idx), entry.substring(idx + 1))
+            }
+        }
+    },
+)
+
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class)
 @Composable
 fun FilesScreen(initialPath: String, standalone: Boolean = false) {
     val ctx = LocalContext.current
+    val g = ctx.graph
     val nav = LocalNav.current
     val snack = LocalSnack.current
     val scope = rememberCoroutineScope()
     val conn = activeConnection() ?: return
-    val home = conn.homeDir()
-    var path by rememberSaveable { mutableStateOf(initialPath) }
-    var listing by remember { mutableStateOf<FsList?>(null) }
-    var error by remember { mutableStateOf<String?>(null) }
-    var hidden by rememberSaveable { mutableStateOf(false) }
-    var reload by remember { mutableIntStateOf(0) }
-    var refreshing by remember { mutableStateOf(false) }
-    val selected = remember { mutableStateListOf<String>() }
-    var clipboard by remember { mutableStateOf<Pair<String, List<String>>?>(null) } // op -> paths
-    var menu by remember { mutableStateOf(false) }
-    var dialog by remember { mutableStateOf<String?>(null) } // newfile|newfolder|rename|delete|permdelete
-    var searching by remember { mutableStateOf(false) }
-    var query by remember { mutableStateOf("") }
-    var results by remember { mutableStateOf<List<FsEntry>?>(null) }
+    val hostId = conn.config.id
+    val home = conn.rememberHomeDir()
+    val settings by g.prefs.flow.collectAsState()
+    val allConns by g.connections.collectAsState()
+    val agents by conn.agents.collectAsState()
+    val connState by conn.rpc.state.collectAsState()
+    val isConnected = connState is ConnState.Connected
 
-    LaunchedEffect(conn) {
-        if (path.isBlank()) path = home ?: "~"
+    var pathsByHost by rememberSaveable(stateSaver = PathsByHostSaver) { mutableStateOf(emptyMap()) }
+    var standalonePath by rememberSaveable(hostId, initialPath) { mutableStateOf(initialPath) }
+    val path = if (standalone) {
+        when {
+            standalonePath.isNotBlank() && !(standalonePath == "~" && !home.isNullOrBlank()) -> standalonePath
+            initialPath.isNotBlank() -> initialPath
+            !home.isNullOrBlank() -> home
+            else -> "~"
+        }
+    } else {
+        PerHostFilesState(pathsByHost).pathFor(hostId, initialPath, home)
     }
-    LaunchedEffect(path, hidden, reload) {
+    fun updatePath(next: String) {
+        if (standalone) {
+            standalonePath = next
+        } else {
+            val state = PerHostFilesState(pathsByHost)
+            state.setPath(hostId, next)
+            pathsByHost = state.snapshot()
+        }
+    }
+
+    var listing by remember(hostId) { mutableStateOf<FsList?>(null) }
+    var error by remember(hostId) { mutableStateOf<String?>(null) }
+    var hidden by rememberSaveable { mutableStateOf(false) }
+    var reload by remember(hostId) { mutableIntStateOf(0) }
+    var refreshing by remember(hostId) { mutableStateOf(false) }
+    val selected = remember(hostId) { mutableStateListOf<String>() }
+    var clipboard by remember(hostId) { mutableStateOf<Pair<String, List<String>>?>(null) } // op -> paths
+    var menu by remember(hostId) { mutableStateOf(false) }
+    var dialog by remember(hostId) { mutableStateOf<String?>(null) } // newfile|newfolder|rename|delete|permdelete
+    var pendingPerm by remember(hostId) { mutableStateOf<List<String>>(emptyList()) }
+    var searching by remember(hostId) { mutableStateOf(false) }
+    var query by remember(hostId) { mutableStateOf("") }
+    var results by remember(hostId) { mutableStateOf<List<FsEntry>?>(null) }
+
+    LaunchedEffect(hostId, home) {
+        if (!standalone && !home.isNullOrBlank() && (pathsByHost[hostId].isNullOrBlank() || pathsByHost[hostId] == "~")) {
+            pathsByHost = pathsByHost + (hostId to home)
+        } else if (standalone && standalonePath.isBlank()) {
+            standalonePath = initialPath.ifBlank { home ?: "~" }
+        }
+    }
+    LaunchedEffect(hostId, path, hidden, reload, isConnected) {
         if (path.isBlank()) return@LaunchedEffect
         error = null
-        runCatching { listing = conn.rpc.call("fs.list", params { put("path", path); put("hidden", hidden) }).decode(FsList.serializer()) }
-            .onFailure { error = it.message }
+        if (listing?.path != path && !(path == "~" && listing?.path == home)) {
+            listing = null
+        }
+        runCatching {
+            val fetched = conn.rpc.call("fs.list", params { put("path", path); put("hidden", hidden) }).decode(FsList.serializer())
+            listing = fetched
+            if (!standalone && (pathsByHost[hostId].isNullOrBlank() || pathsByHost[hostId] == "~")) {
+                pathsByHost = pathsByHost + (hostId to fetched.path)
+            }
+        }.onFailure { error = it.message }
         refreshing = false
     }
-    LaunchedEffect(query) {
+    val cur = listing?.path ?: path
+    LaunchedEffect(hostId, cur, query, hidden) {
         if (query.length < 2) { results = null; return@LaunchedEffect }
         kotlinx.coroutines.delay(350)
         results = runCatching {
-            conn.rpc.call("fs.search", params { put("root", listing?.path ?: path); put("query", query); put("max", 200); put("hidden", hidden) })
+            conn.rpc.call("fs.search", params { put("root", cur); put("query", query); put("max", 200); put("hidden", hidden) })
                 .decode(ListSerializer(FsEntry.serializer()))
         }.getOrNull()
     }
@@ -170,7 +248,7 @@ fun FilesScreen(initialPath: String, standalone: Boolean = false) {
         when {
             selected.isNotEmpty() -> selected.clear()
             searching -> { searching = false; query = "" }
-            else -> listing?.parent?.let { path = it }
+            else -> listing?.parent?.let { updatePath(it) }
         }
     }
     fun rpc(label: String, block: suspend () -> Unit) = scope.launch {
@@ -186,7 +264,6 @@ fun FilesScreen(initialPath: String, standalone: Boolean = false) {
             reload++
         }
     }
-    val cur = listing?.path ?: path
 
     Scaffold(
         topBar = {
@@ -239,7 +316,7 @@ fun FilesScreen(initialPath: String, standalone: Boolean = false) {
                                     menu = false
                                     val mention = selected.joinToString(" ") { "@" + it.removePrefix("$cur/") }
                                     selected.clear()
-                                    nav.navigate(Routes.newSession(cur, "$mention "))
+                                    nav.navigate(Routes.newSession(cur, "$mention ", host = hostId))
                                 })
                             }
                         }
@@ -253,9 +330,8 @@ fun FilesScreen(initialPath: String, standalone: Boolean = false) {
                         } else {
                             Column {
                                 Text(cur.trimEnd('/').substringAfterLast('/').ifEmpty { "/" }, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                                val gctx = androidx.compose.ui.platform.LocalContext.current.graph
-                                val hosts = gctx.prefs.flow.collectAsState().value.hosts
-                                var hostMenu by remember { mutableStateOf(false) }
+                                val hosts = settings.hosts
+                                var hostMenu by remember(hostId) { mutableStateOf(false) }
                                 Row(verticalAlignment = Alignment.CenterVertically) {
                                     if (hosts.size > 1 && !standalone) Box {
                                         Row(Modifier.clickable { hostMenu = true }, verticalAlignment = Alignment.CenterVertically) {
@@ -264,9 +340,9 @@ fun FilesScreen(initialPath: String, standalone: Boolean = false) {
                                         }
                                         DropdownMenu(hostMenu, { hostMenu = false }) {
                                             hosts.forEach { h ->
-                                                DropdownMenuItem(text = { Text(h.label + if (h.id == conn.config.id) "  ✓" else "") }, onClick = {
+                                                DropdownMenuItem(text = { Text(h.label + if (h.id == hostId) "  ✓" else "") }, onClick = {
                                                     hostMenu = false
-                                                    scope.launch { gctx.prefs.update { it.copy(activeHostId = h.id) } }
+                                                    selectActiveHost(g.prefs, scope, h.id)
                                                 })
                                             }
                                         }
@@ -289,40 +365,54 @@ fun FilesScreen(initialPath: String, standalone: Boolean = false) {
                             IconButton(onClick = { menu = true }) { Icon(Icons.Outlined.MoreVert, null) }
                             DropdownMenu(menu, { menu = false }) {
                                 DropdownMenuItem(text = { Text("Start a session here") }, leadingIcon = { Icon(Icons.AutoMirrored.Outlined.Chat, null) },
-                                    onClick = { menu = false; nav.navigate(Routes.newSession(cur)) })
+                                    onClick = { menu = false; nav.navigate(Routes.newSession(cur, host = hostId)) })
                                 DropdownMenuItem(text = { Text("Open terminal here") }, leadingIcon = { Icon(Icons.Outlined.Terminal, null) }, onClick = {
                                     menu = false
                                     rpc("Terminal") {
                                         val t = conn.rpc.call("term.create", params { put("kind", "shell"); put("cwd", cur) }).decode(Term.serializer())
-                                        nav.navigate(Routes.term(t.id))
+                                        nav.navigate(Routes.term(t.id, host = hostId))
                                     }
                                 })
                                 DropdownMenuItem(text = { Text("Run agy TUI here") }, leadingIcon = { Icon(Icons.Outlined.Terminal, null) }, onClick = {
                                     menu = false
                                     rpc("Terminal") {
-                                        val fl = io.github.sidd065.agentcompanion.App.instance.graph.prefs.value.agyFlags
+                                        val fl = settings.agyFlags
                                         val t = conn.rpc.call("term.create", params {
                                             put("kind", "agy"); put("cwd", cur); put("skipPermissions", fl.skipPermissions)
                                             put("args", JsonArray(fl.tuiArgs().map { JsonPrimitive(it) }))
                                         }).decode(Term.serializer())
-                                        nav.navigate(Routes.term(t.id))
+                                        nav.navigate(Routes.term(t.id, host = hostId))
                                     }
                                 })
-                                if (conn.agents.value.any { it.id == "claude" && it.available }) {
+                                if (agents.any { it.id == "claude" && it.available }) {
                                     DropdownMenuItem(text = { Text("Run Claude Code here") }, leadingIcon = { Icon(Icons.Outlined.Terminal, null) }, onClick = {
                                         menu = false
                                         rpc("Terminal") {
-                                            val fl = io.github.sidd065.agentcompanion.App.instance.graph.prefs.value.claudeFlags
+                                            val fl = settings.claudeFlags
                                             val t = conn.rpc.call("term.create", params {
                                                 put("kind", "claude"); put("cwd", cur); put("skipPermissions", fl.skipPermissions)
                                                 put("args", JsonArray(fl.tuiArgs().map { JsonPrimitive(it) }))
                                             }).decode(Term.serializer())
-                                            nav.navigate(Routes.term(t.id))
+                                            nav.navigate(Routes.term(t.id, host = hostId))
+                                        }
+                                    })
+                                }
+                                if (agents.any { it.id == "codex" && it.available }) {
+                                    DropdownMenuItem(text = { Text("Run Codex here") }, leadingIcon = { Icon(Icons.Outlined.Terminal, null) }, onClick = {
+                                        menu = false
+                                        rpc("Terminal") {
+                                            val fl = settings.codexFlags
+                                            val t = conn.rpc.call("term.create", params {
+                                                put("kind", "codex"); put("cwd", cur); put("skipPermissions", fl.effectiveSkipPermissions)
+                                                val a = fl.tuiArgs()
+                                                if (a.isNotEmpty()) put("args", JsonArray(a.map { JsonPrimitive(it) }))
+                                            }).decode(Term.serializer())
+                                            nav.navigate(Routes.term(t.id, host = hostId))
                                         }
                                     })
                                 }
                                 if (listing?.gitBranch?.isNotBlank() == true) {
-                                    DropdownMenuItem(text = { Text("Git changes") }, leadingIcon = { Icon(Icons.Outlined.Difference, null) }, onClick = { menu = false; nav.navigate(Routes.diff(path = cur)) })
+                                    DropdownMenuItem(text = { Text("Git changes") }, leadingIcon = { Icon(Icons.Outlined.Difference, null) }, onClick = { menu = false; nav.navigate(Routes.diff(path = cur, host = hostId)) })
                                 }
                                 HorizontalDivider()
                                 DropdownMenuItem(text = { Text("New file") }, leadingIcon = { Icon(Icons.Outlined.NoteAdd, null) }, onClick = { menu = false; dialog = "newfile" })
@@ -339,9 +429,16 @@ fun FilesScreen(initialPath: String, standalone: Boolean = false) {
         bottomBar = { if (!standalone) BottomTabs(nav) },
     ) { pad ->
         Column(Modifier.padding(pad).fillMaxSize()) {
+            if (allConns.size > 1 && !standalone) {
+                HostSelectorBar(
+                    conns = allConns,
+                    activeHostId = hostId,
+                    onSelect = { id -> selectActiveHost(g.prefs, scope, id) },
+                )
+            }
             ConnectionBanner(conn)
             val activeDownloads by FileTransfer.downloads.collectAsState()
-            activeDownloads.firstOrNull { it.hostId == conn.config.id }?.let { dl ->
+            activeDownloads.firstOrNull { it.hostId == hostId }?.let { dl ->
                 DownloadStatusBanner(
                     task = dl,
                     onCancel = { FileTransfer.cancelDownload(dl.id) },
@@ -353,7 +450,7 @@ fun FilesScreen(initialPath: String, standalone: Boolean = false) {
                     onDismiss = { FileTransfer.dismissDownload(dl.id) },
                 )
             }
-            Breadcrumbs(cur, home) { path = it }
+            Breadcrumbs(cur, home) { updatePath(it) }
             clipboard?.let { (op, paths) ->
                 Surface(color = MaterialTheme.colorScheme.secondaryContainer) {
                     Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 6.dp), verticalAlignment = Alignment.CenterVertically) {
@@ -385,8 +482,8 @@ fun FilesScreen(initialPath: String, standalone: Boolean = false) {
                                 onClick = {
                                     when {
                                         selected.isNotEmpty() -> if (sel) selected.remove(e.path) else selected.add(e.path)
-                                        e.isDir -> { path = e.path; searching = false; query = "" }
-                                        else -> nav.navigate(Routes.file(e.path))
+                                        e.isDir -> { updatePath(e.path); searching = false; query = "" }
+                                        else -> nav.navigate(Routes.file(e.path, host = hostId))
                                     }
                                 },
                                 onLongClick = { if (sel) selected.remove(e.path) else selected.add(e.path) },
@@ -402,7 +499,7 @@ fun FilesScreen(initialPath: String, standalone: Boolean = false) {
         "newfile" -> TextPromptDialog("New file", "", "File name", "Create", onDismiss = { dialog = null }) { name ->
             rpc("Create") {
                 conn.rpc.call("fs.create", params { put("path", "$cur/$name") })
-                nav.navigate(Routes.file("$cur/$name", edit = true))
+                nav.navigate(Routes.file("$cur/$name", edit = true, host = hostId))
             }
         }
         "newfolder" -> TextPromptDialog("New folder", "", "Folder name", "Create", onDismiss = { dialog = null }) { name ->
@@ -440,8 +537,6 @@ fun FilesScreen(initialPath: String, standalone: Boolean = false) {
         }
     }
 }
-
-private var pendingPerm: List<String> = emptyList()
 
 @Composable
 private fun Breadcrumbs(path: String, home: String?, onGo: (String) -> Unit) {

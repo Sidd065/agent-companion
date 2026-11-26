@@ -15,6 +15,7 @@ import {
 import type { DiffResult, FileDiff } from '@agentc/protocol';
 import { useApp, type RightTab } from '../../state/appStore.js';
 import { isTestFile, parseUnifiedPatch, toSplitRows } from '../../utils/diffParser.js';
+import { resolveHostScopedCwd } from '../../utils/multiHost.js';
 
 const SCOPES: Array<{ id: NonNullable<RightTab['diffScope']>; label: string }> = [
   { id: 'uncommitted', label: 'Uncommitted' },
@@ -37,7 +38,13 @@ export const DiffPanel: React.FC<{ tab: RightTab }> = ({ tab }) => {
   } = useApp();
 
   const hostId = activeHost?.creds.id ?? '';
-  const cwd = activeSession?.worktreePath || activeSession?.cwd || draft.cwd || '';
+  const cwd = resolveHostScopedCwd({
+    hostId,
+    activeSession,
+    activeSessionHostId: hostId,
+    draft,
+    fallback: '',
+  });
 
   const [scope, setScope] = useState<NonNullable<RightTab['diffScope']>>(tab.diffScope || 'uncommitted');
   const [turnIndex, setTurnIndex] = useState<number | undefined>(tab.turnIndex);
@@ -53,14 +60,27 @@ export const DiffPanel: React.FC<{ tab: RightTab }> = ({ tab }) => {
   const [showFileTree, setShowFileTree] = useState(true);
 
   const panelRef = useRef<HTMLDivElement | null>(null);
+  const reqSeqRef = useRef(0);
 
   useEffect(() => {
-    if (tab.diffScope) setScope(tab.diffScope);
-    if (tab.turnIndex !== undefined) setTurnIndex(tab.turnIndex);
-  }, [tab.diffScope, tab.turnIndex]);
+    setScope(tab.diffScope || 'uncommitted');
+    setTurnIndex(tab.turnIndex);
+  }, [tab.id, tab.diffScope, tab.turnIndex]);
+
+  useEffect(() => {
+    reqSeqRef.current++;
+    setDiff(null);
+    setViewed({});
+    setCollapsed({});
+    setCommentTarget(null);
+    setCommentBody('');
+    setSelectedIdx(0);
+    setError('');
+  }, [hostId, cwd, activeSession?.id]);
 
   const loadDiff = useCallback(async () => {
     if (!hostId || (!cwd && !activeSession)) return;
+    const seq = ++reqSeqRef.current;
     setLoading(true);
     setError('');
     try {
@@ -78,13 +98,17 @@ export const DiffPanel: React.FC<{ tab: RightTab }> = ({ tab }) => {
           scope: gitScope,
         });
       }
+      if (seq !== reqSeqRef.current) return;
       setDiff(res);
       setSelectedIdx(0);
     } catch (e) {
+      if (seq !== reqSeqRef.current) return;
       setError((e as Error).message);
       setDiff(null);
     } finally {
-      setLoading(false);
+      if (seq === reqSeqRef.current) {
+        setLoading(false);
+      }
     }
   }, [hostId, cwd, activeSession, scope, turnIndex, callHost]);
 
@@ -428,7 +452,14 @@ export const DiffPanel: React.FC<{ tab: RightTab }> = ({ tab }) => {
                                 {row.left?.oldNo ?? ''}
                               </td>
                               <td
-                                className={`w-1/2 px-2 py-0.5 align-top border-r border-[var(--border)] ${
+                                onClick={() => {
+                                  if (row.left && row.left.oldNo) {
+                                    setCommentTarget({ path: f.path, line: row.left.oldNo, text: row.left.text });
+                                    setCommentBody('');
+                                  }
+                                }}
+                                title="Click line to add inline review comment"
+                                className={`w-1/2 px-2 py-0.5 align-top border-r border-[var(--border)] cursor-pointer ${
                                   settings.diffWrap ? 'whitespace-pre-wrap break-all' : 'whitespace-pre'
                                 } ${
                                   row.left?.type === 'del'

@@ -40,7 +40,7 @@ export class TerminalStream {
     const keys = keyPairFromPrivate(base64ToBytes(this.creds.devicePriv));
     const daemonKey = base64ToBytes(this.creds.hostKey);
 
-    this.socket = new SecureSocket(
+    const sock = new SecureSocket(
       {
         baseUrl,
         daemonKey,
@@ -53,11 +53,12 @@ export class TerminalStream {
           rows: this.rows,
           name: this.deviceName,
           platform: 'linux-desktop',
-          app: '0.4.0',
+          app: '0.5.0',
         },
       },
       {
         onOpen: () => {
+          if (this.socket !== sock || this.closed) return;
           this.opened = true;
           try {
             this.resize(this.cols, this.rows);
@@ -67,10 +68,11 @@ export class TerminalStream {
           this.listener.onOpen?.();
         },
         onBinary: (data) => {
-          if (!this.closed) this.listener.onData(data);
+          if (this.socket !== sock || this.closed) return;
+          this.listener.onData(data);
         },
         onText: (text) => {
-          if (this.closed) return;
+          if (this.socket !== sock || this.closed) return;
           try {
             const msg = JSON.parse(text) as { type?: string; message?: string };
             if (msg.type === 'exit') {
@@ -83,7 +85,7 @@ export class TerminalStream {
           }
         },
         onClose: (reason) => {
-          if (this.closed) return;
+          if (this.socket !== sock || this.closed) return;
           if (
             !this.opened &&
             !this.triedFallback &&
@@ -100,7 +102,8 @@ export class TerminalStream {
         },
       },
     );
-    this.socket.connect();
+    this.socket = sock;
+    sock.connect();
   }
 
   write(data: string | Uint8Array): void {

@@ -4,8 +4,9 @@ import (
 	"os"
 	"os/exec"
 	"strings"
-	"sync"
 	"time"
+
+	"agentc/internal/codex"
 )
 
 // AgentProfile describes a coding agent the daemon can drive. agy and custom
@@ -24,49 +25,40 @@ type AgentProfile struct {
 	Features  []string `json:"features"`
 }
 
-var (
-	agentsMu   sync.Mutex
-	agentsList []AgentProfile
-	agentsAt   time.Time
-)
-
 func versionOf(cmd string, args ...string) string {
 	b, err := exec.Command(cmd, args...).Output()
 	if err != nil {
 		return ""
 	}
-	v := strings.TrimSpace(string(b))
-	if i := strings.IndexByte(v, '\n'); i >= 0 {
-		v = v[:i]
+	s := strings.TrimSpace(string(b))
+	if i := strings.IndexByte(s, '\n'); i >= 0 {
+		s = strings.TrimSpace(s[:i])
 	}
-	return v
+	return s
 }
 
-// Agents returns all built-in and configured ACP agent profiles (cached for a minute).
+// Agents lists the coding agents this host can run (cached briefly per Manager).
 func (m *Manager) Agents() []AgentProfile {
-	agentsMu.Lock()
-	defer agentsMu.Unlock()
-	if agentsList != nil && time.Since(agentsAt) < time.Minute {
-		return agentsList
+	m.agentsMu.Lock()
+	defer m.agentsMu.Unlock()
+	if m.agentsList != nil && time.Since(m.agentsAt) < 60*time.Second {
+		out := make([]AgentProfile, len(m.agentsList))
+		copy(out, m.agentsList)
+		return out
 	}
 
-	agyBin := m.cfg.AgyPath
+	agyBin := firstNonEmpty(m.cfg.AgyPath, "agy")
 	claudeBin := m.claudeBin()
-	codexBin := "codex"
-	if p, err := exec.LookPath("codex"); err == nil {
-		codexBin = p
-	}
-
-	// Apply any user overrides for built-in providers.
+	codexBin := m.codexBin()
 	if m.Providers != nil {
 		if ov, ok := m.Providers.Get("agy"); ok && ov.Command != "" {
-			agyBin = ov.Command
+			agyBin = expandHome(ov.Command, m.cfg.HomeDir)
 		}
 		if ov, ok := m.Providers.Get("claude"); ok && ov.Command != "" {
-			claudeBin = ov.Command
+			claudeBin = expandHome(ov.Command, m.cfg.HomeDir)
 		}
 		if ov, ok := m.Providers.Get("codex"); ok && ov.Command != "" {
-			codexBin = ov.Command
+			codexBin = expandHome(ov.Command, m.cfg.HomeDir)
 		}
 	}
 
@@ -91,14 +83,24 @@ func (m *Manager) Agents() []AgentProfile {
 		claude.Reason = "claude not found (install Claude Code: https://claude.com/claude-code)"
 	}
 
-	codex := AgentProfile{
+	codexProf := AgentProfile{
 		ID: "codex", Name: "Codex", Driver: "codex", Command: codexBin, Builtin: true,
-		Features: []string{"rename", "archive", "pin", "delete", "export", "changes", "terminal", "effort", "modes", "checkpoints"},
+		Features: []string{
+			"openrouter", "customModels", "thinking", "diffs", "permissions", "questions", "plans",
+			"fork", "rewind", "steer", "resume", "history", "rename", "archive", "pin", "delete",
+			"export", "changes", "terminal", "usage", "context", "sideQuestion", "asides",
+			"subagents", "effort", "modes", "checkpoints",
+		},
 	}
 	if v := versionOf(codexBin, "--version"); v != "" {
-		codex.Available, codex.Version = true, v
+		codexProf.Version = v
+		if codex.IsVersionSupported(v) {
+			codexProf.Available = true
+		} else {
+			codexProf.Reason = "codex >= 0.172.0 required (found " + v + ")"
+		}
 	} else {
-		codex.Reason = "codex CLI not found on PATH (install @openai/codex)"
+		codexProf.Reason = "codex CLI not found on PATH (install @openai/codex >= 0.172.0)"
 	}
 
 	// Respect enabled=false overrides on built-in providers.
@@ -110,11 +112,11 @@ func (m *Manager) Agents() []AgentProfile {
 			claude.Available, claude.Reason = false, "disabled in provider settings"
 		}
 		if ov, ok := m.Providers.Get("codex"); ok && !ov.Enabled {
-			codex.Available, codex.Reason = false, "disabled in provider settings"
+			codexProf.Available, codexProf.Reason = false, "disabled in provider settings"
 		}
 	}
 
-	list := []AgentProfile{agy, claude, codex}
+	list := []AgentProfile{agy, claude, codexProf}
 	seen := map[string]bool{"agy": true, "claude": true, "codex": true}
 
 	// Add user-configured generic ACP providers.
@@ -124,15 +126,16 @@ func (m *Manager) Agents() []AgentProfile {
 				continue
 			}
 			seen[pc.ID] = true
+			cmdPath := expandHome(pc.Command, m.cfg.HomeDir)
 			prof := AgentProfile{
-				ID: pc.ID, Name: pc.Name, Driver: "acp", Command: pc.Command, Features: pc.Features,
+				ID: pc.ID, Name: pc.Name, Driver: "acp", Command: cmdPath, Features: pc.Features,
 			}
 			if len(prof.Features) == 0 {
 				prof.Features = []string{"rename", "archive", "pin", "delete", "export", "changes", "terminal", "modes", "effort", "checkpoints", "asides"}
 			}
 			if !pc.Enabled {
 				prof.Reason = "disabled in provider settings"
-			} else if resolved, err := exec.LookPath(pc.Command); err == nil {
+			} else if resolved, err := exec.LookPath(cmdPath); err == nil {
 				prof.Available = true
 				prof.Command = resolved
 				prof.Version = versionOf(resolved, "--version")
@@ -159,9 +162,11 @@ func (m *Manager) Agents() []AgentProfile {
 		list = append(list, prof)
 	}
 
-	agentsList = list
-	agentsAt = time.Now()
-	return agentsList
+	m.agentsList = list
+	m.agentsAt = time.Now()
+	out := make([]AgentProfile, len(list))
+	copy(out, list)
+	return out
 }
 
 // Agent returns one profile.

@@ -92,8 +92,8 @@ fun DiffScreen(sessionId: String?, path: String) {
     fun lineNo(l: DiffLine) = if (l.type == '-') l.oldNo else l.newNo
     fun draftFor(path: String, l: DiffLine) = drafts.firstOrNull { it.uri == path && it.startLine == lineNo(l) && it.quote == l.text }
     val onLine: ((String, DiffLine) -> Unit)? = if (commenting && sessionId != null) { p, l -> editing = p to l } else null
-    LaunchedEffect(reload) {
-        err = null; git = null
+    LaunchedEffect(conn.config.id, sessionId, path, reload) {
+        err = null; git = null; agent = null
         runCatching {
             git = if (sessionId != null) conn.rpc.call("session.diff", params { put("id", sessionId) }).decode(GitDiff.serializer())
             else conn.rpc.call("git.diff", params { put("path", path) }).decode(GitDiff.serializer())
@@ -153,9 +153,9 @@ fun DiffScreen(sessionId: String?, path: String) {
             err?.let { ErrorBox(it) { reload++ } }
             val repoPath = git?.root ?: sessionId?.let { conn.session(it)?.cwd } ?: path
             if (tabs.getOrNull(tab) == "Git") {
-                GitWorkbenchTab(conn, repoPath, reload) { wtPath -> nav.navigate(Routes.newSession(cwd = wtPath)) }
+                GitWorkbenchTab(conn, repoPath, reload) { wtPath -> nav.navigate(Routes.newSession(cwd = wtPath, host = conn.config.id)) }
             } else if (tabs.getOrNull(tab) == "Commits") {
-                CommitsTab(conn, repoPath, settings.codeWrap, reload) { p -> nav.navigate(Routes.file(p)) }
+                CommitsTab(conn, repoPath, settings.codeWrap, reload) { p -> nav.navigate(Routes.file(p, host = conn.config.id)) }
             } else if (tab == 0) {
                 val d = git
                 when {
@@ -170,7 +170,7 @@ fun DiffScreen(sessionId: String?, path: String) {
                             header = "${d.branch ?: ""} · ${filesLabel(files.size)} · +${files.sumOf { it.added }} −${files.sumOf { it.removed }}" + if (d.truncated) " (truncated)" else "",
                             files = files.map { Triple(it.path, it.lines, it.binary) },
                             wrap = settings.codeWrap,
-                            onOpen = { p -> nav.navigate(Routes.file((d.root ?: "") + "/" + p)) },
+                            onOpen = { p -> nav.navigate(Routes.file((d.root ?: "") + "/" + p, host = conn.config.id)) },
                             onLine = onLine?.let { f -> { p: String, l: DiffLine -> f((d.root ?: "") + "/" + p, l) } },
                             marked = { p, l -> draftFor((d.root ?: "") + "/" + p, l) != null },
                         )
@@ -188,7 +188,7 @@ fun DiffScreen(sessionId: String?, path: String) {
                                 Triple(p, LineDiff.diff(f.originalContent, f.modifiedContent), false)
                             }
                         }
-                        FileDiffList("${filesLabel(files.size)} edited by $who", files, settings.codeWrap, onOpen = { p -> nav.navigate(Routes.file(p)) },
+                        FileDiffList("${filesLabel(files.size)} edited by $who", files, settings.codeWrap, onOpen = { p -> nav.navigate(Routes.file(p, host = conn.config.id)) },
                             onLine = onLine, marked = { p, l -> draftFor(p, l) != null })
                     }
                 }
@@ -217,12 +217,12 @@ private fun CommitsTab(conn: io.github.sidd065.agentcompanion.net.HostConnection
     var err by remember { mutableStateOf<String?>(null) }
     var open by androidx.compose.runtime.saveable.rememberSaveable { mutableStateOf<String?>(null) }
     var shown by remember { mutableStateOf<GitDiff?>(null) }
-    LaunchedEffect(path, reload) {
+    LaunchedEffect(conn.config.id, path, reload) {
         err = null; log = null
         runCatching { log = conn.rpc.call("git.log", params { put("path", path); put("limit", 40) }).decode(io.github.sidd065.agentcompanion.core.GitLog.serializer()) }
             .onFailure { err = it.message }
     }
-    LaunchedEffect(open, reload) {
+    LaunchedEffect(conn.config.id, path, open, reload) {
         shown = null
         val sha = open ?: return@LaunchedEffect
         runCatching { shown = conn.rpc.call("git.show", params { put("path", path); put("sha", sha) }).decode(GitDiff.serializer()) }

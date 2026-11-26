@@ -7,7 +7,6 @@ import (
 	"strings"
 
 	"agentc/internal/core"
-	"agentc/internal/fsops"
 	"agentc/internal/github"
 	"agentc/internal/projects"
 	"agentc/internal/providers"
@@ -38,6 +37,9 @@ var Capabilities = []string{
 	"host_health",
 	"settle_snooze",
 	"remain_on_exit",
+	"providers.codex",
+	"providers.openrouter",
+	"customModels",
 }
 
 func (s *Server) registerParityMethods() {
@@ -60,7 +62,7 @@ func (s *Server) registerParityMethods() {
 			}
 			cwd := wtPath
 			if sc.Cwd != "" {
-				cwd = fsops.Resolve(sc.Cwd)
+				cwd = s.fs().Resolve(sc.Cwd)
 			}
 			_, _ = s.Terms.Create(ctx, term.CreateOpts{
 				Kind: "cmd", Cwd: cwd, Command: sc.Command, Name: "setup · " + sc.Name,
@@ -83,7 +85,7 @@ func (s *Server) registerParityMethods() {
 		if err != nil {
 			return nil, err
 		}
-		pr, err := s.Mgr.Projects.Add(fsops.Resolve(in.Path), in.Name)
+		pr, err := s.Mgr.Projects.Add(s.fs().Resolve(in.Path), in.Name)
 		if err != nil {
 			return nil, err
 		}
@@ -99,9 +101,9 @@ func (s *Server) registerParityMethods() {
 		if err != nil {
 			return nil, err
 		}
-		parent := fsops.Resolve(in.ParentDir)
+		parent := s.fs().Resolve(in.ParentDir)
 		if in.ParentDir == "" {
-			parent = fsops.Home
+			parent = s.fs().HomeDir()
 		}
 		initCommit := true
 		if in.InitialCommit != nil {
@@ -123,9 +125,9 @@ func (s *Server) registerParityMethods() {
 		if err != nil {
 			return nil, err
 		}
-		parent := fsops.Resolve(in.ParentDir)
+		parent := s.fs().Resolve(in.ParentDir)
 		if in.ParentDir == "" {
-			parent = fsops.Home
+			parent = s.fs().HomeDir()
 		}
 		pr, err := s.Mgr.Projects.Clone(ctx, in.URL, parent, in.DirName)
 		if err != nil {
@@ -165,13 +167,13 @@ func (s *Server) registerParityMethods() {
 			Path  string `json:"path"`
 			Force bool   `json:"force"`
 		}](p)
-		return s.Mgr.Git.Status(ctx, fsops.Resolve(in.Path), in.Force)
+		return s.Mgr.Git.Status(ctx, s.fs().Resolve(in.Path), in.Force)
 	}
 	m["git.branches"] = func(ctx context.Context, c *core.Client, p json.RawMessage) (any, error) {
 		in, _ := bind[struct {
 			Path string `json:"path"`
 		}](p)
-		return s.Mgr.Git.Branches(ctx, fsops.Resolve(in.Path))
+		return s.Mgr.Git.Branches(ctx, s.fs().Resolve(in.Path))
 	}
 	m["git.checkout"] = func(ctx context.Context, c *core.Client, p json.RawMessage) (any, error) {
 		in, _ := bind[struct {
@@ -180,7 +182,7 @@ func (s *Server) registerParityMethods() {
 			Create bool   `json:"create"`
 			Base   string `json:"base"`
 		}](p)
-		err := s.Mgr.Git.Checkout(ctx, fsops.Resolve(in.Path), in.Branch, in.Create, in.Base)
+		err := s.Mgr.Git.Checkout(ctx, s.fs().Resolve(in.Path), in.Branch, in.Create, in.Base)
 		return map[string]any{"ok": err == nil}, err
 	}
 	m["git.branch.delete"] = func(ctx context.Context, c *core.Client, p json.RawMessage) (any, error) {
@@ -189,7 +191,7 @@ func (s *Server) registerParityMethods() {
 			Branch string `json:"branch"`
 			Force  bool   `json:"force"`
 		}](p)
-		err := s.Mgr.Git.DeleteBranch(ctx, fsops.Resolve(in.Path), in.Branch, in.Force)
+		err := s.Mgr.Git.DeleteBranch(ctx, s.fs().Resolve(in.Path), in.Branch, in.Force)
 		return map[string]any{"ok": err == nil}, err
 	}
 	m["git.stage"] = func(ctx context.Context, c *core.Client, p json.RawMessage) (any, error) {
@@ -197,7 +199,7 @@ func (s *Server) registerParityMethods() {
 			Path  string   `json:"path"`
 			Files []string `json:"files"`
 		}](p)
-		err := s.Mgr.Git.Stage(ctx, fsops.Resolve(in.Path), in.Files)
+		err := s.Mgr.Git.Stage(ctx, s.fs().Resolve(in.Path), in.Files)
 		return map[string]any{"ok": err == nil}, err
 	}
 	m["git.unstage"] = func(ctx context.Context, c *core.Client, p json.RawMessage) (any, error) {
@@ -205,7 +207,7 @@ func (s *Server) registerParityMethods() {
 			Path  string   `json:"path"`
 			Files []string `json:"files"`
 		}](p)
-		err := s.Mgr.Git.Unstage(ctx, fsops.Resolve(in.Path), in.Files)
+		err := s.Mgr.Git.Unstage(ctx, s.fs().Resolve(in.Path), in.Files)
 		return map[string]any{"ok": err == nil}, err
 	}
 	m["git.discard"] = func(ctx context.Context, c *core.Client, p json.RawMessage) (any, error) {
@@ -213,7 +215,7 @@ func (s *Server) registerParityMethods() {
 			Path  string   `json:"path"`
 			Files []string `json:"files"`
 		}](p)
-		err := s.Mgr.Git.Discard(ctx, fsops.Resolve(in.Path), in.Files)
+		err := s.Mgr.Git.Discard(ctx, s.fs().Resolve(in.Path), in.Files)
 		return map[string]any{"ok": err == nil}, err
 	}
 	m["git.commit"] = func(ctx context.Context, c *core.Client, p json.RawMessage) (any, error) {
@@ -223,20 +225,20 @@ func (s *Server) registerParityMethods() {
 			StageAll bool   `json:"stageAll"`
 			Amend    bool   `json:"amend"`
 		}](p)
-		return s.Mgr.Git.Commit(ctx, fsops.Resolve(in.Path), in.Message, in.StageAll, in.Amend)
+		return s.Mgr.Git.Commit(ctx, s.fs().Resolve(in.Path), in.Message, in.StageAll, in.Amend)
 	}
 	m["git.commitMessage"] = func(ctx context.Context, c *core.Client, p json.RawMessage) (any, error) {
 		in, _ := bind[struct {
 			Path string `json:"path"`
 		}](p)
-		msg, err := s.Mgr.GenerateCommitMessage(ctx, fsops.Resolve(in.Path))
+		msg, err := s.Mgr.GenerateCommitMessage(ctx, s.fs().Resolve(in.Path))
 		return map[string]any{"message": msg}, err
 	}
 	m["git.fetch"] = func(ctx context.Context, c *core.Client, p json.RawMessage) (any, error) {
 		in, _ := bind[struct {
 			Path string `json:"path"`
 		}](p)
-		out, err := s.Mgr.Git.Fetch(ctx, fsops.Resolve(in.Path))
+		out, err := s.Mgr.Git.Fetch(ctx, s.fs().Resolve(in.Path))
 		return map[string]any{"output": out}, err
 	}
 	m["git.pull"] = func(ctx context.Context, c *core.Client, p json.RawMessage) (any, error) {
@@ -244,7 +246,7 @@ func (s *Server) registerParityMethods() {
 			Path   string `json:"path"`
 			Rebase bool   `json:"rebase"`
 		}](p)
-		out, err := s.Mgr.Git.Pull(ctx, fsops.Resolve(in.Path), in.Rebase)
+		out, err := s.Mgr.Git.Pull(ctx, s.fs().Resolve(in.Path), in.Rebase)
 		return map[string]any{"output": out}, err
 	}
 	m["git.push"] = func(ctx context.Context, c *core.Client, p json.RawMessage) (any, error) {
@@ -254,14 +256,14 @@ func (s *Server) registerParityMethods() {
 			ForceWithLease bool   `json:"forceWithLease"`
 			AllowDefault   bool   `json:"allowDefault"`
 		}](p)
-		out, err := s.Mgr.Git.Push(ctx, fsops.Resolve(in.Path), in.SetUpstream, in.ForceWithLease, in.AllowDefault)
+		out, err := s.Mgr.Git.Push(ctx, s.fs().Resolve(in.Path), in.SetUpstream, in.ForceWithLease, in.AllowDefault)
 		return map[string]any{"output": out}, err
 	}
 	m["git.stash.list"] = func(ctx context.Context, c *core.Client, p json.RawMessage) (any, error) {
 		in, _ := bind[struct {
 			Path string `json:"path"`
 		}](p)
-		return s.Mgr.Git.StashList(ctx, fsops.Resolve(in.Path))
+		return s.Mgr.Git.StashList(ctx, s.fs().Resolve(in.Path))
 	}
 	m["git.stash.push"] = func(ctx context.Context, c *core.Client, p json.RawMessage) (any, error) {
 		in, _ := bind[struct {
@@ -269,7 +271,7 @@ func (s *Server) registerParityMethods() {
 			Message          string `json:"message"`
 			IncludeUntracked bool   `json:"includeUntracked"`
 		}](p)
-		err := s.Mgr.Git.StashPush(ctx, fsops.Resolve(in.Path), in.Message, in.IncludeUntracked)
+		err := s.Mgr.Git.StashPush(ctx, s.fs().Resolve(in.Path), in.Message, in.IncludeUntracked)
 		return map[string]any{"ok": err == nil}, err
 	}
 	m["git.stash.pop"] = func(ctx context.Context, c *core.Client, p json.RawMessage) (any, error) {
@@ -277,7 +279,7 @@ func (s *Server) registerParityMethods() {
 			Path string `json:"path"`
 			Ref  string `json:"ref"`
 		}](p)
-		err := s.Mgr.Git.StashPop(ctx, fsops.Resolve(in.Path), in.Ref)
+		err := s.Mgr.Git.StashPop(ctx, s.fs().Resolve(in.Path), in.Ref)
 		return map[string]any{"ok": err == nil}, err
 	}
 	m["git.stash.drop"] = func(ctx context.Context, c *core.Client, p json.RawMessage) (any, error) {
@@ -285,7 +287,7 @@ func (s *Server) registerParityMethods() {
 			Path string `json:"path"`
 			Ref  string `json:"ref"`
 		}](p)
-		err := s.Mgr.Git.StashDrop(ctx, fsops.Resolve(in.Path), in.Ref)
+		err := s.Mgr.Git.StashDrop(ctx, s.fs().Resolve(in.Path), in.Ref)
 		return map[string]any{"ok": err == nil}, err
 	}
 	m["git.scopedDiff"] = func(ctx context.Context, c *core.Client, p json.RawMessage) (any, error) {
@@ -295,7 +297,7 @@ func (s *Server) registerParityMethods() {
 			BaseRef string `json:"baseRef"`
 			HeadRef string `json:"headRef"`
 		}](p)
-		return s.Mgr.Git.ScopedDiff(ctx, fsops.Resolve(in.Path), in.Scope, in.BaseRef, in.HeadRef)
+		return s.Mgr.Git.ScopedDiff(ctx, s.fs().Resolve(in.Path), in.Scope, in.BaseRef, in.HeadRef)
 	}
 
 	// ---- Git Worktrees ----
@@ -303,7 +305,7 @@ func (s *Server) registerParityMethods() {
 		in, _ := bind[struct {
 			Path string `json:"path"`
 		}](p)
-		return s.Mgr.Git.WorktreeList(ctx, fsops.Resolve(in.Path))
+		return s.Mgr.Git.WorktreeList(ctx, s.fs().Resolve(in.Path))
 	}
 	m["git.worktrees.create"] = func(ctx context.Context, c *core.Client, p json.RawMessage) (any, error) {
 		in, _ := bind[struct {
@@ -311,7 +313,7 @@ func (s *Server) registerParityMethods() {
 			BaseBranch string `json:"baseBranch"`
 			BranchName string `json:"branchName"`
 		}](p)
-		return s.Mgr.Git.WorktreeCreate(ctx, fsops.Resolve(in.Path), in.BaseBranch, in.BranchName, s.Mgr.Cfg().WorktreeDir)
+		return s.Mgr.Git.WorktreeCreate(ctx, s.fs().Resolve(in.Path), in.BaseBranch, in.BranchName, s.Mgr.Cfg().WorktreeDir)
 	}
 	m["git.worktrees.remove"] = func(ctx context.Context, c *core.Client, p json.RawMessage) (any, error) {
 		in, _ := bind[struct {
@@ -320,7 +322,7 @@ func (s *Server) registerParityMethods() {
 			Force        bool   `json:"force"`
 			DeleteBranch bool   `json:"deleteBranch"`
 		}](p)
-		err := s.Mgr.Git.WorktreeRemove(ctx, fsops.Resolve(in.Path), fsops.Resolve(in.WorktreePath), in.Force, in.DeleteBranch)
+		err := s.Mgr.Git.WorktreeRemove(ctx, s.fs().Resolve(in.Path), s.fs().Resolve(in.WorktreePath), in.Force, in.DeleteBranch)
 		return map[string]any{"ok": err == nil}, err
 	}
 	m["git.worktrees.merge"] = func(ctx context.Context, c *core.Client, p json.RawMessage) (any, error) {
@@ -330,7 +332,7 @@ func (s *Server) registerParityMethods() {
 			TargetBranch string `json:"targetBranch"`
 			Squash       bool   `json:"squash"`
 		}](p)
-		out, err := s.Mgr.Git.WorktreeMerge(ctx, fsops.Resolve(in.Path), in.SourceBranch, in.TargetBranch, in.Squash)
+		out, err := s.Mgr.Git.WorktreeMerge(ctx, s.fs().Resolve(in.Path), in.SourceBranch, in.TargetBranch, in.Squash)
 		return map[string]any{"output": out}, err
 	}
 
@@ -341,14 +343,14 @@ func (s *Server) registerParityMethods() {
 			State string `json:"state"`
 			Limit int    `json:"limit"`
 		}](p)
-		return github.PRList(ctx, fsops.Resolve(in.Path), in.State, in.Limit)
+		return github.PRList(ctx, s.fs().Resolve(in.Path), in.State, in.Limit)
 	}
 	m["pr.forBranch"] = func(ctx context.Context, c *core.Client, p json.RawMessage) (any, error) {
 		in, _ := bind[struct {
 			Path   string `json:"path"`
 			Branch string `json:"branch"`
 		}](p)
-		pr, err := github.PRForBranch(ctx, fsops.Resolve(in.Path), in.Branch)
+		pr, err := github.PRForBranch(ctx, s.fs().Resolve(in.Path), in.Branch)
 		return map[string]any{"pr": pr}, err
 	}
 	m["pr.get"] = func(ctx context.Context, c *core.Client, p json.RawMessage) (any, error) {
@@ -357,7 +359,7 @@ func (s *Server) registerParityMethods() {
 			Number      int    `json:"number"`
 			IncludeDiff bool   `json:"includeDiff"`
 		}](p)
-		return github.PRGet(ctx, fsops.Resolve(in.Path), in.Number, in.IncludeDiff)
+		return github.PRGet(ctx, s.fs().Resolve(in.Path), in.Number, in.IncludeDiff)
 	}
 	m["pr.create"] = func(ctx context.Context, c *core.Client, p json.RawMessage) (any, error) {
 		in, _ := bind[struct {
@@ -367,7 +369,7 @@ func (s *Server) registerParityMethods() {
 			Base  string `json:"base"`
 			Draft bool   `json:"draft"`
 		}](p)
-		return github.PRCreate(ctx, fsops.Resolve(in.Path), in.Title, in.Body, in.Base, in.Draft)
+		return github.PRCreate(ctx, s.fs().Resolve(in.Path), in.Title, in.Body, in.Base, in.Draft)
 	}
 	m["pr.comment"] = func(ctx context.Context, c *core.Client, p json.RawMessage) (any, error) {
 		in, _ := bind[struct {
@@ -375,7 +377,7 @@ func (s *Server) registerParityMethods() {
 			Number int    `json:"number"`
 			Body   string `json:"body"`
 		}](p)
-		err := github.AddPRComment(ctx, fsops.Resolve(in.Path), in.Number, in.Body)
+		err := github.AddPRComment(ctx, s.fs().Resolve(in.Path), in.Number, in.Body)
 		return map[string]any{"ok": err == nil}, err
 	}
 	m["pr.review"] = func(ctx context.Context, c *core.Client, p json.RawMessage) (any, error) {
@@ -385,7 +387,7 @@ func (s *Server) registerParityMethods() {
 			Event  string `json:"event"`
 			Body   string `json:"body"`
 		}](p)
-		err := github.PRReview(ctx, fsops.Resolve(in.Path), in.Number, in.Event, in.Body)
+		err := github.PRReview(ctx, s.fs().Resolve(in.Path), in.Number, in.Event, in.Body)
 		return map[string]any{"ok": err == nil}, err
 	}
 	m["pr.merge"] = func(ctx context.Context, c *core.Client, p json.RawMessage) (any, error) {
@@ -395,7 +397,7 @@ func (s *Server) registerParityMethods() {
 			Method       string `json:"method"`
 			DeleteBranch bool   `json:"deleteBranch"`
 		}](p)
-		out, err := github.PRMerge(ctx, fsops.Resolve(in.Path), in.Number, in.Method, in.DeleteBranch)
+		out, err := github.PRMerge(ctx, s.fs().Resolve(in.Path), in.Number, in.Method, in.DeleteBranch)
 		return map[string]any{"output": out}, err
 	}
 	m["pr.checkoutWorktree"] = func(ctx context.Context, c *core.Client, p json.RawMessage) (any, error) {
@@ -403,7 +405,7 @@ func (s *Server) registerParityMethods() {
 			Path   string `json:"path"`
 			Number int    `json:"number"`
 		}](p)
-		return github.PRCheckoutWorktree(ctx, s.Mgr.Git, fsops.Resolve(in.Path), in.Number, s.Mgr.Cfg().WorktreeDir)
+		return github.PRCheckoutWorktree(ctx, s.Mgr.Git, s.fs().Resolve(in.Path), in.Number, s.Mgr.Cfg().WorktreeDir)
 	}
 	m["issues.list"] = func(ctx context.Context, c *core.Client, p json.RawMessage) (any, error) {
 		in, _ := bind[struct {
@@ -411,7 +413,7 @@ func (s *Server) registerParityMethods() {
 			State string `json:"state"`
 			Limit int    `json:"limit"`
 		}](p)
-		return github.IssuesList(ctx, fsops.Resolve(in.Path), in.State, in.Limit)
+		return github.IssuesList(ctx, s.fs().Resolve(in.Path), in.State, in.Limit)
 	}
 
 	// ---- Project Scripts ----
@@ -420,7 +422,7 @@ func (s *Server) registerParityMethods() {
 			Path      string `json:"path"`
 			ProjectID string `json:"projectId"`
 		}](p)
-		dir := fsops.Resolve(in.Path)
+		dir := s.fs().Resolve(in.Path)
 		var custom []projects.ScriptDef
 		if in.ProjectID != "" && s.Mgr.Projects != nil {
 			if pr, ok := s.Mgr.Projects.Get(in.ProjectID); ok {
@@ -450,7 +452,7 @@ func (s *Server) registerParityMethods() {
 			return nil, errors.New("command is required")
 		}
 		t, err := s.Terms.Create(ctx, term.CreateOpts{
-			Kind: "cmd", Cwd: fsops.Resolve(in.Path), Command: in.Command, Name: firstNonEmpty(in.Name, in.Command),
+			Kind: "cmd", Cwd: s.fs().Resolve(in.Path), Command: in.Command, Name: firstNonEmpty(in.Name, in.Command),
 			SessionID: in.SessionID, ScriptID: in.ScriptID, RemainOnExit: true, Cols: in.Cols, Rows: in.Rows, Origin: "script",
 		})
 		if err == nil {
@@ -535,11 +537,21 @@ func (s *Server) registerParityMethods() {
 		return ss.ExecInline(ctx, in.Command)
 	}
 
-	// ---- Providers Registry & Health ----
+	m["session.compact"] = func(ctx context.Context, c *core.Client, p json.RawMessage) (any, error) {
+		in, _ := bind[idParam](p)
+		ss, err := s.session(ctx, in.ID)
+		if err != nil {
+			return nil, err
+		}
+		err = ss.Compact(ctx)
+		return map[string]any{"ok": err == nil}, err
+	}
+
+	// ---- Providers Registry, Models & Health ----
 	m["providers.list"] = func(ctx context.Context, c *core.Client, p json.RawMessage) (any, error) {
 		return map[string]any{
 			"agents":  s.Mgr.Agents(),
-			"configs": s.Mgr.Providers.List(),
+			"configs": s.Mgr.Providers.ListRedacted(),
 		}, nil
 	}
 	m["providers.upsert"] = func(ctx context.Context, c *core.Client, p json.RawMessage) (any, error) {
@@ -551,15 +563,15 @@ func (s *Server) registerParityMethods() {
 		if err != nil {
 			return nil, err
 		}
-		s.Mgr.InvalidateAgentsCache()
-		return saved, nil
+		s.Mgr.OnProviderUpdated(saved.ID)
+		return saved.Redacted(), nil
 	}
 	m["providers.remove"] = func(ctx context.Context, c *core.Client, p json.RawMessage) (any, error) {
 		in, _ := bind[idParam](p)
 		if err := s.Mgr.Providers.Remove(in.ID); err != nil {
 			return nil, err
 		}
-		s.Mgr.InvalidateAgentsCache()
+		s.Mgr.OnProviderUpdated(in.ID)
 		return map[string]any{"ok": true}, nil
 	}
 	m["providers.health"] = func(ctx context.Context, c *core.Client, p json.RawMessage) (any, error) {
@@ -569,13 +581,17 @@ func (s *Server) registerParityMethods() {
 			if in.ID != "" && a.ID != in.ID {
 				continue
 			}
-			env := s.Mgr.AgyEnv()
-			if cfg, ok := s.Mgr.Providers.Get(a.ID); ok {
-				env = providers.MergeEnv(env, cfg.Env)
-			}
+			env := s.Mgr.ProviderHealthEnv(a.ID)
 			out = append(out, providers.CheckHealth(ctx, a.ID, a.Driver, a.Command, env))
 		}
 		return out, nil
+	}
+	m["providers.models"] = func(ctx context.Context, c *core.Client, p json.RawMessage) (any, error) {
+		in, err := bind[providers.ProviderModelsParams](p)
+		if err != nil {
+			return nil, err
+		}
+		return s.Mgr.ProviderModels(ctx, in.Provider, in.Refresh)
 	}
 
 	// ---- Schedules ----
@@ -594,7 +610,7 @@ func (s *Server) registerParityMethods() {
 		if err != nil {
 			return nil, err
 		}
-		in.Cwd = fsops.Resolve(in.Cwd)
+		in.Cwd = s.fs().Resolve(in.Cwd)
 		return s.Mgr.Scheduler.Upsert(in)
 	}
 	m["schedules.delete"] = func(ctx context.Context, c *core.Client, p json.RawMessage) (any, error) {
@@ -634,7 +650,7 @@ func (s *Server) registerParityMethods() {
 		}](p)
 		cwd := ""
 		if in.Cwd != "" {
-			cwd = fsops.Resolve(in.Cwd)
+			cwd = s.fs().Resolve(in.Cwd)
 		}
 		return s.Mgr.DiscoverSkills(cwd), nil
 	}

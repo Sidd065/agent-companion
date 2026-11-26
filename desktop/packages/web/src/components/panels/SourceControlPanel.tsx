@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
   Archive,
   Download,
@@ -22,6 +22,7 @@ import type {
   WorktreeInfo,
 } from '@agentc/protocol';
 import { useApp } from '../../state/appStore.js';
+import { resolveHostScopedCwd } from '../../utils/multiHost.js';
 
 interface CommitEntry {
   sha: string;
@@ -39,7 +40,13 @@ type SubTab = 'changes' | 'branches' | 'worktrees' | 'stashes' | 'history';
 export const SourceControlPanel: React.FC = () => {
   const { activeHost, activeSession, draft, callHost, openDraft, openRightTab, pushToast } = useApp();
   const hostId = activeHost?.creds.id ?? '';
-  const cwd = activeSession?.worktreePath || activeSession?.cwd || draft.cwd || '';
+  const cwd = resolveHostScopedCwd({
+    hostId,
+    activeSession,
+    activeSessionHostId: hostId,
+    draft,
+    fallback: '',
+  });
 
   const [tab, setTab] = useState<SubTab>('changes');
   const [status, setStatus] = useState<GitStatus | null>(null);
@@ -55,13 +62,16 @@ export const SourceControlPanel: React.FC = () => {
   const [newBranch, setNewBranch] = useState('');
   const [newWtBranch, setNewWtBranch] = useState('');
   const [stashMsg, setStashMsg] = useState('');
+  const reqSeqRef = useRef(0);
 
   const refreshAll = useCallback(
     async (force = false) => {
       if (!hostId || !cwd) return;
+      const seq = ++reqSeqRef.current;
       setLoading(true);
       try {
         const st = await callHost<GitStatus>(hostId, 'git.status', { path: cwd, force });
+        if (seq !== reqSeqRef.current) return;
         setStatus(st);
         if (st.isRepo) {
           const [br, wt, sl, lg] = await Promise.all([
@@ -72,23 +82,45 @@ export const SourceControlPanel: React.FC = () => {
               commits: [],
             })),
           ]);
+          if (seq !== reqSeqRef.current) return;
           setBranches(Array.isArray(br) ? br : []);
           setWorktrees(Array.isArray(wt) ? wt : []);
           setStashes(Array.isArray(sl) ? sl : []);
           setCommits(Array.isArray(lg?.commits) ? lg.commits : []);
+        } else {
+          setBranches([]);
+          setWorktrees([]);
+          setStashes([]);
+          setCommits([]);
+          setSelectedCommitDiff('');
         }
       } catch (e) {
+        if (seq !== reqSeqRef.current) return;
+        setStatus(null);
+        setBranches([]);
+        setWorktrees([]);
+        setStashes([]);
+        setCommits([]);
         pushToast({ text: `Git status failed: ${(e as Error).message}`, level: 'error' });
       } finally {
-        setLoading(false);
+        if (seq === reqSeqRef.current) {
+          setLoading(false);
+        }
       }
     },
     [hostId, cwd, callHost, pushToast],
   );
 
   useEffect(() => {
+    reqSeqRef.current++;
+    setStatus(null);
+    setBranches([]);
+    setWorktrees([]);
+    setStashes([]);
+    setCommits([]);
+    setSelectedCommitDiff('');
     void refreshAll(false);
-  }, [refreshAll]);
+  }, [hostId, cwd, refreshAll]);
 
   const runGit = async (method: string, params: Record<string, unknown>, okMsg?: string) => {
     try {

@@ -10,12 +10,15 @@ import {
 import type {
   AgentProfile,
   AsideItem,
+  CustomModel,
   DaemonInfo,
   Device,
   HostConnectionState,
   Notification,
   PairedHostCredentials,
   Project,
+  ProviderConfig,
+  ProviderModelsResult,
   ScheduledTask,
   ScheduleRunRecord,
   SessionDetail,
@@ -25,6 +28,16 @@ import type {
   TranscriptOp,
 } from '@agentc/protocol';
 import type { DetectedEditor, LocalDaemonStatus } from '../types/desktop.js';
+import { buildProviderUpsertPayload } from '../utils/codexModels.js';
+import {
+  clearWorkspacePinnedTabs,
+  computeDraftForHostSwitch,
+  upsertRightTab,
+  type RightTab,
+  type RightTabKind,
+} from '../utils/multiHost.js';
+
+export type { RightTab, RightTabKind };
 import { applyTheme } from './themes.js';
 
 export interface ClientSettings {
@@ -46,6 +59,7 @@ export interface ClientSettings {
   fontSize: number;
   customCss: string;
   favoriteModels: string[];
+  customModelsByScope: Record<string, CustomModel[]>;
   favoriteEditor: string;
   keybindings: Record<string, string>;
 }
@@ -69,6 +83,7 @@ export const DEFAULT_SETTINGS: ClientSettings = {
   fontSize: 13.5,
   customCss: '',
   favoriteModels: [],
+  customModelsByScope: {},
   favoriteEditor: 'code',
   keybindings: {},
 };
@@ -84,19 +99,6 @@ export interface HostRuntime {
   terminals: TerminalInfo[];
   devices: Device[];
   schedules: { tasks: ScheduledTask[]; runs: ScheduleRunRecord[] };
-}
-
-export type RightTabKind = 'diff' | 'files' | 'side' | 'artifacts' | 'pr' | 'git' | 'terminal' | 'browser';
-
-export interface RightTab {
-  id: string;
-  kind: RightTabKind;
-  title: string;
-  diffScope?: 'uncommitted' | 'latest' | 'turn' | 'session' | 'branch' | 'staged';
-  turnIndex?: number;
-  filePath?: string;
-  browserUrl?: string;
-  termId?: string;
 }
 
 export interface ComposerContextChip {
@@ -134,6 +136,28 @@ export function threadKey(hostId: string, sessionId: string): string {
   return `${hostId}:${sessionId}`;
 }
 
+export function providerCatalogKey(hostId: string, provider: string): string {
+  return `${hostId}:${provider}`;
+}
+
+export function customModelsScopeKey(hostId: string, provider: string): string {
+  return `${hostId}:${provider.trim() || 'codex'}`;
+}
+
+function pruneHostPrefixMap<T>(prev: Record<string, T>, hostId: string): Record<string, T> {
+  const prefix = `${hostId}:`;
+  let changed = false;
+  const next: Record<string, T> = {};
+  for (const [k, v] of Object.entries(prev)) {
+    if (k.startsWith(prefix)) {
+      changed = true;
+    } else {
+      next[k] = v;
+    }
+  }
+  return changed ? next : prev;
+}
+
 interface AppContextValue {
   hosts: Record<string, HostRuntime>;
   hostList: HostRuntime[];
@@ -142,6 +166,13 @@ interface AppContextValue {
   settings: ClientSettings;
   updateSettings: (patch: Partial<ClientSettings>) => void;
   resetSettings: () => void;
+
+  // Provider catalog & custom models
+  providerCatalogs: Record<string, ProviderModelsResult>;
+  loadProviderModels: (hostId: string, provider: string, refresh?: boolean) => Promise<ProviderModelsResult | null>;
+  refreshHostInfo: (hostId: string) => Promise<DaemonInfo | null>;
+  saveCustomModelSlug: (hostId: string, provider: string, model: CustomModel) => Promise<void>;
+  removeCustomModelSlug: (hostId: string, provider: string, slug: string) => Promise<void>;
 
   // Navigation & layout
   viewMode: MainViewMode;
@@ -166,6 +197,7 @@ interface AppContextValue {
   rightPanelMaximized: boolean;
   setRightPanelMaximized: React.Dispatch<React.SetStateAction<boolean>>;
   rightTabs: RightTab[];
+  rightTabFocusSeq: number;
   activeRightTabId: string | null;
   setActiveRightTabId: (id: string | null) => void;
   openRightTab: (tab: Omit<RightTab, 'id'> & { id?: string }) => void;
@@ -215,6 +247,8 @@ interface AppContextValue {
   reconnectHost: (hostId: string) => void;
   renameHost: (hostId: string, name: string) => Promise<void>;
   refreshHostSessions: (hostId: string, force?: boolean) => Promise<void>;
+  upsertHostTerminal: (hostId: string, term: TerminalInfo) => void;
+  refreshHostTerminals: (hostId: string) => Promise<TerminalInfo[]>;
   subscribeSession: (hostId: string, sessionId: string) => Promise<void>;
 }
 
@@ -264,12 +298,17 @@ async function persistSettings(s: ClientSettings): Promise<void> {
 export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
   const supervisorsRef = useRef<Map<string, HostSupervisor>>(new Map());
   const [hosts, setHosts] = useState<Record<string, HostRuntime>>({});
+  const hostsRef = useRef(hosts);
+  hostsRef.current = hosts;
+
   const [localDaemon, setLocalDaemon] = useState<LocalDaemonStatus | null>(null);
   const [editors, setEditors] = useState<DetectedEditor[]>([]);
   const [settings, setSettings] = useState<ClientSettings>(DEFAULT_SETTINGS);
+  const [providerCatalogs, setProviderCatalogs] = useState<Record<string, ProviderModelsResult>>({});
+  const catalogInFlightRef = useRef<Map<string, Promise<ProviderModelsResult | null>>>(new Map());
 
   const [viewMode, setViewMode] = useState<MainViewMode>('draft');
-  const [activeHostId, setActiveHostId] = useState<string>('');
+  const [activeHostId, setActiveHostIdState] = useState<string>('');
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
   const [draft, setDraft] = useState<DraftConfig>({
     hostId: '',
@@ -278,11 +317,13 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     model: '',
     mode: 'supervised',
     thought: 'medium',
-    skipPermissions: true,
+    skipPermissions: false,
     useWorktree: false,
     baseBranch: '',
     branchName: '',
   });
+  const draftRef = useRef(draft);
+  draftRef.current = draft;
 
   const [transcripts, setTranscripts] = useState<Record<string, TranscriptState>>({});
   const transcriptsRef = useRef(transcripts);
@@ -298,7 +339,12 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const [rightPanelOpen, setRightPanelOpen] = useState(false);
   const [rightPanelMaximized, setRightPanelMaximized] = useState(false);
   const [rightTabs, setRightTabs] = useState<RightTab[]>([]);
+  const rightTabsRef = useRef(rightTabs);
+  rightTabsRef.current = rightTabs;
+  const [rightTabFocusSeq, setRightTabFocusSeq] = useState(0);
   const [activeRightTabId, setActiveRightTabId] = useState<string | null>(null);
+  const activeRightTabIdRef = useRef(activeRightTabId);
+  activeRightTabIdRef.current = activeRightTabId;
   const closedTabsRef = useRef<RightTab[]>([]);
 
   const [pairModalOpen, setPairModalOpen] = useState(false);
@@ -359,12 +405,40 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     document.documentElement.style.fontSize = `${settings.fontSize}px`;
   }, [settings.themeId, settings.diffPalette, settings.customCss, settings.fontSize]);
 
+  const viewModeRef = useRef(viewMode);
+  viewModeRef.current = viewMode;
   const activeHostRef = useRef(activeHostId);
   activeHostRef.current = activeHostId;
   const activeSessionRef = useRef(activeSessionId);
   activeSessionRef.current = activeSessionId;
   const settingsRef = useRef(settings);
   settingsRef.current = settings;
+
+  const applyWorkspaceTabReset = useCallback((nextHostId: string) => {
+    const prev = rightTabsRef.current;
+    const next = clearWorkspacePinnedTabs(prev, nextHostId);
+    if (next !== prev) {
+      rightTabsRef.current = next;
+      setRightTabs(next);
+    }
+  }, []);
+
+  const setActiveHostId = useCallback(
+    (nextHostId: string) => {
+      setActiveHostIdState(nextHostId);
+      activeHostRef.current = nextHostId;
+      applyWorkspaceTabReset(nextHostId);
+      const targetHost = hostsRef.current[nextHostId];
+      const curSessId = activeSessionRef.current;
+      if (curSessId && (!targetHost || !targetHost.sessions.some((s) => s.id === curSessId))) {
+        setActiveSessionId(null);
+        activeSessionRef.current = null;
+        setViewMode((m) => (m === 'thread' ? 'draft' : m));
+      }
+      setDraft((prev) => computeDraftForHostSwitch(prev, nextHostId, hostsRef.current));
+    },
+    [applyWorkspaceTabReset],
+  );
 
   const callHost = useCallback(
     async <T = unknown,>(hostId: string, method: string, params?: unknown, timeoutMs?: number): Promise<T> => {
@@ -373,6 +447,159 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       return sup.call<T>(method, params, timeoutMs);
     },
     [],
+  );
+
+  const loadProviderModels = useCallback(
+    async (hostId: string, provider: string, refresh = false): Promise<ProviderModelsResult | null> => {
+      const prov = provider.trim() || 'codex';
+      if (!hostId) return null;
+      const sup = supervisorsRef.current.get(hostId);
+      if (!sup || sup.connectionState !== 'connected') return null;
+
+      const key = providerCatalogKey(hostId, prov);
+      if (!refresh) {
+        const existingPromise = catalogInFlightRef.current.get(key);
+        if (existingPromise) return existingPromise;
+      }
+
+      const req = sup
+        .call<ProviderModelsResult>('providers.models', { provider: prov, refresh })
+        .then((res) => {
+          if (res && typeof res === 'object') {
+            setProviderCatalogs((prev) => ({ ...prev, [key]: res }));
+            return res;
+          }
+          return null;
+        })
+        .catch(() => null)
+        .finally(() => {
+          if (catalogInFlightRef.current.get(key) === req) {
+            catalogInFlightRef.current.delete(key);
+          }
+        });
+
+      catalogInFlightRef.current.set(key, req);
+      return req;
+    },
+    [],
+  );
+
+  const refreshHostInfo = useCallback(async (hostId: string): Promise<DaemonInfo | null> => {
+    if (!hostId) return null;
+    const sup = supervisorsRef.current.get(hostId);
+    if (!sup || sup.connectionState !== 'connected') return null;
+    try {
+      const info = await sup.call<DaemonInfo>('daemon.info', {});
+      if (info) {
+        sup.info = info;
+        setHosts((prev) => {
+          const cur = prev[hostId];
+          if (!cur) return prev;
+          return {
+            ...prev,
+            [hostId]: {
+              ...cur,
+              info,
+              agents: info.agents ?? cur.agents,
+              projects: info.projects ?? cur.projects,
+              sessions: info.sessions ?? cur.sessions,
+            },
+          };
+        });
+      }
+      return info;
+    } catch {
+      return null;
+    }
+  }, []);
+
+  const saveCustomModelSlug = useCallback(
+    async (hostId: string, provider: string, model: CustomModel): Promise<void> => {
+      const slug = model.slug.trim();
+      const prov = provider.trim() || 'codex';
+      if (!slug || !hostId) return;
+      const scopeKey = customModelsScopeKey(hostId, prov);
+      const entry: CustomModel = { slug, name: model.name?.trim() || slug };
+
+      setSettings((prev) => {
+        const prevMap =
+          prev.customModelsByScope && typeof prev.customModelsByScope === 'object'
+            ? prev.customModelsByScope
+            : {};
+        const curList = Array.isArray(prevMap[scopeKey]) ? prevMap[scopeKey] : [];
+        const nextCustom = [...curList.filter((c) => c.slug !== slug), entry];
+        const next: ClientSettings = {
+          ...prev,
+          customModelsByScope: {
+            ...prevMap,
+            [scopeKey]: nextCustom,
+          },
+        };
+        void persistSettings(next);
+        return next;
+      });
+
+      try {
+        const listRes = await callHost<{ configs?: ProviderConfig[] }>(hostId, 'providers.list', {});
+        const existing = (listRes?.configs ?? []).find((c) => c.id === prov);
+        const mergedDaemonCustom = [
+          ...(existing?.customModels ?? []).filter((c) => c.slug !== slug),
+          entry,
+        ];
+        const payload = buildProviderUpsertPayload(existing, {
+          id: prov,
+          customModels: mergedDaemonCustom,
+        });
+        await callHost(hostId, 'providers.upsert', payload);
+        await loadProviderModels(hostId, prov, false);
+      } catch (e) {
+        pushToast({ text: `Saved custom model locally (${(e as Error).message})`, level: 'info' });
+      }
+    },
+    [callHost, loadProviderModels, pushToast],
+  );
+
+  const removeCustomModelSlug = useCallback(
+    async (hostId: string, provider: string, slug: string): Promise<void> => {
+      const target = slug.trim();
+      const prov = provider.trim() || 'codex';
+      if (!target || !hostId) return;
+      const scopeKey = customModelsScopeKey(hostId, prov);
+
+      setSettings((prev) => {
+        const prevMap =
+          prev.customModelsByScope && typeof prev.customModelsByScope === 'object'
+            ? prev.customModelsByScope
+            : {};
+        const curList = Array.isArray(prevMap[scopeKey]) ? prevMap[scopeKey] : [];
+        const next: ClientSettings = {
+          ...prev,
+          customModelsByScope: {
+            ...prevMap,
+            [scopeKey]: curList.filter((c) => c.slug !== target),
+          },
+        };
+        void persistSettings(next);
+        return next;
+      });
+
+      try {
+        const listRes = await callHost<{ configs?: ProviderConfig[] }>(hostId, 'providers.list', {});
+        const existing = (listRes?.configs ?? []).find((c) => c.id === prov);
+        if (existing) {
+          const nextDaemonCustom = (existing.customModels ?? []).filter((c) => c.slug !== target);
+          const payload = buildProviderUpsertPayload(existing, {
+            id: prov,
+            customModels: nextDaemonCustom,
+          });
+          await callHost(hostId, 'providers.upsert', payload);
+        }
+        await loadProviderModels(hostId, prov, false);
+      } catch (e) {
+        pushToast({ text: `Remove custom model failed: ${(e as Error).message}`, level: 'error' });
+      }
+    },
+    [callHost, loadProviderModels, pushToast],
   );
 
   const subscribeSession = useCallback(async (hostId: string, sessionId: string) => {
@@ -395,88 +622,6 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     const list = Array.from(supervisorsRef.current.values()).map((s) => s.creds);
     void persistHosts(list);
   }, []);
-
-  const mountSupervisor = useCallback(
-    (creds: PairedHostCredentials) => {
-      const existing = supervisorsRef.current.get(creds.id);
-      if (existing) {
-        existing.updateCredentials(creds);
-        setHosts((prev) => ({
-          ...prev,
-          [creds.id]: { ...(prev[creds.id] ?? makeEmptyHost(creds)), creds },
-        }));
-        return;
-      }
-
-      setHosts((prev) => ({
-        ...prev,
-        [creds.id]: makeEmptyHost(creds),
-      }));
-
-      const sup = new HostSupervisor(
-        creds,
-        {
-          onStateChange: (hostId, state, error) => {
-            setHosts((prev) => {
-              const cur = prev[hostId];
-              if (!cur) return prev;
-              return { ...prev, [hostId]: { ...cur, state, error } };
-            });
-          },
-          onDaemonInfo: (hostId, info) => {
-            setHosts((prev) => {
-              const cur = prev[hostId];
-              if (!cur) return prev;
-              return {
-                ...prev,
-                [hostId]: {
-                  ...cur,
-                  info,
-                  agents: info.agents ?? [],
-                  projects: info.projects ?? cur.projects,
-                  sessions: info.sessions ?? cur.sessions,
-                },
-              };
-            });
-            // Fetch terminals, devices, schedules in background
-            void sup.call<TerminalInfo[]>('term.list').then((terms) => {
-              setHosts((prev) => (prev[hostId] ? { ...prev, [hostId]: { ...prev[hostId], terminals: terms ?? [] } } : prev));
-            }).catch(() => {});
-            void sup.call<Device[]>('devices.list').then((devs) => {
-              setHosts((prev) => (prev[hostId] ? { ...prev, [hostId]: { ...prev[hostId], devices: devs ?? [] } } : prev));
-            }).catch(() => {});
-            void sup.call<{ tasks: ScheduledTask[]; runs: ScheduleRunRecord[] }>('schedules.list').then((sc) => {
-              if (sc) {
-                setHosts((prev) => (prev[hostId] ? { ...prev, [hostId]: { ...prev[hostId], schedules: sc } } : prev));
-              }
-            }).catch(() => {});
-
-            // Re-subscribe active session cleanly on reconnect!
-            if (activeHostRef.current === hostId && activeSessionRef.current) {
-              void subscribeSession(hostId, activeSessionRef.current);
-            }
-          },
-          onCredentialsUpdated: (updated) => {
-            setHosts((prev) => (prev[updated.id] ? { ...prev, [updated.id]: { ...prev[updated.id], creds: updated } } : prev));
-            saveAllCreds();
-          },
-          onEvent: (hostId, event, data) => {
-            handleServerEvent(hostId, event, data);
-          },
-        },
-        {
-          deviceName: window.agentcDesktop?.hostname
-            ? `Desktop (${window.agentcDesktop.hostname})`
-            : 'Agent Companion Web',
-          platform: window.agentcDesktop ? 'linux-desktop' : 'web',
-          appVersion: window.agentcDesktop?.version ?? '0.4.0',
-        },
-      );
-      supervisorsRef.current.set(creds.id, sup);
-      sup.start();
-    },
-    [saveAllCreds, subscribeSession],
-  );
 
   const handleServerEvent = useCallback(
     (hostId: string, event: string, data: unknown) => {
@@ -502,6 +647,11 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
             if (!h) return prev;
             return { ...prev, [hostId]: { ...h, sessions: h.sessions.filter((s) => s.id !== id) } };
           });
+          if (activeHostRef.current === hostId && activeSessionRef.current === id) {
+            setActiveSessionId(null);
+            activeSessionRef.current = null;
+            setViewMode((m) => (m === 'thread' ? 'draft' : m));
+          }
           break;
         }
         case 'sessions.invalidate': {
@@ -613,41 +763,181 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     [],
   );
 
+  const mountSupervisor = useCallback(
+    (creds: PairedHostCredentials) => {
+      const existing = supervisorsRef.current.get(creds.id);
+      if (existing) {
+        existing.updateCredentials(creds);
+        setHosts((prev) => ({
+          ...prev,
+          [creds.id]: { ...(prev[creds.id] ?? makeEmptyHost(creds)), creds },
+        }));
+        return;
+      }
+
+      setHosts((prev) => ({
+        ...prev,
+        [creds.id]: makeEmptyHost(creds),
+      }));
+
+      const sup = new HostSupervisor(
+        creds,
+        {
+          onStateChange: (hostId, state, error) => {
+            setHosts((prev) => {
+              const cur = prev[hostId];
+              if (!cur) return prev;
+              return { ...prev, [hostId]: { ...cur, state, error } };
+            });
+          },
+          onDaemonInfo: (hostId, info) => {
+            setHosts((prev) => {
+              const cur = prev[hostId];
+              if (!cur) return prev;
+              const nextHost: HostRuntime = {
+                ...cur,
+                info,
+                agents: info.agents ?? [],
+                projects: info.projects ?? cur.projects,
+                sessions: info.sessions ?? cur.sessions,
+              };
+              const nextMap = { ...prev, [hostId]: nextHost };
+              hostsRef.current = nextMap;
+              return nextMap;
+            });
+
+            // Warm draft defaults if draft is bound to this host with empty cwd
+            setDraft((prev) => {
+              if (prev.hostId !== hostId || prev.cwd.trim()) return prev;
+              return computeDraftForHostSwitch(prev, hostId, hostsRef.current);
+            });
+
+            // Warm Codex dynamic catalog eagerly when available
+            if ((info.agents ?? []).some((a) => a.id === 'codex')) {
+              void loadProviderModels(hostId, 'codex', false);
+            }
+
+            // Fetch terminals, devices, schedules in background
+            void sup.call<TerminalInfo[]>('term.list').then((terms) => {
+              setHosts((prev) => (prev[hostId] ? { ...prev, [hostId]: { ...prev[hostId], terminals: terms ?? [] } } : prev));
+            }).catch(() => {});
+            void sup.call<Device[]>('devices.list').then((devs) => {
+              setHosts((prev) => (prev[hostId] ? { ...prev, [hostId]: { ...prev[hostId], devices: devs ?? [] } } : prev));
+            }).catch(() => {});
+            void sup.call<{ tasks: ScheduledTask[]; runs: ScheduleRunRecord[] }>('schedules.list').then((sc) => {
+              if (sc) {
+                setHosts((prev) => (prev[hostId] ? { ...prev, [hostId]: { ...prev[hostId], schedules: sc } } : prev));
+              }
+            }).catch(() => {});
+
+            // Re-subscribe active session cleanly on reconnect!
+            if (activeHostRef.current === hostId && activeSessionRef.current) {
+              void subscribeSession(hostId, activeSessionRef.current);
+            }
+          },
+          onCredentialsUpdated: (updated) => {
+            setHosts((prev) => (prev[updated.id] ? { ...prev, [updated.id]: { ...prev[updated.id], creds: updated } } : prev));
+            saveAllCreds();
+          },
+          onEvent: (hostId, event, data) => {
+            handleServerEvent(hostId, event, data);
+          },
+        },
+        {
+          deviceName: window.agentcDesktop?.hostname
+            ? `Desktop (${window.agentcDesktop.hostname})`
+            : 'Agent Companion Web',
+          platform: window.agentcDesktop ? 'linux-desktop' : 'web',
+          appVersion: window.agentcDesktop?.version ?? '0.5.0',
+        },
+      );
+      supervisorsRef.current.set(creds.id, sup);
+      sup.start();
+    },
+    [handleServerEvent, loadProviderModels, saveAllCreds, subscribeSession],
+  );
+
   const selectSession = useCallback(
     (hostId: string, sessionId: string) => {
-      setActiveHostId(hostId);
+      if (
+        activeHostRef.current !== hostId ||
+        activeSessionRef.current !== sessionId ||
+        viewModeRef.current !== 'thread'
+      ) {
+        applyWorkspaceTabReset(hostId);
+      }
+      setActiveHostIdState(hostId);
+      activeHostRef.current = hostId;
       setActiveSessionId(sessionId);
+      activeSessionRef.current = sessionId;
       setViewMode('thread');
+      setDraft((prev) => computeDraftForHostSwitch(prev, hostId, hostsRef.current));
       void subscribeSession(hostId, sessionId);
     },
-    [subscribeSession],
+    [applyWorkspaceTabReset, subscribeSession],
   );
 
   const openDraft = useCallback(
     (partial?: Partial<DraftConfig>) => {
+      const targetHostId =
+        partial?.hostId ||
+        activeHostRef.current ||
+        draftRef.current.hostId ||
+        Object.keys(hostsRef.current)[0] ||
+        '';
+      if (targetHostId && targetHostId !== activeHostRef.current) {
+        setActiveHostIdState(targetHostId);
+        activeHostRef.current = targetHostId;
+      }
+      applyWorkspaceTabReset(targetHostId);
       setViewMode('draft');
       setActiveSessionId(null);
+      activeSessionRef.current = null;
       setDraft((prev) => {
-        const hostId = partial?.hostId || activeHostRef.current || prev.hostId || Object.keys(hosts)[0] || '';
-        const h = hosts[hostId];
+        const hostId = targetHostId || prev.hostId;
+        const sameHost = !hostId || prev.hostId === hostId;
+        const h = hostsRef.current[hostId];
+        const matchedProj = partial?.projectId
+          ? h?.projects.find((p) => p.id === partial.projectId)
+          : undefined;
+        const keepPrevAgent =
+          sameHost &&
+          Boolean(prev.agent) &&
+          (!h?.agents.length || h.agents.some((a) => a.id === prev.agent && a.available));
         const defaultAgent =
           partial?.agent ||
-          prev.agent ||
+          (keepPrevAgent ? prev.agent : '') ||
+          matchedProj?.defaultAgent ||
           h?.agents.find((a) => a.available && a.id === 'claude')?.id ||
+          h?.agents.find((a) => a.available && a.id === 'codex')?.id ||
           h?.agents.find((a) => a.available && a.id === 'agy')?.id ||
           h?.agents.find((a) => a.available)?.id ||
           'claude';
-        const defaultCwd = partial?.cwd ?? (partial?.projectId ? h?.projects.find((p) => p.id === partial.projectId)?.path : undefined) ?? prev.cwd ?? h?.projects[0]?.path ?? h?.info?.home ?? '';
+        const defaultCwd =
+          partial?.cwd ||
+          matchedProj?.path ||
+          (sameHost ? prev.cwd : '') ||
+          h?.projects[0]?.path ||
+          h?.info?.home ||
+          '~';
+        const nextProjectId =
+          partial && 'projectId' in partial
+            ? partial.projectId
+            : sameHost
+              ? prev.projectId
+              : h?.projects[0]?.id;
         return {
           ...prev,
+          ...(sameHost ? {} : { baseBranch: '', branchName: '', useWorktree: false, model: '' }),
           ...partial,
           hostId,
+          projectId: nextProjectId,
           agent: defaultAgent,
           cwd: defaultCwd,
         };
       });
     },
-    [hosts],
+    [applyWorkspaceTabReset],
   );
 
   const pairHostByLink = useCallback(
@@ -657,13 +947,18 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           ? `Desktop (${window.agentcDesktop.hostname})`
           : 'Agent Companion Web',
         platform: window.agentcDesktop ? 'linux-desktop' : 'web',
-        appVersion: window.agentcDesktop?.version ?? '0.4.0',
+        appVersion: window.agentcDesktop?.version ?? '0.5.0',
         isLocal,
       });
       mountSupervisor(credentials);
       saveAllCreds();
-      setActiveHostId(credentials.id);
-      setDraft((prev) => (prev.hostId ? prev : { ...prev, hostId: credentials.id }));
+      setActiveHostIdState(credentials.id);
+      activeHostRef.current = credentials.id;
+      if (!activeSessionRef.current) {
+        setDraft((prev) => computeDraftForHostSwitch(prev, credentials.id, hostsRef.current));
+      } else {
+        setDraft((prev) => (prev.hostId ? prev : computeDraftForHostSwitch(prev, credentials.id, hostsRef.current)));
+      }
       pushToast({ text: `Paired with ${credentials.name}`, level: 'success' });
       return credentials;
     },
@@ -690,19 +985,42 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         sup.dispose();
         supervisorsRef.current.delete(hostId);
       }
+      for (const k of Array.from(catalogInFlightRef.current.keys())) {
+        if (k.startsWith(`${hostId}:`)) catalogInFlightRef.current.delete(k);
+      }
       setHosts((prev) => {
         const copy = { ...prev };
         delete copy[hostId];
+        hostsRef.current = copy;
         return copy;
       });
+      setDetails((prev) => pruneHostPrefixMap(prev, hostId));
+      setTranscripts((prev) => pruneHostPrefixMap(prev, hostId));
+      setAsidesMap((prev) => pruneHostPrefixMap(prev, hostId));
+      setProviderCatalogs((prev) => pruneHostPrefixMap(prev, hostId));
+      setSettings((prev) => {
+        const nextScoped = pruneHostPrefixMap(prev.customModelsByScope ?? {}, hostId);
+        if (nextScoped === prev.customModelsByScope) return prev;
+        const next = { ...prev, customModelsByScope: nextScoped };
+        void persistSettings(next);
+        return next;
+      });
+
+      const nextId = Array.from(supervisorsRef.current.keys())[0] ?? '';
+      applyWorkspaceTabReset(nextId);
       if (activeHostRef.current === hostId) {
-        const nextId = Array.from(supervisorsRef.current.keys())[0] ?? '';
-        setActiveHostId(nextId);
+        setActiveHostIdState(nextId);
+        activeHostRef.current = nextId;
         setActiveSessionId(null);
+        activeSessionRef.current = null;
+        setViewMode((m) => (m === 'thread' ? 'draft' : m));
       }
+      setDraft((prev) =>
+        prev.hostId === hostId ? computeDraftForHostSwitch(prev, nextId, hostsRef.current) : prev,
+      );
       saveAllCreds();
     },
-    [saveAllCreds],
+    [applyWorkspaceTabReset, saveAllCreds],
   );
 
   const reconnectHost = useCallback((hostId: string) => {
@@ -725,40 +1043,78 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     setHosts((prev) => (prev[hostId] ? { ...prev, [hostId]: { ...prev[hostId], sessions: list ?? [] } } : prev));
   }, [callHost]);
 
-  // Right-panel tab management with Ctrl+Shift+T reopen stack (up to 20 tabs)
-  const openRightTab = useCallback((tab: Omit<RightTab, 'id'> & { id?: string }) => {
-    setRightPanelOpen(true);
-    setRightTabs((prev) => {
-      const existing = prev.find((t) => (tab.id ? t.id === tab.id : t.kind === tab.kind && t.filePath === tab.filePath));
-      if (existing) {
-        const updated = { ...existing, ...tab, id: existing.id };
-        setActiveRightTabId(existing.id);
-        return prev.map((t) => (t.id === existing.id ? updated : t));
-      }
-      const id = tab.id ?? `${tab.kind}-${Date.now()}`;
-      const nextTab: RightTab = { ...tab, id };
-      setActiveRightTabId(id);
-      return [...prev, nextTab];
+  const upsertHostTerminal = useCallback((hostId: string, term: TerminalInfo) => {
+    if (!hostId || !term?.id) return;
+    setHosts((prev) => {
+      const cur = prev[hostId];
+      if (!cur) return prev;
+      const exists = cur.terminals.some((t) => t.id === term.id);
+      const nextTerms = exists
+        ? cur.terminals.map((t) => (t.id === term.id ? term : t))
+        : [...cur.terminals, term];
+      const nextMap = { ...prev, [hostId]: { ...cur, terminals: nextTerms } };
+      hostsRef.current = nextMap;
+      return nextMap;
     });
   }, []);
 
+  const refreshHostTerminals = useCallback(
+    async (hostId: string): Promise<TerminalInfo[]> => {
+      if (!hostId) return [];
+      try {
+        const list = await callHost<TerminalInfo[]>(hostId, 'term.list');
+        const safe = Array.isArray(list) ? list : [];
+        setHosts((prev) => {
+          const cur = prev[hostId];
+          if (!cur) return prev;
+          const nextMap = { ...prev, [hostId]: { ...cur, terminals: safe } };
+          hostsRef.current = nextMap;
+          return nextMap;
+        });
+        return safe;
+      } catch {
+        return hostsRef.current[hostId]?.terminals ?? [];
+      }
+    },
+    [callHost],
+  );
+
+  // Right-panel tab management with pure updaters and Ctrl+Shift+T reopen stack (up to 20 tabs)
+  const openRightTab = useCallback((tab: Omit<RightTab, 'id'> & { id?: string }) => {
+    const { tabs: nextTabs, activeId: targetId } = upsertRightTab(
+      rightTabsRef.current,
+      tab,
+      activeHostRef.current,
+    );
+    rightTabsRef.current = nextTabs;
+    activeRightTabIdRef.current = targetId;
+    setRightTabs(nextTabs);
+    if (tab.filePath) {
+      setRightTabFocusSeq((s) => s + 1);
+    }
+    setActiveRightTabId(targetId);
+    setRightPanelOpen(true);
+  }, []);
+
   const closeRightTab = useCallback((id: string) => {
-    setRightTabs((prev) => {
-      const target = prev.find((t) => t.id === id);
-      if (target) {
-        closedTabsRef.current = [target, ...closedTabsRef.current].slice(0, 20);
-      }
-      const next = prev.filter((t) => t.id !== id);
-      setActiveRightTabId((cur) => {
-        if (cur !== id) return cur;
-        return next[next.length - 1]?.id ?? null;
-      });
-      if (next.length === 0) {
-        setRightPanelOpen(false);
-        setRightPanelMaximized(false);
-      }
-      return next;
-    });
+    const prev = rightTabsRef.current;
+    const target = prev.find((t) => t.id === id);
+    if (target) {
+      closedTabsRef.current = [target, ...closedTabsRef.current].slice(0, 20);
+    }
+    const next = prev.filter((t) => t.id !== id);
+    rightTabsRef.current = next;
+    setRightTabs(next);
+
+    if (activeRightTabIdRef.current === id) {
+      const nextActive = next[next.length - 1]?.id ?? null;
+      activeRightTabIdRef.current = nextActive;
+      setActiveRightTabId(nextActive);
+    }
+    if (next.length === 0) {
+      setRightPanelOpen(false);
+      setRightPanelMaximized(false);
+    }
   }, []);
 
   const reopenClosedTab = useCallback(() => {
@@ -773,12 +1129,29 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     (async () => {
       const [savedHosts, savedSettings] = await Promise.all([loadSavedHosts(), loadSavedSettings()]);
       if (!mounted) return;
-      setSettings((prev) => ({ ...prev, ...savedSettings }));
+      const rawScoped = (savedSettings as Partial<ClientSettings>).customModelsByScope;
+      const cleanScoped: Record<string, CustomModel[]> = {};
+      if (rawScoped && typeof rawScoped === 'object' && !Array.isArray(rawScoped)) {
+        for (const [k, v] of Object.entries(rawScoped)) {
+          if (k.includes(':') && Array.isArray(v)) {
+            cleanScoped[k] = v;
+          }
+        }
+      }
+      const { customModels: _legacyUnscoped, ...restSaved } = savedSettings as Partial<ClientSettings> & {
+        customModels?: unknown;
+      };
+      setSettings((prev) => ({
+        ...prev,
+        ...restSaved,
+        customModelsByScope: Object.keys(cleanScoped).length > 0 ? cleanScoped : prev.customModelsByScope,
+      }));
       for (const h of savedHosts) {
         mountSupervisor(h);
       }
       if (savedHosts.length > 0) {
-        setActiveHostId(savedHosts[0].id);
+        setActiveHostIdState(savedHosts[0].id);
+        activeHostRef.current = savedHosts[0].id;
         setDraft((prev) => ({ ...prev, hostId: savedHosts[0].id }));
       }
       if (window.agentcDesktop) {
@@ -818,14 +1191,12 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       );
       cleanups.push(
         window.agentcDesktop.onCloseActiveTab(() => {
-          setActiveRightTabId((cur) => {
-            if (cur) {
-              closeRightTab(cur);
-            } else {
-              setTerminalDrawerOpen(false);
-            }
-            return cur;
-          });
+          const cur = activeRightTabIdRef.current;
+          if (cur) {
+            closeRightTab(cur);
+          } else {
+            setTerminalDrawerOpen(false);
+          }
         }),
       );
     }
@@ -908,6 +1279,11 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     settings,
     updateSettings,
     resetSettings,
+    providerCatalogs,
+    loadProviderModels,
+    refreshHostInfo,
+    saveCustomModelSlug,
+    removeCustomModelSlug,
     viewMode,
     setViewMode,
     activeHostId: activeHost?.creds.id ?? '',
@@ -928,6 +1304,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     rightPanelMaximized,
     setRightPanelMaximized,
     rightTabs,
+    rightTabFocusSeq,
     activeRightTabId,
     setActiveRightTabId,
     openRightTab,
@@ -968,6 +1345,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     reconnectHost,
     renameHost,
     refreshHostSessions,
+    upsertHostTerminal,
+    refreshHostTerminals,
     subscribeSession,
   };
 

@@ -94,7 +94,9 @@ import io.github.sidd065.agentcompanion.ui.components.MarkdownText
 import io.github.sidd065.agentcompanion.ui.components.TextPromptDialog
 import io.github.sidd065.agentcompanion.ui.components.copyText
 import io.github.sidd065.agentcompanion.ui.components.fmtBytes
+import io.github.sidd065.agentcompanion.ui.components.rememberHomeDir
 import io.github.sidd065.agentcompanion.ui.components.relTime
+import io.github.sidd065.agentcompanion.ui.components.shortPath
 import io.github.sidd065.agentcompanion.ui.theme.LocalExtra
 import io.github.sidd065.agentcompanion.ui.theme.codeStyle
 import kotlinx.coroutines.launch
@@ -117,38 +119,43 @@ fun FileScreen(path: String, startEditing: Boolean) {
     val snack = LocalSnack.current
     val scope = rememberCoroutineScope()
     val conn = activeConnection() ?: return
+    val hostId = conn.config.id
+    val home = conn.rememberHomeDir()
     val settings by ctx.graph.prefs.flow.collectAsState()
-    var stat by remember { mutableStateOf<FsEntry?>(null) }
-    var content by remember { mutableStateOf<ReadResult?>(null) }
-    var loading by remember { mutableStateOf(true) }
-    var error by remember { mutableStateOf<String?>(null) }
+    var stat by remember(hostId, path) { mutableStateOf<FsEntry?>(null) }
+    var content by remember(hostId, path) { mutableStateOf<ReadResult?>(null) }
+    var loading by remember(hostId, path) { mutableStateOf(true) }
+    var error by remember(hostId, path) { mutableStateOf<String?>(null) }
     val allDownloads by FileTransfer.downloads.collectAsState()
-    val activeDownload = allDownloads.firstOrNull { it.hostId == conn.config.id && it.remotePath == path }
-    var editing by remember { mutableStateOf(startEditing) }
-    var draft by remember { mutableStateOf("") }
-    var preview by remember { mutableStateOf(true) }
-    var saving by remember { mutableStateOf(false) }
-    var conflict by remember { mutableStateOf(false) }
-    var menu by remember { mutableStateOf(false) }
-    var renaming by remember { mutableStateOf(false) }
-    var deleting by remember { mutableStateOf(false) }
-    var discard by remember { mutableStateOf(false) }
-    var reload by remember { mutableIntStateOf(0) }
+    val activeDownload = allDownloads.firstOrNull { it.hostId == hostId && it.remotePath == path }
+    var editing by remember(hostId, path) { mutableStateOf(startEditing) }
+    var draft by remember(hostId, path) { mutableStateOf("") }
+    var preview by remember(hostId, path) { mutableStateOf(true) }
+    var saving by remember(hostId, path) { mutableStateOf(false) }
+    var conflict by remember(hostId, path) { mutableStateOf(false) }
+    var menu by remember(hostId, path) { mutableStateOf(false) }
+    var renaming by remember(hostId, path) { mutableStateOf(false) }
+    var deleting by remember(hostId, path) { mutableStateOf(false) }
+    var permDeleting by remember(hostId, path) { mutableStateOf(false) }
+    var discard by remember(hostId, path) { mutableStateOf(false) }
+    var reload by remember(hostId, path) { mutableIntStateOf(0) }
     val name = path.substringAfterLast('/')
     val ext = name.substringAfterLast('.', "").lowercase()
     val isImage = stat?.mime?.startsWith("image/") == true && ext != "svg"
     val isMarkdown = ext == "md" || ext == "markdown"
 
-    LaunchedEffect(path, reload) {
+    LaunchedEffect(hostId, path, reload) {
         error = null
         loading = true
+        content = null
         runCatching {
             val st = conn.rpc.call("fs.stat", params { put("path", path) }).decode(FsEntry.serializer())
             stat = st
             if (!(st.mime?.startsWith("image/") == true && ext != "svg") && st.size <= 8L * 1024 * 1024) {
                 val r = conn.rpc.call("fs.read", params { put("path", path); put("max", 2L * 1024 * 1024) }, timeoutMs = 120_000).decode(ReadResult.serializer())
                 content = r
-                if (r.text != null && (editing || draft.isEmpty())) draft = r.text
+                val loadedText = r.editableTextOrNull()
+                if (loadedText != null && (editing || draft.isEmpty())) draft = loadedText
             }
         }.onFailure { error = it.message }
         loading = false
@@ -166,7 +173,8 @@ fun FileScreen(path: String, startEditing: Boolean) {
             }
         }
     }
-    val dirty = editing && content?.text != null && draft != content?.text
+    val baseText = content?.editableTextOrNull()
+    val dirty = editing && baseText != null && draft != baseText
     BackHandler(enabled = dirty) { discard = true }
 
     fun save(force: Boolean) {
@@ -198,7 +206,7 @@ fun FileScreen(path: String, startEditing: Boolean) {
                 },
                 navigationIcon = { IconButton(onClick = { if (dirty) discard = true else nav.popBackStack() }) { Icon(Icons.AutoMirrored.Filled.ArrowBack, null) } },
                 actions = {
-                    if (content?.text != null && content?.truncated == false) {
+                    if (baseText != null && content?.truncated == false) {
                         if (editing) {
                             IconButton(onClick = { save(false) }, enabled = dirty && !saving) { Icon(Icons.Outlined.Save, "Save") }
                         } else {
@@ -207,7 +215,7 @@ fun FileScreen(path: String, startEditing: Boolean) {
                                 Icon(Icons.AutoMirrored.Outlined.WrapText, if (settings.codeWrap) "Don't wrap lines" else "Wrap lines",
                                     tint = if (settings.codeWrap) MaterialTheme.colorScheme.primary else androidx.compose.ui.graphics.Color.Unspecified)
                             }
-                            IconButton(onClick = { draft = content?.text ?: ""; editing = true }) { Icon(Icons.Outlined.Edit, "Edit") }
+                            IconButton(onClick = { draft = baseText; editing = true }) { Icon(Icons.Outlined.Edit, "Edit") }
                         }
                     }
                     if (stat != null && !editing) {
@@ -236,10 +244,10 @@ fun FileScreen(path: String, startEditing: Boolean) {
                                 menu = false; scope.launch { runCatching { FileTransfer.openWith(ctx, conn, path) }.onFailure { snack.showSnackbar("${it.message}") } }
                             })
                             DropdownMenuItem(text = { Text("Ask an agent about this file") }, leadingIcon = { Icon(Icons.AutoMirrored.Outlined.Chat, null) }, onClick = {
-                                menu = false; nav.navigate(Routes.newSession(path.substringBeforeLast('/'), "@$name "))
+                                menu = false; nav.navigate(Routes.newSession(path.substringBeforeLast('/'), "@$name ", host = hostId))
                             })
                             DropdownMenuItem(text = { Text("Open folder") }, leadingIcon = { Icon(Icons.Outlined.FolderOpen, null) }, onClick = {
-                                menu = false; nav.navigate(Routes.files(path.substringBeforeLast('/')))
+                                menu = false; nav.navigate(Routes.files(path.substringBeforeLast('/'), host = hostId))
                             })
                             DropdownMenuItem(text = { Text("Copy path") }, leadingIcon = { Icon(Icons.Outlined.Link, null) }, onClick = { menu = false; ctx.copyText(path) })
                             DropdownMenuItem(text = { Text("Rename") }, leadingIcon = { Icon(Icons.Outlined.DriveFileRenameOutline, null) }, onClick = { menu = false; renaming = true })
@@ -311,21 +319,38 @@ fun FileScreen(path: String, startEditing: Boolean) {
         TextPromptDialog("Rename", name, "New name", "Rename", onDismiss = { renaming = false }) { n ->
             scope.launch {
                 runCatching { conn.rpc.call("fs.rename", params { put("from", path); put("to", path.substringBeforeLast('/') + "/" + n) }) }
-                    .onSuccess { nav.popBackStack(); nav.navigate(Routes.file(path.substringBeforeLast('/') + "/" + n)) }
+                    .onSuccess { nav.popBackStack(); nav.navigate(Routes.file(path.substringBeforeLast('/') + "/" + n, host = hostId)) }
                     .onFailure { snack.showSnackbar("Rename failed: ${it.message}") }
             }
         }
     }
     if (deleting) {
-        ConfirmDialog("Delete $name?", "Moves the file to the trash on ${conn.config.label} (or deletes it permanently where there's no trash).", "Delete", destructive = true,
+        ConfirmDialog("Move $name to trash?", shortPath(path, home), "Move to trash", destructive = true,
             onDismiss = { deleting = false }) {
+            deleting = false
             scope.launch {
                 val arr = JsonArray(listOf(JsonPrimitive(path)))
-                val r = runCatching { conn.rpc.call("fs.delete", params { put("paths", arr) }) }
-                if (r.exceptionOrNull()?.message?.contains("TRASH_UNSUPPORTED") == true) {
-                    runCatching { conn.rpc.call("fs.delete", params { put("paths", arr); put("permanent", true) }) }
-                }
-                nav.popBackStack()
+                runCatching { conn.rpc.call("fs.delete", params { put("paths", arr) }) }
+                    .onSuccess { nav.popBackStack() }
+                    .onFailure { e ->
+                        if (e.message?.contains("TRASH_UNSUPPORTED") == true) {
+                            permDeleting = true
+                        } else {
+                            snack.showSnackbar("Delete failed: ${e.message}")
+                        }
+                    }
+            }
+        }
+    }
+    if (permDeleting) {
+        ConfirmDialog("Delete permanently?", "The trash isn't available for this location on ${conn.config.label}. Delete $name permanently?", "Delete", destructive = true,
+            onDismiss = { permDeleting = false }) {
+            permDeleting = false
+            scope.launch {
+                val arr = JsonArray(listOf(JsonPrimitive(path)))
+                runCatching { conn.rpc.call("fs.delete", params { put("paths", arr); put("permanent", true) }) }
+                    .onSuccess { nav.popBackStack() }
+                    .onFailure { e -> snack.showSnackbar("Delete failed: ${e.message}") }
             }
         }
     }
@@ -490,3 +515,5 @@ private fun BinaryInfo(
         }
     }
 }
+
+fun ReadResult.editableTextOrNull(): String? = if (binary) null else (text ?: "")

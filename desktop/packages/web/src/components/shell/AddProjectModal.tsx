@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { Folder, FolderGit2, FolderPlus, GitBranch, Globe, Loader2, X } from 'lucide-react';
 import type { FsEntry, Project } from '@agentc/protocol';
 import { useApp } from '../../state/appStore.js';
@@ -11,6 +11,8 @@ export const AddProjectModal: React.FC = () => {
     setAddProjectModalOpen,
     hostList,
     activeHostId,
+    viewMode,
+    draft,
     callHost,
     openDraft,
     pushToast,
@@ -19,6 +21,7 @@ export const AddProjectModal: React.FC = () => {
   const [mode, setMode] = useState<Mode>('local');
   const [hostId, setHostId] = useState('');
   const [folderPath, setFolderPath] = useState('');
+  const [resolvedParent, setResolvedParent] = useState('');
   const [entries, setEntries] = useState<FsEntry[]>([]);
   const [projectName, setProjectName] = useState('');
   const [cloneUrl, setCloneUrl] = useState('');
@@ -26,27 +29,52 @@ export const AddProjectModal: React.FC = () => {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
 
+  // Initialize modal state ONLY on false -> true transition so background host events never wipe user input
+  const wasOpenRef = useRef(false);
   useEffect(() => {
-    if (!addProjectModalOpen) return;
-    const hId = activeHostId || hostList[0]?.creds.id || '';
+    if (!addProjectModalOpen) {
+      wasOpenRef.current = false;
+      return;
+    }
+    if (wasOpenRef.current) return;
+    wasOpenRef.current = true;
+
+    const hId =
+      (viewMode === 'draft' && draft.hostId ? draft.hostId : activeHostId) ||
+      activeHostId ||
+      hostList[0]?.creds.id ||
+      '';
     setHostId(hId);
-    const home = hostList.find((h) => h.creds.id === hId)?.info?.home || '';
+    const home = hostList.find((h) => h.creds.id === hId)?.info?.home || '~';
     setFolderPath(home);
     setParentDir(home);
+    setResolvedParent('');
+    setProjectName('');
+    setCloneUrl('');
     setError('');
-  }, [addProjectModalOpen, activeHostId, hostList]);
+  }, [addProjectModalOpen, viewMode, draft.hostId, activeHostId, hostList]);
 
   useEffect(() => {
     if (!addProjectModalOpen || mode !== 'local' || !hostId || !folderPath) return;
     let cancelled = false;
-    void callHost<{ entries: FsEntry[] }>(hostId, 'fs.list', { path: folderPath, hidden: false })
+    void callHost<{ path?: string; parent?: string; entries: FsEntry[] }>(hostId, 'fs.list', {
+      path: folderPath,
+      hidden: false,
+    })
       .then((res) => {
-        if (!cancelled) {
-          setEntries((res?.entries ?? []).filter((e) => e.type === 'dir' || e.targetType === 'dir'));
+        if (cancelled) return;
+        if (folderPath === '~' && res?.path) {
+          setFolderPath(res.path);
+          setParentDir((prev) => (prev === '~' || !prev ? res.path! : prev));
         }
+        setResolvedParent(res?.parent || '');
+        setEntries((res?.entries ?? []).filter((e) => e.type === 'dir' || e.targetType === 'dir'));
       })
       .catch(() => {
-        if (!cancelled) setEntries([]);
+        if (!cancelled) {
+          setEntries([]);
+          setResolvedParent('');
+        }
       });
     return () => {
       cancelled = true;
@@ -140,13 +168,15 @@ export const AddProjectModal: React.FC = () => {
             <div>
               <label className="block text-xs text-[var(--text-secondary)] mb-1">Host</label>
               <select
+                data-testid="add-project-host-select"
                 value={hostId}
                 onChange={(e) => {
                   const id = e.target.value;
                   setHostId(id);
-                  const home = hostList.find((h) => h.creds.id === id)?.info?.home || '';
+                  const home = hostList.find((h) => h.creds.id === id)?.info?.home || '~';
                   setFolderPath(home);
                   setParentDir(home);
+                  setResolvedParent('');
                 }}
                 className="w-full px-3 py-2 text-xs rounded-lg bg-[var(--bg-base)] border border-[var(--border)] text-[var(--text-primary)]"
               >
@@ -172,12 +202,15 @@ export const AddProjectModal: React.FC = () => {
                   className="w-full px-3 py-2 text-xs font-mono rounded-lg bg-[var(--bg-base)] border border-[var(--border)] text-[var(--text-primary)] focus:outline-none focus:border-[var(--accent)]"
                 />
               </div>
-              {entries.length > 0 && (
+              {(entries.length > 0 || (resolvedParent && folderPath !== '/')) && (
                 <div className="max-h-44 overflow-y-auto rounded-lg border border-[var(--border)] bg-[var(--bg-base)] divide-y divide-[var(--border)]">
                   {folderPath !== '/' && (
                     <button
                       type="button"
-                      onClick={() => setFolderPath(folderPath.replace(/\/[^/]+\/?$/, '') || '/')}
+                      data-testid="add-project-parent-btn"
+                      onClick={() =>
+                        setFolderPath(resolvedParent || folderPath.replace(/\/[^/]+\/?$/, '') || '/')
+                      }
                       className="w-full text-left px-3 py-1.5 text-xs text-[var(--text-muted)] hover:bg-[var(--bg-hover)] cursor-pointer font-mono"
                     >
                       ..

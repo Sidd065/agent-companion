@@ -24,6 +24,7 @@ import kotlinx.coroutines.withContext
 import java.io.File
 import java.io.IOException
 import java.io.OutputStream
+import java.security.MessageDigest
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicLong
 
@@ -123,9 +124,20 @@ object FileTransfer {
         target
     }
 
-    /** Downloads a host file into the app cache (for sharing / opening). */
+    internal fun cachePathHash(path: String): String =
+        MessageDigest.getInstance("SHA-256")
+            .digest(path.toByteArray(Charsets.UTF_8))
+            .take(6)
+            .joinToString("") { "%02x".format(it) }
+
+    /**
+     * Downloads a host file into the app cache (for sharing / opening), namespaced by host ID
+     * and a 12-hex-char SHA-256 hash of [path] so same-named files in different folders never collide.
+     */
     suspend fun toCache(ctx: Context, conn: HostConnection, path: String, onProgress: (Long, Long) -> Unit = { _, _ -> }): File = withContext(Dispatchers.IO) {
-        val dir = File(ctx.cacheDir, "shared").apply { mkdirs() }
+        val safeHost = sanitizeFileName(conn.config.id)
+        val pathHash12 = cachePathHash(path)
+        val dir = File(File(File(ctx.cacheDir, "shared"), safeHost), pathHash12).apply { mkdirs() }
         val out = File(dir, sanitizeFileName(path))
         out.outputStream().use { o -> conn.download(path, o, onProgress) }
         out
@@ -381,6 +393,9 @@ object FileTransfer {
 
     fun cancelDownload(id: Long) {
         jobs.remove(id)?.cancel()
+        updateTask(id) {
+            if (it.status == DownloadStatus.Running) it.copy(status = DownloadStatus.Cancelled, error = null) else it
+        }
     }
 
     fun dismissDownload(id: Long) {

@@ -15,8 +15,8 @@ import (
 	"time"
 
 	"agentc/internal/acp"
-	"agentc/internal/agyproc"
 	"agentc/internal/acpproc"
+	"agentc/internal/agyproc"
 	"agentc/internal/checkpoints"
 	"agentc/internal/claude"
 	"agentc/internal/codex"
@@ -25,44 +25,51 @@ import (
 
 // SessionMeta is the persisted, client-visible state of a session.
 type SessionMeta struct {
-	ID            string             `json:"id"`
-	Agent         string             `json:"agent,omitempty"` // agy (claude, codex planned)
-	Cwd           string             `json:"cwd"`
-	AddDirs       []string           `json:"addDirs,omitempty"`
-	SkipPerms     bool               `json:"skipPermissions"`
-	Sandbox       bool               `json:"sandbox,omitempty"`
-	AgentName     string             `json:"agentName,omitempty"`
-	NoTelemetry   bool               `json:"disableTelemetry,omitempty"`
-	ExtraArgs     []string           `json:"extraArgs,omitempty"`
-	Title         string             `json:"title"`
-	TitleLocked   bool               `json:"titleLocked,omitempty"`
-	CreatedAt     int64              `json:"createdAt"`
-	UpdatedAt     int64              `json:"updatedAt"`
-	Models        *acp.Models        `json:"models,omitempty"`
-	Modes         *acp.Modes         `json:"modes,omitempty"`
-	ConfigOptions []acp.ConfigOption `json:"configOptions,omitempty"`
-	Commands      []acp.Command      `json:"commands,omitempty"`
-	WantModel     string             `json:"wantModel,omitempty"`
-	WantMode      string             `json:"wantMode,omitempty"`
-	WantThought   string             `json:"wantThought,omitempty"`
-	ContextUsed   int64              `json:"contextUsed"`
-	ContextSize   int64              `json:"contextSize"`
-	Usage         acp.Usage          `json:"usage"`
-	Turns         int                `json:"turns"`
-	ForkedFrom    string             `json:"forkedFrom,omitempty"`
-	Origin        string             `json:"origin,omitempty"`
-	Attention     string             `json:"attention,omitempty"`
-	LastText      string             `json:"lastText,omitempty"`
-	LastError     string             `json:"lastError,omitempty"`
-	Queue         []QueuedPrompt     `json:"queue,omitempty"`
-	Archived      bool               `json:"archived,omitempty"`
-	Pinned        bool               `json:"pinned,omitempty"`
-	NeedsReload   bool               `json:"needsReload,omitempty"`
+	ID             string             `json:"id"`
+	Agent          string             `json:"agent,omitempty"` // agy (claude, codex planned)
+	Cwd            string             `json:"cwd"`
+	AddDirs        []string           `json:"addDirs,omitempty"`
+	SkipPerms      bool               `json:"skipPermissions"`
+	Sandbox        bool               `json:"sandbox,omitempty"`
+	SandboxMode    string             `json:"sandboxMode,omitempty"`
+	ApprovalPolicy string             `json:"approvalPolicy,omitempty"`
+	Provider       string             `json:"provider,omitempty"`
+	AgentName      string             `json:"agentName,omitempty"`
+	NoTelemetry    bool               `json:"disableTelemetry,omitempty"`
+	ExtraArgs      []string           `json:"extraArgs,omitempty"`
+	Title          string             `json:"title"`
+	TitleLocked    bool               `json:"titleLocked,omitempty"`
+	CreatedAt      int64              `json:"createdAt"`
+	UpdatedAt      int64              `json:"updatedAt"`
+	Models         *acp.Models        `json:"models,omitempty"`
+	Modes          *acp.Modes         `json:"modes,omitempty"`
+	ConfigOptions  []acp.ConfigOption `json:"configOptions,omitempty"`
+	Commands       []acp.Command      `json:"commands,omitempty"`
+	WantModel      string             `json:"wantModel,omitempty"`
+	WantMode       string             `json:"wantMode,omitempty"`
+	WantThought    string             `json:"wantThought,omitempty"`
+	ContextUsed    int64              `json:"contextUsed"`
+	ContextSize    int64              `json:"contextSize"`
+	Usage          acp.Usage          `json:"usage"`
+	Turns          int                `json:"turns"`
+	ForkedFrom     string             `json:"forkedFrom,omitempty"`
+	Origin         string             `json:"origin,omitempty"`
+	Attention      string             `json:"attention,omitempty"`
+	LastText       string             `json:"lastText,omitempty"`
+	LastError      string             `json:"lastError,omitempty"`
+	Queue          []QueuedPrompt     `json:"queue,omitempty"`
+	Archived       bool               `json:"archived,omitempty"`
+	Pinned         bool               `json:"pinned,omitempty"`
+	NeedsReload    bool               `json:"needsReload,omitempty"`
 	// Claude Code: resume at this entry next time (set by a rewind) and the
 	// parent of a fork whose transcript Claude hasn't written yet.
-	ResumeAt string         `json:"resumeAt,omitempty"`
-	ForkOf   string         `json:"forkOf,omitempty"`
-	Info     map[string]any `json:"info,omitempty"` // agent details (Claude: plan, version, output style)
+	ResumeAt string `json:"resumeAt,omitempty"`
+	ForkOf   string `json:"forkOf,omitempty"`
+	// Codex app-server backing rollout UUID ("-" when unmaterialized; "" defaults to ID)
+	// and portable context handoff seed for unmaterialized synthetic forks.
+	CodexThreadID string         `json:"codexThreadId,omitempty"`
+	SeedHandoff   string         `json:"seedHandoff,omitempty"`
+	Info          map[string]any `json:"info,omitempty"` // agent details (Claude: plan, version, output style)
 	// Asides are side questions (/btw) asked about the conversation; kept
 	// here, not in the transcript, because they aren't part of it.
 	Asides []Aside `json:"asides,omitempty"`
@@ -89,37 +96,37 @@ type QueuedPrompt struct {
 
 // Summary is the list-row view of a session.
 type Summary struct {
-	ID          string    `json:"id"`
-	Agent       string    `json:"agent"`
-	Title       string    `json:"title"`
-	Cwd         string    `json:"cwd"`
-	State       string    `json:"state"`
-	Live        bool      `json:"live"`
-	Known       bool      `json:"known"`
-	Attention   string    `json:"attention,omitempty"`
-	Pending     int       `json:"pendingPermissions"`
-	Queued      int       `json:"queued"`
-	Model       string    `json:"model,omitempty"`
-	ModelName   string    `json:"modelName,omitempty"`
-	Mode        string    `json:"mode,omitempty"`
-	Thought     string    `json:"thought,omitempty"`
-	SkipPerms   bool      `json:"skipPermissions"`
-	CreatedAt   int64     `json:"createdAt"`
-	UpdatedAt   int64     `json:"updatedAt"`
-	LastText    string    `json:"lastText,omitempty"`
-	ContextUsed int64     `json:"contextUsed"`
-	ContextSize int64     `json:"contextSize"`
-	Usage       acp.Usage `json:"usage"`
-	Turns       int       `json:"turns"`
-	Archived    bool      `json:"archived"`
-	Pinned      bool      `json:"pinned"`
-	ForkedFrom  string    `json:"forkedFrom,omitempty"`
-	Origin      string    `json:"origin,omitempty"`
-	Error       string    `json:"error,omitempty"`
-	Pid         int       `json:"pid,omitempty"`
-	RSSKiB      int64     `json:"rssKiB,omitempty"`
-	Status      string    `json:"status,omitempty"`     // transient agent status (e.g. compacting)
-	Suggestion  string    `json:"suggestion,omitempty"` // predicted next prompt (Claude)
+	ID             string                      `json:"id"`
+	Agent          string                      `json:"agent"`
+	Title          string                      `json:"title"`
+	Cwd            string                      `json:"cwd"`
+	State          string                      `json:"state"`
+	Live           bool                        `json:"live"`
+	Known          bool                        `json:"known"`
+	Attention      string                      `json:"attention,omitempty"`
+	Pending        int                         `json:"pendingPermissions"`
+	Queued         int                         `json:"queued"`
+	Model          string                      `json:"model,omitempty"`
+	ModelName      string                      `json:"modelName,omitempty"`
+	Mode           string                      `json:"mode,omitempty"`
+	Thought        string                      `json:"thought,omitempty"`
+	SkipPerms      bool                        `json:"skipPermissions"`
+	CreatedAt      int64                       `json:"createdAt"`
+	UpdatedAt      int64                       `json:"updatedAt"`
+	LastText       string                      `json:"lastText,omitempty"`
+	ContextUsed    int64                       `json:"contextUsed"`
+	ContextSize    int64                       `json:"contextSize"`
+	Usage          acp.Usage                   `json:"usage"`
+	Turns          int                         `json:"turns"`
+	Archived       bool                        `json:"archived"`
+	Pinned         bool                        `json:"pinned"`
+	ForkedFrom     string                      `json:"forkedFrom,omitempty"`
+	Origin         string                      `json:"origin,omitempty"`
+	Error          string                      `json:"error,omitempty"`
+	Pid            int                         `json:"pid,omitempty"`
+	RSSKiB         int64                       `json:"rssKiB,omitempty"`
+	Status         string                      `json:"status,omitempty"`     // transient agent status (e.g. compacting)
+	Suggestion     string                      `json:"suggestion,omitempty"` // predicted next prompt (Claude)
 	LiveElse       string                      `json:"liveElsewhere,omitempty"`
 	TurnStart      int64                       `json:"turnStart,omitempty"` // when the running turn began (ms)
 	ProjectID      string                      `json:"projectId,omitempty"`
@@ -135,14 +142,14 @@ type Summary struct {
 // Detail is the full view sent when a client opens a session.
 type Detail struct {
 	Summary
-	AddDirs       []string           `json:"addDirs,omitempty"`
-	Sandbox       bool               `json:"sandbox,omitempty"`
-	AgentName     string             `json:"agentName,omitempty"`
-	ExtraArgs     []string           `json:"extraArgs,omitempty"`
-	Models        *acp.Models        `json:"models,omitempty"`
-	Modes         *acp.Modes         `json:"modes,omitempty"`
-	ConfigOptions []acp.ConfigOption `json:"configOptions,omitempty"`
-	Commands      []acp.Command      `json:"commands,omitempty"`
+	AddDirs       []string                     `json:"addDirs,omitempty"`
+	Sandbox       bool                         `json:"sandbox,omitempty"`
+	AgentName     string                       `json:"agentName,omitempty"`
+	ExtraArgs     []string                     `json:"extraArgs,omitempty"`
+	Models        *acp.Models                  `json:"models,omitempty"`
+	Modes         *acp.Modes                   `json:"modes,omitempty"`
+	ConfigOptions []acp.ConfigOption           `json:"configOptions,omitempty"`
+	Commands      []acp.Command                `json:"commands,omitempty"`
 	Info          map[string]any               `json:"info,omitempty"`
 	ResumeAt      string                       `json:"resumeAt,omitempty"`
 	Checkpoints   []checkpoints.TurnCheckpoint `json:"checkpoints,omitempty"`
@@ -171,6 +178,7 @@ type agentProc interface {
 // Session is one agy conversation managed by the daemon.
 type Session struct {
 	m            *Manager
+	emitMu       sync.Mutex // serializes flush/emit/Subscribe; lock order: emitMu -> mu -> h.mu -> c.mu
 	mu           sync.Mutex
 	meta         SessionMeta
 	tr           *Transcript
@@ -305,6 +313,19 @@ func (s *Session) detailLocked() Detail {
 
 // ---- op streaming ----
 
+func (s *Session) stopTimers() {
+	s.mu.Lock()
+	if s.flushTimer != nil {
+		s.flushTimer.Stop()
+		s.flushTimer = nil
+	}
+	if s.saveTimer != nil {
+		s.saveTimer.Stop()
+		s.saveTimer = nil
+	}
+	s.mu.Unlock()
+}
+
 func (s *Session) queueOpsLocked(ops ...Op) {
 	for _, op := range ops {
 		if op.Op == "" {
@@ -312,20 +333,31 @@ func (s *Session) queueOpsLocked(ops ...Op) {
 		}
 		s.pendingOps = append(s.pendingOps, op)
 	}
-	if len(s.pendingOps) > 0 && s.flushTimer == nil {
+	if len(s.pendingOps) > 0 && s.flushTimer == nil && !s.removed && s.m != nil && !s.m.isStopped() {
 		s.flushTimer = time.AfterFunc(60*time.Millisecond, s.flush)
 	}
 	s.scheduleSaveLocked()
 }
 
 func (s *Session) flush() {
+	s.emitMu.Lock()
+	defer s.emitMu.Unlock()
+	s.flushLockedEmit()
+}
+
+// flushLockedEmit requires s.emitMu held and s.mu NOT held.
+func (s *Session) flushLockedEmit() {
 	s.mu.Lock()
 	ops := s.pendingOps
 	s.pendingOps = nil
-	s.flushTimer = nil
+	if s.flushTimer != nil {
+		s.flushTimer.Stop()
+		s.flushTimer = nil
+	}
 	id := s.meta.ID
+	removed := s.removed
 	s.mu.Unlock()
-	if len(ops) == 0 {
+	if len(ops) == 0 || removed || s.m == nil || s.m.isStopped() || s.m.hub == nil {
 		return
 	}
 	s.m.hub.ToSubscribers(id, "session.ops", map[string]any{"id": id, "ops": TransportOps(coalesce(ops))})
@@ -355,6 +387,8 @@ func (s *Session) Subscribe(c *Client, since int64) {
 			log.Printf("session %s: refresh: %v", s.ID(), err)
 		}
 	}
+	s.emitMu.Lock()
+	defer s.emitMu.Unlock()
 	s.mu.Lock()
 	// Deliver anything already pending to existing subscribers first.
 	pending := s.pendingOps
@@ -364,7 +398,7 @@ func (s *Session) Subscribe(c *Client, since int64) {
 		s.flushTimer = nil
 	}
 	id := s.meta.ID
-	if len(pending) > 0 {
+	if len(pending) > 0 && !s.removed && s.m != nil && !s.m.isStopped() && s.m.hub != nil {
 		s.m.hub.ToSubscribers(id, "session.ops", map[string]any{"id": id, "ops": TransportOps(coalesce(pending))})
 	}
 	c.Subscribe(id, true)
@@ -391,13 +425,17 @@ func (s *Session) FullItem(id string) *Item {
 }
 
 func (s *Session) scheduleSaveLocked() {
-	if s.saveTimer != nil || s.removed {
+	if s.saveTimer != nil || s.removed || s.m == nil || s.m.isStopped() {
 		return
 	}
 	s.saveTimer = time.AfterFunc(1500*time.Millisecond, func() {
 		s.mu.Lock()
 		s.saveTimer = nil
+		removed := s.removed
 		s.mu.Unlock()
+		if removed || s.m == nil || s.m.isStopped() {
+			return
+		}
 		s.m.saveSession(s)
 	})
 }
@@ -405,7 +443,9 @@ func (s *Session) scheduleSaveLocked() {
 // emit flushes pending transcript ops, then broadcasts the summary, so clients
 // always see the transcript before the state change it explains.
 func (s *Session) emit() {
-	s.flush()
+	s.emitMu.Lock()
+	defer s.emitMu.Unlock()
+	s.flushLockedEmit()
 	s.m.emitSummary(s)
 }
 
@@ -505,7 +545,7 @@ func (s *Session) onUpdate(raw json.RawMessage) {
 			s.meta.Modes.CurrentModeID = u.CurrentModeID
 			// Keep the mode a restarted process gets in step with changes the
 			// agent made itself (e.g. leaving plan mode after approval).
-			if s.meta.WantMode != "" || s.isClaude() {
+			if s.meta.WantMode != "" || s.isClaude() || s.isCodex() {
 				s.meta.WantMode = u.CurrentModeID
 			}
 			s.configChangedLocked()
@@ -585,6 +625,7 @@ func (s *Session) syncFromConfigLocked() {
 			return
 		}
 	}
+	s.ensureAvailableModelLocked(base)
 }
 
 func (s *Session) configChangedLocked() {
@@ -885,9 +926,18 @@ func (s *Session) start(ctx context.Context, mode string) error {
 	isClaude := s.isClaude()
 	isAgy := s.isAgy()
 	isCodex := s.isCodex()
+	isGenericACP := !isClaude && !isAgy && !isCodex
 	agentID := firstNonEmpty(s.meta.Agent, "agy")
 	wantModel, wantMode, wantThought := s.meta.WantModel, s.meta.WantMode, s.meta.WantThought
 	resumeAt, forkOf := s.meta.ResumeAt, s.meta.ForkOf
+	codexTID := ""
+	if isCodex || isGenericACP {
+		codexTID = s.codexThreadIDLocked()
+		if codexTID == "" {
+			mode = "new"
+			s.meta.NeedsReload = false
+		}
+	}
 	s.mu.Unlock()
 	if st, err := os.Stat(cwd); err != nil || !st.IsDir() {
 		return fmt.Errorf("working directory %q is not available", cwd)
@@ -944,19 +994,11 @@ func (s *Session) start(ctx context.Context, mode string) error {
 		}
 		p = ap
 	case isCodex:
-		bin := "codex"
-		env := s.m.agyEnv()
-		if ov, ok := s.m.providerConfig("codex"); ok {
-			if ov.Command != "" {
-				bin = ov.Command
-			}
-			env = providers.MergeEnv(env, ov.Env)
+		cp, err := s.m.startCodexAgent(s)
+		if err != nil {
+			return err
 		}
-		p = codex.Start(codex.Options{
-			Bin: bin, Env: env, Cwd: cwd, SkipPermissions: skip,
-			Model: wantModel, Effort: wantThought, Mode: wantMode, ExtraArgs: extra,
-			Handler: procHandler{s: s},
-		})
+		p = cp
 	default:
 		pc, ok := s.m.providerConfig(agentID)
 		if !ok || pc.Command == "" {
@@ -979,6 +1021,10 @@ func (s *Session) start(ctx context.Context, mode string) error {
 	defer cancel()
 	var setup acp.SessionSetup
 	var err error
+	remoteID := id
+	if isCodex || isGenericACP {
+		remoteID = codexTID
+	}
 	switch mode {
 	case "new":
 		params := map[string]any{"cwd": cwd, "mcpServers": []any{}}
@@ -987,7 +1033,7 @@ func (s *Session) start(ctx context.Context, mode string) error {
 		}
 		err = conn.Call(cctx, "session/new", params, &setup)
 	case "resume":
-		err = conn.Call(cctx, "session/resume", map[string]any{"sessionId": id, "cwd": cwd, "mcpServers": []any{}}, &setup)
+		err = conn.Call(cctx, "session/resume", map[string]any{"sessionId": remoteID, "cwd": cwd, "mcpServers": []any{}}, &setup)
 		if err != nil && !isClaude {
 			log.Printf("session %s: resume failed (%v); loading with replay", id, err)
 			mode = "load"
@@ -1004,7 +1050,7 @@ func (s *Session) start(ctx context.Context, mode string) error {
 		s.queueOpsLocked(s.tr.Reset())
 		s.mu.Unlock()
 		setup = acp.SessionSetup{}
-		err = conn.Call(cctx, "session/load", map[string]any{"sessionId": id, "cwd": cwd, "mcpServers": []any{}}, &setup)
+		err = conn.Call(cctx, "session/load", map[string]any{"sessionId": remoteID, "cwd": cwd, "mcpServers": []any{}}, &setup)
 		s.mu.Lock()
 		for _, it := range keep {
 			s.queueOpsLocked(s.tr.add(it))
@@ -1017,11 +1063,20 @@ func (s *Session) start(ctx context.Context, mode string) error {
 		return fmt.Errorf("%s session/%s: %w", agentID, mode, err)
 	}
 	if setup.SessionID == "" {
-		setup.SessionID = id
+		if (isCodex || isGenericACP) && codexTID != "" {
+			setup.SessionID = codexTID
+		} else {
+			setup.SessionID = id
+		}
 	}
+	codexThreadChanged := false
 	s.mu.Lock()
 	if s.meta.ID == "" {
 		s.meta.ID = setup.SessionID
+	}
+	if (isCodex || isGenericACP) && setup.SessionID != "" && s.meta.CodexThreadID != setup.SessionID {
+		s.meta.CodexThreadID = setup.SessionID
+		codexThreadChanged = true
 	}
 	if setup.Models != nil {
 		s.meta.Models = setup.Models
@@ -1029,12 +1084,19 @@ func (s *Session) start(ctx context.Context, mode string) error {
 	if setup.Modes != nil {
 		s.meta.Modes = setup.Modes
 	}
-	if len(setup.ConfigOptions) > 0 || isClaude {
+	if len(setup.ConfigOptions) > 0 || isClaude || isCodex {
 		s.meta.ConfigOptions = setup.ConfigOptions
 	}
 	s.proc = p
 	s.lastActivity = time.Now()
+	savedID := s.meta.ID
 	s.mu.Unlock()
+	if codexThreadChanged && s.m != nil {
+		s.m.invalidateHistory()
+		if savedID != "" {
+			s.m.saveSession(s)
+		}
+	}
 	go s.watchProc(p)
 	if ap, ok := p.(*agyproc.Proc); ok {
 		go s.watchAgyState(ap)
@@ -1062,6 +1124,9 @@ func (s *Session) applyConfig(ctx context.Context, model, thought, mode string) 
 	// The phone's saved flags use the CLI's vocabulary (--effort low…max,
 	// --mode accept-edits|auto|plan); fit them to what this ACP session offers.
 	s.mu.Lock()
+	if s.isCodex() && mode != "" {
+		mode = codex.NormalizeModeID(mode, s.meta.SkipPerms)
+	}
 	thought = fitThought(s.meta.ConfigOptions, thought)
 	if mode != "" && s.meta.Modes != nil && len(s.meta.Modes.AvailableModes) > 0 {
 		ok := false
@@ -1173,7 +1238,9 @@ func (s *Session) Hibernate() {
 	perms := s.cancelPermsLocked()
 	s.mu.Unlock()
 	replyCancelled(perms)
-	_ = p.ACP().Notify("session/cancel", map[string]any{"sessionId": s.ID()})
+	if ac := p.ACP(); ac != nil {
+		_ = ac.Notify("session/cancel", map[string]any{"sessionId": s.ID()})
+	}
 	p.Close(20 * time.Second)
 	s.emit()
 	s.m.saveSession(s)
@@ -1332,6 +1399,15 @@ func (s *Session) runPrompt(itemID, ref string, blocks []acp.ContentBlock) {
 		p := s.proc
 		id := s.meta.ID
 		label := s.agentLabelLocked()
+		sendBlocks := blocks
+		if s.meta.SeedHandoff != "" && s.inflight <= 1 {
+			sendBlocks = make([]acp.ContentBlock, 0, len(blocks)+1)
+			sendBlocks = append(sendBlocks, acp.ContentBlock{
+				Type: "text",
+				Text: s.meta.SeedHandoff + "\n---\n\n",
+			})
+			sendBlocks = append(sendBlocks, blocks...)
+		}
 		if it := s.tr.Get(itemID); it != nil && it.Text != "" {
 			s.maybeHeuristicTitleLocked(it.Text)
 		}
@@ -1339,7 +1415,7 @@ func (s *Session) runPrompt(itemID, ref string, blocks []acp.ContentBlock) {
 		if p == nil {
 			err = errors.New(label + " is not running")
 		} else {
-			params := map[string]any{"sessionId": id, "prompt": blocks}
+			params := map[string]any{"sessionId": id, "prompt": sendBlocks}
 			if ref != "" {
 				params["_meta"] = map[string]any{"agentc": map[string]any{"itemId": itemID, "uuid": ref}}
 			}
@@ -1355,10 +1431,6 @@ func (s *Session) finishPrompt(itemID string, res *acp.PromptResult, err error) 
 
 func (s *Session) finishPromptWithCheckpoint(itemID string, res *acp.PromptResult, err error, preRef, preSHA string) {
 	s.mu.Lock()
-	s.inflight--
-	if s.inflight < 0 {
-		s.inflight = 0
-	}
 	if it := s.tr.Get(itemID); it != nil && (it.State == "sent" || it.State == "delivered") {
 		st := ""
 		if err != nil {
@@ -1378,6 +1450,8 @@ func (s *Session) finishPromptWithCheckpoint(itemID string, res *acp.PromptResul
 		s.queueOpsLocked(s.tr.AddNotice("error", msg))
 		s.meta.LastError = msg
 		notifyKind, notifyBody = "error", msg
+	} else if res != nil && res.StopReason == "steered" {
+		// Mid-turn steer was injected into the active turn; primary turn owns Turns++ and checkpoints.
 	} else {
 		s.meta.Turns++
 		if res.Usage != nil {
@@ -1396,8 +1470,11 @@ func (s *Session) finishPromptWithCheckpoint(itemID string, res *acp.PromptResul
 				go s.autoTitle(s.firstUserTextLocked())
 			}
 		}
+		if s.meta.SeedHandoff != "" && res != nil && res.StopReason != "cancelled" {
+			s.meta.SeedHandoff = ""
+		}
 		turnNum := s.meta.Turns
-		if s.inflight == 0 {
+		if s.inflight <= 1 {
 			var cp *checkpoints.TurnCheckpoint
 			if preRef != "" {
 				s.mu.Unlock()
@@ -1409,6 +1486,10 @@ func (s *Session) finishPromptWithCheckpoint(itemID string, res *acp.PromptResul
 			}
 			s.queueOpsLocked(s.tr.AddTurn(&Turn{TurnIndex: turnNum, StopReason: res.StopReason, Usage: res.Usage, DurationMs: dur, Checkpoint: cp}))
 		}
+	}
+	s.inflight--
+	if s.inflight < 0 {
+		s.inflight = 0
 	}
 	var next *QueuedPrompt
 	if s.inflight == 0 {
@@ -1610,80 +1691,162 @@ func resolveModel(models *acp.Models, want string) (string, bool) {
 	return "", false
 }
 
+func hasConfigOption(opts []acp.ConfigOption, id string) bool {
+	for _, o := range opts {
+		if o.ID == id {
+			return true
+		}
+	}
+	return false
+}
+
+func hasConfigOptionValue(opts []acp.ConfigOption, id, val string) bool {
+	for _, o := range opts {
+		if o.ID == id {
+			for _, v := range o.Options {
+				if v.Value == val {
+					return true
+				}
+			}
+		}
+	}
+	return false
+}
+
+func (s *Session) ensureAvailableModelLocked(modelID string) {
+	modelID = strings.TrimSpace(modelID)
+	if modelID == "" {
+		return
+	}
+	if s.meta.Models == nil {
+		s.meta.Models = &acp.Models{}
+	}
+	s.meta.Models.CurrentModelID = modelID
+	for _, m := range s.meta.Models.AvailableModels {
+		if m.ModelID == modelID {
+			return
+		}
+	}
+	s.meta.Models.AvailableModels = append(s.meta.Models.AvailableModels, acp.Model{
+		ModelID: modelID,
+		Name:    modelID,
+	})
+}
+
 func (s *Session) setModel(ctx context.Context, want string) error {
+	want = strings.TrimSpace(want)
+	if want == "" {
+		return nil
+	}
 	conn, id := s.liveConn()
 	s.mu.Lock()
-	s.meta.WantModel = want
 	models := s.meta.Models
-	if conn == nil {
-		// Not running: remember it (applied on wake) and show it now.
-		if mid, ok := resolveModel(models, want); ok {
-			s.meta.Models.CurrentModelID = mid
-			for i, o := range s.meta.ConfigOptions {
-				if o.ID == "thought_level" {
-					for _, v := range o.Options {
-						if strings.HasSuffix(mid, "-"+v.Value) {
-							s.meta.ConfigOptions[i].CurrentValue = v.Value
-							s.meta.WantThought = v.Value
+	mid, matched := resolveModel(models, want)
+	isBaseOpt := !matched && hasConfigOptionValue(s.meta.ConfigOptions, "model", want)
+	hasModelCfgOpt := hasConfigOption(s.meta.ConfigOptions, "model")
+	if !isBaseOpt {
+		if !matched {
+			mid = want
+		}
+		if conn == nil {
+			s.meta.WantModel = mid
+			s.ensureAvailableModelLocked(mid)
+			if hasModelCfgOpt {
+				for i, o := range s.meta.ConfigOptions {
+					if o.ID == "thought_level" {
+						for _, v := range o.Options {
+							if strings.HasSuffix(mid, "-"+v.Value) {
+								s.meta.ConfigOptions[i].CurrentValue = v.Value
+								s.meta.WantThought = v.Value
+							}
 						}
 					}
 				}
 			}
+			s.configChangedLocked()
+			s.mu.Unlock()
+			s.emit()
+			return nil
 		}
-		s.configChangedLocked()
 		s.mu.Unlock()
-		s.emit()
-		return nil
-	}
-	s.mu.Unlock()
-	if mid, ok := resolveModel(models, want); ok {
-		if err := conn.Call(ctx, "session/set_model", map[string]any{"sessionId": id, "modelId": mid}, nil); err != nil {
+		var setRes struct {
+			SessionID string `json:"sessionId"`
+		}
+		if err := conn.Call(ctx, "session/set_model", map[string]any{"sessionId": id, "modelId": mid}, &setRes); err != nil {
 			return err
 		}
+		codexThreadChanged := false
 		s.mu.Lock()
-		if s.meta.Models != nil {
-			s.meta.Models.CurrentModelID = mid
+		if s.isCodex() && setRes.SessionID != "" && s.meta.CodexThreadID != setRes.SessionID {
+			s.meta.CodexThreadID = setRes.SessionID
+			codexThreadChanged = true
 		}
-		// agy tracks the thinking level as a separate config option: keep it
-		// in step with the chosen variant (e.g. gemini-3.8-flash-medium).
+		s.meta.WantModel = mid
+		s.ensureAvailableModelLocked(mid)
 		level := ""
-		for _, o := range s.meta.ConfigOptions {
-			if o.ID != "thought_level" {
-				continue
-			}
-			for _, v := range o.Options {
-				if strings.HasSuffix(mid, "-"+v.Value) {
-					level = v.Value
+		if hasConfigOption(s.meta.ConfigOptions, "model") {
+			for _, o := range s.meta.ConfigOptions {
+				if o.ID != "thought_level" {
+					continue
 				}
-			}
-			if o.CurrentValue == level {
-				level = ""
+				for _, v := range o.Options {
+					if strings.HasSuffix(mid, "-"+v.Value) {
+						level = v.Value
+					}
+				}
+				if o.CurrentValue == level {
+					level = ""
+				}
 			}
 		}
 		s.configChangedLocked()
 		s.mu.Unlock()
+		if codexThreadChanged && s.m != nil {
+			s.m.invalidateHistory()
+			if id != "" {
+				s.m.saveSession(s)
+			}
+		}
 		if level != "" {
 			if err := s.setConfig(ctx, "thought_level", level); err != nil {
 				log.Printf("session %s: sync thought level %s: %v", id, level, err)
 			}
 		}
 		s.mu.Lock()
-		if s.meta.Models != nil {
-			s.meta.Models.CurrentModelID = mid
-		}
+		s.ensureAvailableModelLocked(mid)
 		s.meta.WantModel = mid
 		s.configChangedLocked()
 		s.mu.Unlock()
 		s.emit()
 		return nil
 	}
-	// Maybe a base model value of the "model" config option.
+	s.mu.Unlock()
+	// Base model value of agy's "model" config option.
 	return s.setConfig(ctx, "model", want)
 }
 
+// Provider returns the configured provider override ("openrouter" | "openai" | "") for this session.
+func (s *Session) Provider() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return strings.TrimSpace(s.meta.Provider)
+}
+
 func (s *Session) setConfig(ctx context.Context, configID, value string) error {
+	if configID == "thought" || configID == "effort" {
+		configID = "thought_level"
+	}
+	s.mu.Lock()
+	if configID == "model" && !hasConfigOption(s.meta.ConfigOptions, "model") {
+		s.mu.Unlock()
+		return s.setModel(ctx, value)
+	}
+	s.mu.Unlock()
 	conn, id := s.liveConn()
 	s.mu.Lock()
+	if configID == "mode" && s.isCodex() {
+		value = codex.NormalizeModeID(value, s.meta.SkipPerms)
+	}
 	if configID == "thought_level" {
 		s.meta.WantThought = value
 	}
@@ -1701,13 +1864,15 @@ func (s *Session) setConfig(ctx context.Context, configID, value string) error {
 			}
 		case "model":
 			s.syncFromConfigLocked()
-			if s.meta.Models != nil {
+			if s.meta.Models != nil && s.meta.Models.CurrentModelID != "" {
 				s.meta.WantModel = s.meta.Models.CurrentModelID
 			}
 		case "thought_level":
-			s.syncFromConfigLocked()
-			if s.meta.Models != nil {
-				s.meta.WantModel = s.meta.Models.CurrentModelID
+			if hasConfigOption(s.meta.ConfigOptions, "model") {
+				s.syncFromConfigLocked()
+				if s.meta.Models != nil && s.meta.Models.CurrentModelID != "" {
+					s.meta.WantModel = s.meta.Models.CurrentModelID
+				}
 			}
 		}
 		s.configChangedLocked()
@@ -1728,13 +1893,23 @@ func (s *Session) setConfig(ctx context.Context, configID, value string) error {
 		s.syncFromConfigLocked()
 	}
 	if configID == "model" {
-		s.meta.WantModel = ""
-		if s.meta.Models != nil {
+		if s.meta.Models != nil && s.meta.Models.CurrentModelID != "" {
 			s.meta.WantModel = s.meta.Models.CurrentModelID
 		}
 	}
-	if configID == "mode" && s.meta.Modes != nil {
-		s.meta.Modes.CurrentModeID = value
+	if configID == "mode" {
+		if s.isCodex() {
+			value = codex.NormalizeModeID(value, s.meta.SkipPerms)
+		}
+		s.meta.WantMode = value
+		if s.meta.Modes != nil {
+			s.meta.Modes.CurrentModeID = value
+		}
+		for i, o := range s.meta.ConfigOptions {
+			if o.ID == "mode" {
+				s.meta.ConfigOptions[i].CurrentValue = value
+			}
+		}
 	}
 	s.configChangedLocked()
 	s.mu.Unlock()
@@ -1745,12 +1920,20 @@ func (s *Session) setConfig(ctx context.Context, configID, value string) error {
 func (s *Session) setMode(ctx context.Context, mode string) error {
 	conn, id := s.liveConn()
 	s.mu.Lock()
+	if s.isCodex() {
+		mode = codex.NormalizeModeID(mode, s.meta.SkipPerms)
+	}
 	s.meta.WantMode = mode
 	if conn == nil {
 		if s.meta.Modes == nil {
 			s.meta.Modes = &acp.Modes{}
 		}
 		s.meta.Modes.CurrentModeID = mode
+		for i, o := range s.meta.ConfigOptions {
+			if o.ID == "mode" {
+				s.meta.ConfigOptions[i].CurrentValue = mode
+			}
+		}
 		s.configChangedLocked()
 		s.mu.Unlock()
 		s.emit()
@@ -1761,10 +1944,19 @@ func (s *Session) setMode(ctx context.Context, mode string) error {
 		return err
 	}
 	s.mu.Lock()
+	if s.isCodex() {
+		mode = codex.NormalizeModeID(mode, s.meta.SkipPerms)
+	}
+	s.meta.WantMode = mode
 	if s.meta.Modes == nil {
 		s.meta.Modes = &acp.Modes{}
 	}
 	s.meta.Modes.CurrentModeID = mode
+	for i, o := range s.meta.ConfigOptions {
+		if o.ID == "mode" {
+			s.meta.ConfigOptions[i].CurrentValue = mode
+		}
+	}
 	s.configChangedLocked()
 	s.mu.Unlock()
 	s.emit()

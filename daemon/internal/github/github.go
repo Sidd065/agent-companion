@@ -107,28 +107,28 @@ func runGH(ctx context.Context, dir string, timeout time.Duration, args ...strin
 }
 
 type rawPR struct {
-	Number         int    `json:"number"`
-	Title          string `json:"title"`
-	Body           string `json:"body"`
-	State          string `json:"state"`
-	IsDraft        bool   `json:"isDraft"`
-	URL            string `json:"url"`
+	Number         int                    `json:"number"`
+	Title          string                 `json:"title"`
+	Body           string                 `json:"body"`
+	State          string                 `json:"state"`
+	IsDraft        bool                   `json:"isDraft"`
+	URL            string                 `json:"url"`
 	Author         struct{ Login string } `json:"author"`
-	HeadRefName    string `json:"headRefName"`
-	BaseRefName    string `json:"baseRefName"`
-	ReviewDecision string `json:"reviewDecision"`
-	Mergeable      string `json:"mergeable"`
-	Additions      int    `json:"additions"`
-	Deletions      int    `json:"deletions"`
-	ChangedFiles   int    `json:"changedFiles"`
-	UpdatedAt      string `json:"updatedAt"`
-	CreatedAt      string `json:"createdAt"`
-	Files          []PRFile `json:"files"`
+	HeadRefName    string                 `json:"headRefName"`
+	BaseRefName    string                 `json:"baseRefName"`
+	ReviewDecision string                 `json:"reviewDecision"`
+	Mergeable      string                 `json:"mergeable"`
+	Additions      int                    `json:"additions"`
+	Deletions      int                    `json:"deletions"`
+	ChangedFiles   int                    `json:"changedFiles"`
+	UpdatedAt      string                 `json:"updatedAt"`
+	CreatedAt      string                 `json:"createdAt"`
+	Files          []PRFile               `json:"files"`
 	Comments       []struct {
-		ID        string `json:"id"`
+		ID        string                 `json:"id"`
 		Author    struct{ Login string } `json:"author"`
-		Body      string `json:"body"`
-		CreatedAt string `json:"createdAt"`
+		Body      string                 `json:"body"`
+		CreatedAt string                 `json:"createdAt"`
 	} `json:"comments"`
 	StatusCheckRollup []struct {
 		Name       string `json:"name"`
@@ -331,16 +331,16 @@ func IssuesList(ctx context.Context, dir, state string, limit int) ([]Issue, err
 		return nil, err
 	}
 	var raw []struct {
-		Number    int    `json:"number"`
-		Title     string `json:"title"`
-		Body      string `json:"body"`
-		State     string `json:"state"`
-		URL       string `json:"url"`
-		Author    struct{ Login string } `json:"author"`
-		Labels    []struct{ Name string } `json:"labels"`
+		Number    int                      `json:"number"`
+		Title     string                   `json:"title"`
+		Body      string                   `json:"body"`
+		State     string                   `json:"state"`
+		URL       string                   `json:"url"`
+		Author    struct{ Login string }   `json:"author"`
+		Labels    []struct{ Name string }  `json:"labels"`
 		Assignees []struct{ Login string } `json:"assignees"`
-		UpdatedAt string `json:"updatedAt"`
-		CreatedAt string `json:"createdAt"`
+		UpdatedAt string                   `json:"updatedAt"`
+		CreatedAt string                   `json:"createdAt"`
 	}
 	if err := json.Unmarshal([]byte(out), &raw); err != nil {
 		return nil, err

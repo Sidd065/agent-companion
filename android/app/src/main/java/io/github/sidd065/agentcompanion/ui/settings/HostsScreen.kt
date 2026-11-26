@@ -243,7 +243,7 @@ fun HostsScreen(firstRun: Boolean) {
             if (firstRun) {
                 Text("Agent Companion", style = MaterialTheme.typography.headlineSmall)
                 Text(
-                    "Run and follow coding agents (agy and Claude Code) on your computers from this phone.",
+                    "Run and follow coding agents (agy, Claude Code, and Codex) on your computers from this phone.",
                     style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             }

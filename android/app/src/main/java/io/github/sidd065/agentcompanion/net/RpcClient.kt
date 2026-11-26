@@ -51,6 +51,7 @@ class RpcClient(
     private val http: OkHttpClient,
     private val scope: CoroutineScope,
     private val deviceName: String,
+    private val keyPairProvider: (HostConfig) -> Noise.KeyPair = DeviceKeys::keyPair,
 ) {
     private val _state = MutableStateFlow<ConnState>(ConnState.Idle)
     val state: StateFlow<ConnState> = _state
@@ -98,7 +99,7 @@ class RpcClient(
         while (scope.isActive && running) {
             attempt++
             _state.value = ConnState.Connecting(attempt, lastErr)
-            val keys = runCatching { DeviceKeys.keyPair(host) }.getOrElse {
+            val keys = runCatching { keyPairProvider(host) }.getOrElse {
                 _state.value = ConnState.Failed("This phone's key for ${host.label} is unavailable (${it.message}). Pair again.")
                 return
             }

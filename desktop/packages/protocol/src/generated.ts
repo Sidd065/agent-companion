@@ -3,7 +3,7 @@
 
 export const PROTOCOL_VERSION = 2 as const;
 
-export const SERVER_CAPABILITIES = ["projects","gitops","worktrees","checkpoints","github_pr","github_issues","scripts","providers_acp","codex","handoff","inline_exec","search","usage","schedules","host_health","settle_snooze","remain_on_exit"] as const;
+export const SERVER_CAPABILITIES = ["projects","gitops","worktrees","checkpoints","github_pr","github_issues","scripts","providers_acp","codex","handoff","inline_exec","search","usage","schedules","host_health","settle_snooze","remain_on_exit","providers.codex","providers.openrouter","customModels"] as const;
 export type ServerCapability = (typeof SERVER_CAPABILITIES)[number];
 
 export interface WireHello {
@@ -25,6 +25,29 @@ export interface Device {
   publicKey: string;
   pairedAt: number;
   lastSeen: number;
+}
+
+export interface DaemonInfo {
+  name: string;
+  version: string;
+  protocolVersion?: number;
+  capabilities?: string[];
+  openRouterConfigured: boolean;
+  host: string;
+  home: string;
+  uptimeSec: number;
+  agents: AgentProfile[];
+  stats?: Record<string, unknown>;
+  hostId: string;
+  fingerprint: string;
+  publicUrl?: string;
+  devices: number;
+  sessions?: SessionSummary[];
+  projects?: Project[];
+  client?: { id: string; deviceId: string; deviceName: string; };
+  listen?: string[];
+  tunnel?: { mode?: string; url?: string; error?: string; };
+  config?: Record<string, unknown>;
 }
 
 export interface ContentBlock {
@@ -299,6 +322,9 @@ export interface SessionDetail {
 export interface SessionFlags {
   skipPermissions?: boolean | null;
   sandbox?: boolean;
+  sandboxMode?: string;
+  approvalPolicy?: string;
+  provider?: string;
   agentName?: string;
   disableTelemetry?: boolean;
   extraArgs?: string[];
@@ -306,11 +332,15 @@ export interface SessionFlags {
   model?: string;
   mode?: string;
   thought?: string;
+  effort?: string;
 }
 
 export interface CreateSessionParams {
   skipPermissions?: boolean | null;
   sandbox?: boolean;
+  sandboxMode?: string;
+  approvalPolicy?: string;
+  provider?: string;
   agentName?: string;
   disableTelemetry?: boolean;
   extraArgs?: string[];
@@ -318,6 +348,8 @@ export interface CreateSessionParams {
   model?: string;
   mode?: string;
   thought?: string;
+  effort?: string;
+  flags?: SessionFlags | null;
   agent?: string;
   cwd: string;
   projectId?: string;
@@ -622,6 +654,11 @@ export interface GitHubIssue {
   comments?: PRComment[];
 }
 
+export interface CustomModel {
+  slug: string;
+  name: string;
+}
+
 export interface ProviderConfig {
   id: string;
   name: string;
@@ -631,6 +668,7 @@ export interface ProviderConfig {
   args?: string[];
   env?: Record<string, string>;
   defaultModel?: string;
+  customModels?: CustomModel[];
   icon?: string;
   builtin?: boolean;
   features?: string[];
@@ -645,6 +683,39 @@ export interface ProviderHealth {
   message?: string;
   latencyMs: number;
   checkedAt: number;
+}
+
+export interface ProviderModelInfo {
+  modelId: string;
+  name: string;
+  description: string;
+  provider: string;
+  contextWindow: number;
+  supportsReasoning: boolean;
+  supportsTools: boolean;
+  supportsImages: boolean;
+  isCustom: boolean;
+}
+
+export interface ProviderModeInfo {
+  id: string;
+  name: string;
+}
+
+export interface ProviderModelsParams {
+  provider: string;
+  refresh?: boolean;
+}
+
+export interface ProviderModelsResult {
+  provider: string;
+  defaultModelId: string;
+  openRouterConfigured: boolean;
+  nativeAuthConfigured: boolean;
+  models: ProviderModelInfo[];
+  customModels: CustomModel[];
+  availableModes: ProviderModeInfo[];
+  reasoningEfforts: string[];
 }
 
 export interface ScheduledTask {

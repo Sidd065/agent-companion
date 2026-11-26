@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { Activity, Coins, Cpu, RefreshCw } from 'lucide-react';
 import type { UsageBucket, UsageSummary } from '@agentc/protocol';
 import { useApp } from '../../state/appStore.js';
@@ -17,7 +17,7 @@ function fmtTokens(n: number): string {
 }
 
 export const UsageView: React.FC = () => {
-  const { activeHost, hostList, callHost, pushToast } = useApp();
+  const { activeHost, setActiveHostId, hostList, callHost, pushToast } = useApp();
   const [hostId, setHostId] = useState(activeHost?.creds.id || hostList[0]?.creds.id || '');
   const [days, setDays] = useState(30);
   const [metric, setMetric] = useState<'cost' | 'tokens'>('tokens');
@@ -25,13 +25,19 @@ export const UsageView: React.FC = () => {
   const [claudeLimits, setClaudeLimits] = useState<Record<string, unknown> | null>(null);
   const [agyQuota, setAgyQuota] = useState<Record<string, unknown> | null>(null);
   const [loading, setLoading] = useState(false);
+  const reqSeqRef = useRef(0);
 
   useEffect(() => {
-    if (!hostId && activeHost) setHostId(activeHost.creds.id);
-  }, [hostId, activeHost]);
+    if (activeHost?.creds.id && activeHost.creds.id !== hostId) {
+      setHostId(activeHost.creds.id);
+    } else if (hostId && !hostList.some((h) => h.creds.id === hostId)) {
+      setHostId(activeHost?.creds.id || hostList[0]?.creds.id || '');
+    }
+  }, [activeHost?.creds.id, hostList]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const load = useCallback(async () => {
     if (!hostId) return;
+    const seq = ++reqSeqRef.current;
     setLoading(true);
     try {
       const [u, cl, aq] = await Promise.all([
@@ -39,19 +45,27 @@ export const UsageView: React.FC = () => {
         callHost<Record<string, unknown>>(hostId, 'claude.usage', {}).catch(() => null),
         callHost<Record<string, unknown>>(hostId, 'agy.quota', {}).catch(() => null),
       ]);
+      if (seq !== reqSeqRef.current) return;
       setSummary(u);
       setClaudeLimits(cl);
       setAgyQuota(aq);
     } catch (e) {
+      if (seq !== reqSeqRef.current) return;
       pushToast({ text: `Usage load failed: ${(e as Error).message}`, level: 'error' });
     } finally {
-      setLoading(false);
+      if (seq === reqSeqRef.current) {
+        setLoading(false);
+      }
     }
   }, [hostId, days, callHost, pushToast]);
 
   useEffect(() => {
+    reqSeqRef.current++;
+    setSummary(null);
+    setClaudeLimits(null);
+    setAgyQuota(null);
     void load();
-  }, [load]);
+  }, [hostId, load]);
 
   const renderBucketList = (title: string, buckets: UsageBucket[]) => {
     const maxVal = Math.max(
@@ -108,8 +122,12 @@ export const UsageView: React.FC = () => {
           <div className="flex items-center gap-2">
             {hostList.length > 1 && (
               <select
+                data-testid="usage-host-select"
                 value={hostId}
-                onChange={(e) => setHostId(e.target.value)}
+                onChange={(e) => {
+                  setHostId(e.target.value);
+                  setActiveHostId(e.target.value);
+                }}
                 className="rounded-lg border border-[var(--border)] bg-[var(--bg-surface)] px-2.5 py-1 text-xs"
               >
                 {hostList.map((h) => (

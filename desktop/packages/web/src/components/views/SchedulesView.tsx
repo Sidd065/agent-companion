@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
   CalendarClock,
   CheckCircle2,
@@ -13,8 +13,56 @@ import {
 import type { ScheduledTask, ScheduleRunRecord } from '@agentc/protocol';
 import { useApp } from '../../state/appStore.js';
 
+export interface ScheduleEditFormInit {
+  editId: string;
+  name: string;
+  kind: 'cron' | 'interval' | 'once';
+  cron: string;
+  intervalSec: number;
+  editingRunAt: number | undefined;
+  cwd: string;
+  projectId: string | undefined;
+  agent: string;
+  model: string;
+  mode: string;
+  prompt: string;
+  useWorktree: boolean;
+  enabled: boolean;
+}
+
+export function extractScheduleEditFormInit(t: ScheduledTask): ScheduleEditFormInit {
+  const kind = ((t.kind as 'cron' | 'interval' | 'once') || 'cron');
+  return {
+    editId: t.id,
+    name: t.name,
+    kind,
+    cron: t.cron || '0 9 * * 1-5',
+    intervalSec: t.intervalSec || 3600,
+    editingRunAt: kind === 'once' && typeof t.runAt === 'number' && t.runAt > 0 ? t.runAt : undefined,
+    cwd: t.cwd,
+    projectId: t.projectId,
+    agent: t.agent,
+    model: t.model || '',
+    mode: t.mode || '',
+    prompt: t.prompt,
+    useWorktree: Boolean(t.useWorktree),
+    enabled: t.enabled,
+  };
+}
+
+export function resolveOnceScheduleRunAt(
+  editId: string,
+  editingRunAt: number | undefined,
+  nowMs: number = Date.now(),
+): number {
+  if (editId && typeof editingRunAt === 'number' && editingRunAt > 0) {
+    return editingRunAt;
+  }
+  return nowMs + 60_000;
+}
+
 export const SchedulesView: React.FC = () => {
-  const { activeHost, hostList, callHost, selectSession, pushToast } = useApp();
+  const { activeHost, setActiveHostId, hostList, callHost, selectSession, pushToast } = useApp();
   const [hostId, setHostId] = useState(activeHost?.creds.id || hostList[0]?.creds.id || '');
   const [tasks, setTasks] = useState<ScheduledTask[]>([]);
   const [runs, setRuns] = useState<ScheduleRunRecord[]>([]);
@@ -26,44 +74,65 @@ export const SchedulesView: React.FC = () => {
   const [kind, setKind] = useState<'cron' | 'interval' | 'once'>('cron');
   const [cron, setCron] = useState('0 9 * * 1-5');
   const [intervalSec, setIntervalSec] = useState(3600);
+  const [editingRunAt, setEditingRunAt] = useState<number | undefined>(undefined);
   const [cwd, setCwd] = useState('');
+  const [projectId, setProjectId] = useState<string | undefined>(undefined);
   const [agent, setAgent] = useState('');
+  const [model, setModel] = useState('');
+  const [mode, setMode] = useState('');
   const [prompt, setPrompt] = useState('');
   const [useWorktree, setUseWorktree] = useState(true);
   const [enabled, setEnabled] = useState(true);
+  const reqSeqRef = useRef(0);
 
   const host = hostList.find((h) => h.creds.id === hostId) ?? activeHost ?? null;
 
   useEffect(() => {
-    if (!hostId && activeHost) setHostId(activeHost.creds.id);
-  }, [hostId, activeHost]);
+    if (activeHost?.creds.id && activeHost.creds.id !== hostId) {
+      setHostId(activeHost.creds.id);
+    } else if (hostId && !hostList.some((h) => h.creds.id === hostId)) {
+      setHostId(activeHost?.creds.id || hostList[0]?.creds.id || '');
+    }
+  }, [activeHost?.creds.id, hostList]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const load = useCallback(async () => {
     if (!hostId) return;
+    const seq = ++reqSeqRef.current;
     setLoading(true);
     try {
       const res = await callHost<{ tasks: ScheduledTask[]; runs: ScheduleRunRecord[] }>(hostId, 'schedules.list', {});
+      if (seq !== reqSeqRef.current) return;
       setTasks(Array.isArray(res?.tasks) ? res.tasks : []);
       setRuns(Array.isArray(res?.runs) ? res.runs : []);
     } catch (e) {
+      if (seq !== reqSeqRef.current) return;
       pushToast({ text: `Failed to load schedules: ${(e as Error).message}`, level: 'error' });
     } finally {
-      setLoading(false);
+      if (seq === reqSeqRef.current) {
+        setLoading(false);
+      }
     }
   }, [hostId, callHost, pushToast]);
 
   useEffect(() => {
+    reqSeqRef.current++;
+    setTasks([]);
+    setRuns([]);
     void load();
-  }, [load]);
+  }, [hostId, load]);
 
   const openNew = () => {
     setEditId('');
+    setEditingRunAt(undefined);
     setName('');
     setKind('cron');
     setCron('0 9 * * 1-5');
     setIntervalSec(3600);
     setCwd(host?.projects[0]?.path || '~');
+    setProjectId(host?.projects[0]?.id);
     setAgent(host?.agents.find((a) => a.available)?.id || 'claude');
+    setModel('');
+    setMode('');
     setPrompt('');
     setUseWorktree(false);
     setEnabled(true);
@@ -71,16 +140,21 @@ export const SchedulesView: React.FC = () => {
   };
 
   const openEdit = (t: ScheduledTask) => {
-    setEditId(t.id);
-    setName(t.name);
-    setKind((t.kind as 'cron' | 'interval' | 'once') || 'cron');
-    setCron(t.cron || '0 9 * * 1-5');
-    setIntervalSec(t.intervalSec || 3600);
-    setCwd(t.cwd);
-    setAgent(t.agent);
-    setPrompt(t.prompt);
-    setUseWorktree(Boolean(t.useWorktree));
-    setEnabled(t.enabled);
+    const init = extractScheduleEditFormInit(t);
+    setEditId(init.editId);
+    setName(init.name);
+    setKind(init.kind);
+    setCron(init.cron);
+    setIntervalSec(init.intervalSec);
+    setEditingRunAt(init.editingRunAt);
+    setCwd(init.cwd);
+    setProjectId(init.projectId);
+    setAgent(init.agent);
+    setModel(init.model);
+    setMode(init.mode);
+    setPrompt(init.prompt);
+    setUseWorktree(init.useWorktree);
+    setEnabled(init.enabled);
     setEditorOpen(true);
   };
 
@@ -94,9 +168,12 @@ export const SchedulesView: React.FC = () => {
         kind,
         cron: kind === 'cron' ? cron.trim() : undefined,
         intervalSec: kind === 'interval' ? Number(intervalSec) || 3600 : undefined,
-        runAt: kind === 'once' ? Date.now() + 60_000 : undefined,
+        runAt: kind === 'once' ? resolveOnceScheduleRunAt(editId, editingRunAt) : undefined,
+        projectId: projectId || undefined,
         cwd: cwd.trim() || '~',
         agent: agent || 'claude',
+        model: model.trim() || undefined,
+        mode: mode.trim() || undefined,
         prompt: prompt.trim(),
         useWorktree,
       });
@@ -154,8 +231,12 @@ export const SchedulesView: React.FC = () => {
           <div className="flex items-center gap-2">
             {hostList.length > 1 && (
               <select
+                data-testid="schedules-host-select"
                 value={hostId}
-                onChange={(e) => setHostId(e.target.value)}
+                onChange={(e) => {
+                  setHostId(e.target.value);
+                  setActiveHostId(e.target.value);
+                }}
                 className="rounded-lg border border-[var(--border)] bg-[var(--bg-surface)] px-2.5 py-1 text-xs"
               >
                 {hostList.map((h) => (
@@ -206,6 +287,11 @@ export const SchedulesView: React.FC = () => {
                     <span className="rounded-md border border-[var(--border)] px-1.5 py-0.5 text-[10.5px] text-[var(--text-muted)]">
                       {t.agent}
                     </span>
+                    {t.model && (
+                      <span className="rounded-md bg-[var(--bg-base)] px-1.5 py-0.5 font-mono text-[10.5px] text-[var(--text-secondary)]">
+                        {t.model}
+                      </span>
+                    )}
                     {!t.enabled && (
                       <span className="rounded bg-[var(--warning)]/15 px-1.5 py-0.5 text-[10px] text-[var(--warning)]">
                         Paused
@@ -356,7 +442,11 @@ export const SchedulesView: React.FC = () => {
                     className="w-full rounded-lg border border-[var(--border)] bg-[var(--bg-base)] px-2.5 py-1.5 font-mono"
                   />
                 ) : (
-                  <div className="py-1.5 text-[var(--text-muted)]">Runs once in 60 seconds</div>
+                  <div className="py-1.5 text-[var(--text-muted)]">
+                    {editId && editingRunAt
+                      ? `Scheduled at ${new Date(editingRunAt).toLocaleString()}`
+                      : 'Runs once in 60 seconds'}
+                  </div>
                 )}
               </div>
               <div>
@@ -382,6 +472,19 @@ export const SchedulesView: React.FC = () => {
                     </option>
                   ))}
                 </select>
+              </div>
+              <div className="col-span-2">
+                <label className="block text-[11px] text-[var(--text-muted)] mb-1">
+                  Model Slug (optional, e.g. google/gemini-3-flash-preview)
+                </label>
+                <input
+                  data-testid="schedule-model-input"
+                  type="text"
+                  value={model}
+                  onChange={(e) => setModel(e.target.value)}
+                  placeholder="Leave blank for provider default"
+                  className="w-full rounded-lg border border-[var(--border)] bg-[var(--bg-base)] px-2.5 py-1.5 font-mono"
+                />
               </div>
               <div className="col-span-2">
                 <label className="block text-[11px] text-[var(--text-muted)] mb-1">Prompt</label>

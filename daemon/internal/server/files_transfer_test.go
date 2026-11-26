@@ -66,7 +66,7 @@ func TestFileDownloadAndUploadOverNoiseWS(t *testing.T) {
 
 	conn, err := secure.Dial(ctx, secure.ClientConfig{
 		URL: ts.URL, DaemonKey: id.Key.Public, DeviceKey: devKey,
-		Mode: secure.ModeConnect,
+		Mode:  secure.ModeConnect,
 		Hello: secure.Hello{V: 1, Purpose: "rpc", Name: "FileTransferTest", Platform: "android"},
 	})
 	if err != nil {

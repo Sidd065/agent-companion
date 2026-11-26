@@ -13,9 +13,17 @@ android/captures/
 
 # Daemon build outputs
 daemon/agentc
+daemon/agentc-*
 daemon/agentctl
 
+# Desktop / Node / Release outputs & local research
+.research/
+node_modules/
+dist/
+release/
+
 # Secrets: never commit these
+.open_router_api_key
 **/firebase-service-account.json
 *-firebase-adminsdk-*.json
 *.keystore

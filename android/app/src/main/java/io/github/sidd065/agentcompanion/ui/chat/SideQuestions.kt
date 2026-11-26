@@ -128,7 +128,7 @@ fun SideQuestionsScreen(sessionId: String) {
     DisposableEffect(store) {
         store.asideViewers++
         store.unseenAside.value = null
-        val hide = g.showSession(sessionId, only = setOf("aside"))
+        val hide = g.showSession(sessionId, only = setOf("aside"), hostId = conn.config.id)
         g.notifier.cancelAside(conn.config.id, sessionId)
         onDispose {
             store.asideViewers--
@@ -221,7 +221,7 @@ fun SideQuestionsScreen(sessionId: String) {
                                 onQuote = {
                                     Drafts.of(conn.config.id, sessionId).appendQuote(a.answer, heading = "Side answer to: ${a.question.lines().first().take(200)}")
                                     if (nav.previousBackStackEntry?.destination?.route?.startsWith("chat/") == true) nav.popBackStack()
-                                    else nav.navigate(Routes.chat(sessionId))
+                                    else nav.navigate(Routes.chat(sessionId, host = conn.config.id))
                                 },
                                 onShare = { ctx.shareText(a.answer, a.question) },
                                 onCopyQuestion = { ctx.copyText(a.question, "Side question") },

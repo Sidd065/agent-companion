@@ -63,6 +63,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -83,6 +84,7 @@ import io.github.sidd065.agentcompanion.ui.BottomTabs
 import io.github.sidd065.agentcompanion.ui.LocalNav
 import io.github.sidd065.agentcompanion.ui.Routes
 import io.github.sidd065.agentcompanion.ui.activeConnection
+import io.github.sidd065.agentcompanion.ui.selectActiveHost
 import io.github.sidd065.agentcompanion.ui.components.ConfirmDialog
 import io.github.sidd065.agentcompanion.ui.components.EmptyState
 import io.github.sidd065.agentcompanion.ui.components.LoadingBox
@@ -93,6 +95,7 @@ import io.github.sidd065.agentcompanion.ui.components.baseName
 import io.github.sidd065.agentcompanion.ui.components.copyText
 import io.github.sidd065.agentcompanion.ui.components.dateBucket
 import io.github.sidd065.agentcompanion.ui.components.relTime
+import io.github.sidd065.agentcompanion.ui.components.rememberHomeDir
 import io.github.sidd065.agentcompanion.ui.components.shortPath
 import io.github.sidd065.agentcompanion.ui.theme.LocalExtra
 import kotlinx.coroutines.flow.map
@@ -134,7 +137,7 @@ fun SessionsScreen() {
     val scope = rememberCoroutineScope()
     val settings by g.prefs.flow.collectAsState()
     val allConns by g.connections.collectAsState()
-    var hostFilter by remember { mutableStateOf<String?>(null) } // null = all hosts
+    var hostFilter by rememberSaveable { mutableStateOf<String?>(null) } // null = all hosts
     val conns = allConns.filter { hostFilter == null || it.config.id == hostFilter }
     if (conns.isEmpty() && hostFilter != null) hostFilter = null
     val conn = conns.firstOrNull() ?: return
@@ -149,7 +152,10 @@ fun SessionsScreen() {
     val sessions = hosted.map { it.second }
     var filter by remember { mutableStateOf("all") }
     var agentFilter by remember { mutableStateOf<String?>(null) }
-    var projectFilter by remember { mutableStateOf<String?>(null) }
+    var projectFilter by rememberSaveable { mutableStateOf<String?>(null) }
+    if (hostFilter != null && projectFilter != null && !projectFilter!!.startsWith("$hostFilter:")) {
+        projectFilter = null
+    }
     val hostedProjects by remember(conns) {
         kotlinx.coroutines.flow.combine(conns.map { c -> c.projects.map { l -> l.map { c to it } } }) { a -> a.flatMap { it.toList() } }
     }.collectAsState(emptyList())
@@ -163,7 +169,7 @@ fun SessionsScreen() {
         runCatching { block() }.onFailure { snack.showSnackbar("$label failed: ${it.message}") }
     }
 
-    val visible = hosted.filter { (_, s) ->
+    val visible = hosted.filter { (c, s) ->
         val f = when (filter) {
             "working" -> s.busy && !s.needsInput
             "input" -> s.needsInput
@@ -173,7 +179,7 @@ fun SessionsScreen() {
             else -> !s.archived && !s.settled
         }
         f && (agentFilter == null || s.agent == agentFilter) &&
-            (projectFilter == null || s.projectId == projectFilter) &&
+            (projectFilter == null || "${c.config.id}:${s.projectId}" == projectFilter) &&
             (query.isBlank() || s.title.contains(query, true) || s.cwd.contains(query, true) || (s.lastText?.contains(query, true) == true))
     }
     val agentsPresent = sessions.map { it.agent }.distinct().sorted()
@@ -207,7 +213,7 @@ fun SessionsScreen() {
                                     DropdownMenuItem(
                                         leadingIcon = { StatusDot(if (st is ConnState.Connected) "idle" else "sleeping", null, size = 8) },
                                         text = { Text(c.config.label + if (hostFilter == c.config.id || (!multi)) "  ✓" else "") },
-                                        onClick = { hostMenu = false; hostFilter = if (multi) c.config.id else null },
+                                        onClick = { hostMenu = false; hostFilter = if (multi) c.config.id else null; selectActiveHost(g.prefs, scope, c.config.id) },
                                     )
                                 }
                                 HorizontalDivider()
@@ -250,11 +256,14 @@ fun SessionsScreen() {
                     FilterChip(selected = filter == k, onClick = { filter = k }, label = { Text(if (c != null && c > 0) "$l · $c" else l) })
                 }
                 if (hostedProjects.isNotEmpty()) {
-                    items(hostedProjects, key = { (c, pr) -> "pr:${c.config.id}:${pr.id}" }) { (_, pr) ->
+                    items(hostedProjects, key = { (c, pr) -> "pr:${c.config.id}:${pr.id}" }) { (c, pr) ->
+                        val projKey = "${c.config.id}:${pr.id}"
+                        val projName = pr.name.ifBlank { baseName(pr.path) }
+                        val chipLabel = if (multi && hostFilter == null) "${c.config.label} · $projName" else projName
                         FilterChip(
-                            selected = projectFilter == pr.id,
-                            onClick = { projectFilter = if (projectFilter == pr.id) null else pr.id },
-                            label = { Text(pr.name.ifBlank { baseName(pr.path) }) },
+                            selected = projectFilter == projKey,
+                            onClick = { projectFilter = if (projectFilter == projKey) null else projKey },
+                            label = { Text(chipLabel) },
                         )
                     }
                 }
@@ -298,11 +307,14 @@ private fun SessionList(
     onOpen: (Pair<HostConnection, SessionSummary>) -> Unit,
     onLong: (Pair<HostConnection, SessionSummary>) -> Unit,
 ) {
+    val homesByHost = list.map { it.first }.distinctBy { it.config.id }.associate { c ->
+        c.config.id to androidx.compose.runtime.key(c.config.id) { c.rememberHomeDir() }
+    }
     val pinned = list.filter { it.second.pinned }
     val rest = list.filterNot { it.second.pinned }
     val groups: List<Pair<String, List<Pair<HostConnection, SessionSummary>>>> = when (groupBy) {
         "folder" -> rest.groupBy { (c, s) ->
-            (if (showHost) c.config.label + " · " else "") + shortPath(s.cwd, c.homeDir()).ifEmpty { "Unknown folder" }
+            (if (showHost) c.config.label + " · " else "") + shortPath(s.cwd, homesByHost[c.config.id]).ifEmpty { "Unknown folder" }
         }.toList().sortedByDescending { (_, v) -> v.maxOf { it.second.updatedAt } }
         "status" -> rest.groupBy { (_, s) ->
             when {
@@ -316,7 +328,7 @@ private fun SessionList(
         "none" -> listOf("" to rest)
         else -> rest.groupBy { dateBucket(it.second.updatedAt) }.toList()
     }
-    val agyTerms = terms.filter { it.second.kind == "agy" || it.second.kind == "claude" }
+    val agyTerms = terms.filter { it.second.kind in setOf("agy", "claude", "codex") }
     LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(bottom = 96.dp)) {
         if (agyTerms.isNotEmpty()) {
             item { GroupHeader("Live in terminals") }
@@ -325,14 +337,14 @@ private fun SessionList(
         if (pinned.isNotEmpty()) {
             item { GroupHeader("Pinned") }
             items(pinned, key = { "p:" + it.first.config.id + it.second.id }) { p ->
-                SessionRow(p.second, p.first.homeDir(), Modifier.combinedClickable(onClick = { onOpen(p) }, onLongClick = { onLong(p) }),
+                SessionRow(p.second, p.first.rememberHomeDir(), Modifier.combinedClickable(onClick = { onOpen(p) }, onLongClick = { onLong(p) }),
                     host = if (showHost) p.first.config.label else null)
             }
         }
         groups.forEach { (g, items) ->
             if (g.isNotEmpty()) item(key = "h:$g") { GroupHeader(g) }
             items(items, key = { it.first.config.id + it.second.id }) { p ->
-                SessionRow(p.second, p.first.homeDir(), Modifier.combinedClickable(onClick = { onOpen(p) }, onLongClick = { onLong(p) }).animateItem(),
+                SessionRow(p.second, p.first.rememberHomeDir(), Modifier.combinedClickable(onClick = { onOpen(p) }, onLongClick = { onLong(p) }).animateItem(),
                     host = if (showHost && groupBy != "host") p.first.config.label else null)
             }
         }
@@ -348,7 +360,7 @@ private fun GroupHeader(t: String) {
 private fun TermRow(conn: HostConnection, t: Term, host: String?) {
     val nav = LocalNav.current
     val ex = LocalExtra.current
-    val home = conn.homeDir()
+    val home = conn.rememberHomeDir()
     Row(
         Modifier.fillMaxWidth().combinedClickableCompat { nav.navigate(Routes.term(t.id, host = conn.config.id)) }.padding(horizontal = 16.dp, vertical = 10.dp),
         verticalAlignment = Alignment.CenterVertically,
@@ -407,7 +419,7 @@ fun SessionRow(s: SessionSummary, home: String?, modifier: Modifier = Modifier, 
             }
             val sub = listOfNotNull(
                 status ?: s.liveElsewhere?.let { "Open in terminal · $it" },
-                if (s.isClaude) "Claude" else null,
+                if (s.agent.isNotBlank() && s.agent != "agy") s.agentLabel else null,
                 host,
                 baseName(shortPath(s.cwd, home)).takeIf { it.isNotBlank() },
                 s.modelName?.takeIf { it.isNotBlank() } ?: s.model,
@@ -434,6 +446,9 @@ fun SessionRow(s: SessionSummary, home: String?, modifier: Modifier = Modifier, 
 fun SessionActionsSheet(conn: HostConnection, s: SessionSummary, onDismiss: () -> Unit, rpc: (String, suspend () -> Unit) -> Unit) {
     val ctx = LocalContext.current
     val nav = LocalNav.current
+    val agents by conn.agents.collectAsState()
+    @Suppress("UNUSED_EXPRESSION")
+    agents
     var renaming by remember { mutableStateOf(false) }
     var deleting by remember { mutableStateOf(false) }
     AppSheet(onDismissRequest = onDismiss) {
@@ -446,23 +461,27 @@ fun SessionActionsSheet(conn: HostConnection, s: SessionSummary, onDismiss: () -
             SheetItem(Icons.Outlined.PushPin, if (s.pinned) "Unpin" else "Pin") {
                 onDismiss(); rpc("Pin") { conn.rpc.call("session.pin", params { put("id", s.id); put("pinned", !s.pinned) }) }
             }
-            SheetItem(Icons.AutoMirrored.Outlined.CallSplit, "Fork") {
-                onDismiss()
-                rpc("Fork") {
-                    val r = conn.rpc.call("session.fork", params { put("id", s.id) }).jsonObject
-                    val id = r["session"]?.jsonObject?.get("id")?.jsonPrimitive?.content
-                    if (id != null) nav.navigate(Routes.chat(id, host = conn.config.id))
+            if (conn.agentHasFeature(s.agent, "fork")) {
+                SheetItem(Icons.AutoMirrored.Outlined.CallSplit, "Fork") {
+                    onDismiss()
+                    rpc("Fork") {
+                        val r = conn.rpc.call("session.fork", params { put("id", s.id) }).jsonObject
+                        val id = r["session"]?.jsonObject?.get("id")?.jsonPrimitive?.content
+                        if (id != null) nav.navigate(Routes.chat(id, host = conn.config.id))
+                    }
                 }
             }
-            SheetItem(Icons.Outlined.Terminal, "Open in ${s.agentLabel} terminal") {
-                onDismiss()
-                rpc("Open in terminal") {
-                    val st = ctx.graph.prefs.value
-                    val t = conn.rpc.call("session.openInTerminal", params {
-                        put("id", s.id); put("skipPermissions", st.skipPermissions(s.agent))
-                        put("args", kotlinx.serialization.json.JsonArray(st.tuiResumeArgs(s.agent).map { kotlinx.serialization.json.JsonPrimitive(it) }))
-                    }).decode(Term.serializer())
-                    nav.navigate(Routes.term(t.id, host = conn.config.id))
+            if (conn.agentHasFeature(s.agent, "terminal")) {
+                SheetItem(Icons.Outlined.Terminal, "Open in ${s.agentLabel} terminal") {
+                    onDismiss()
+                    rpc("Open in terminal") {
+                        val st = ctx.graph.prefs.value
+                        val t = conn.rpc.call("session.openInTerminal", params {
+                            put("id", s.id); put("skipPermissions", s.skipPermissions)
+                            put("args", kotlinx.serialization.json.JsonArray(st.tuiResumeArgs(s.agent).map { kotlinx.serialization.json.JsonPrimitive(it) }))
+                        }).decode(Term.serializer())
+                        nav.navigate(Routes.term(t.id, host = conn.config.id))
+                    }
                 }
             }
             if (s.live) {

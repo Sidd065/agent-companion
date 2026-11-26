@@ -72,35 +72,46 @@ data class ClaudeModelChoice(val value: String, val name: String, val descriptio
 /** The agent's saved launch flags as a compact card; tapping opens the editor. */
 @Composable
 fun AgentFlagsCard(agent: String, kind: String, onEdit: () -> Unit, modifier: Modifier = Modifier) {
-    if (agent != "claude") return AgyFlagsCard(kind, onEdit, modifier)
-    val flags = LocalContext.current.graph.prefs.flow.collectAsState().value.claudeFlags
-    val ex = LocalExtra.current
-    Card(
-        modifier.fillMaxWidth().clickable(onClick = onEdit),
-        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainer),
-        shape = RoundedCornerShape(14.dp),
-    ) {
-        Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Icon(Icons.Outlined.Tune, null, Modifier.size(18.dp), tint = MaterialTheme.colorScheme.primary)
-                Spacer(Modifier.width(8.dp))
-                Text("Claude Code flags", style = MaterialTheme.typography.titleSmall, modifier = Modifier.weight(1f))
-                Text("Edit", color = MaterialTheme.colorScheme.primary, style = MaterialTheme.typography.labelLarge)
+    when (agent) {
+        "claude" -> {
+            val flags = LocalContext.current.graph.prefs.flow.collectAsState().value.claudeFlags
+            val ex = LocalExtra.current
+            Card(
+                modifier.fillMaxWidth().clickable(onClick = onEdit),
+                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainer),
+                shape = RoundedCornerShape(14.dp),
+            ) {
+                Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Icon(Icons.Outlined.Tune, null, Modifier.size(18.dp), tint = MaterialTheme.colorScheme.primary)
+                        Spacer(Modifier.width(8.dp))
+                        Text("Claude Code flags", style = MaterialTheme.typography.titleSmall, modifier = Modifier.weight(1f))
+                        Text("Edit", color = MaterialTheme.colorScheme.primary, style = MaterialTheme.typography.labelLarge)
+                    }
+                    Text(
+                        if (kind == "tui") flags.tuiPreview() else flags.headlessPreview(),
+                        style = MaterialTheme.typography.bodySmall, fontFamily = FontFamily.Monospace,
+                        color = if (flags.skipPermissions && flags.mode.isBlank()) ex.warning else MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 3, overflow = TextOverflow.Ellipsis,
+                    )
+                }
             }
-            Text(
-                if (kind == "tui") flags.tuiPreview() else flags.headlessPreview(),
-                style = MaterialTheme.typography.bodySmall, fontFamily = FontFamily.Monospace,
-                color = if (flags.skipPermissions && flags.mode.isBlank()) ex.warning else MaterialTheme.colorScheme.onSurfaceVariant,
-                maxLines = 3, overflow = TextOverflow.Ellipsis,
-            )
         }
+        "codex" -> CodexFlagsCard(kind, onEdit, modifier)
+        "", "agy" -> AgyFlagsCard(kind, onEdit, modifier)
+        else -> { /* Generic ACP provider has no agent-specific flag card */ }
     }
 }
 
 /** Flags editor for an agent. */
 @Composable
 fun AgentFlagsSheet(agent: String, conn: HostConnection?, onDismiss: () -> Unit) {
-    if (agent == "claude") ClaudeFlagsSheet(conn, onDismiss) else AgyFlagsSheet(conn, onDismiss)
+    when (agent) {
+        "claude" -> ClaudeFlagsSheet(conn, onDismiss)
+        "codex" -> CodexFlagsSheet(conn, onDismiss)
+        "", "agy" -> AgyFlagsSheet(conn, onDismiss)
+        else -> LaunchedEffect(agent) { onDismiss() }
+    }
 }
 
 private val claudeEfforts = listOf("" to "Default", "low" to "Low", "medium" to "Medium", "high" to "High", "xhigh" to "XHigh", "max" to "Max")

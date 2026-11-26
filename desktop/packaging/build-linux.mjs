@@ -29,7 +29,7 @@ fs.writeFileSync(
     {
       name: 'agent-companion',
       productName: 'Agent Companion',
-      version: rootPkg.version || '0.4.0',
+      version: rootPkg.version || '0.5.0',
       description: 'End-to-end encrypted Linux desktop workbench for agentc coding agents',
       desktopName: 'agent-companion.desktop',
       author: { name: 'Sidd065', email: '78248734+Sidd065@users.noreply.github.com' },
