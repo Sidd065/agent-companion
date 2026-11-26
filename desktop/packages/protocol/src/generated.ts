@@ -3,7 +3,7 @@
 
 export const PROTOCOL_VERSION = 2 as const;
 
-export const SERVER_CAPABILITIES = ["projects","gitops","worktrees","checkpoints","github_pr","github_issues","scripts","providers_acp","codex","handoff","inline_exec","search","usage","schedules","host_health","settle_snooze","remain_on_exit","providers.codex","providers.openrouter","customModels"] as const;
+export const SERVER_CAPABILITIES = ["projects","gitops","worktrees","checkpoints","github_pr","github_issues","scripts","providers_acp","codex","handoff","inline_exec","search","usage","schedules","host_health","settle_snooze","remain_on_exit","providers.codex","providers.openrouter","customModels","tunnel.cloudflare","notifications.filter","devices.revokeOthers"] as const;
 export type ServerCapability = (typeof SERVER_CAPABILITIES)[number];
 
 export interface WireHello {
@@ -236,6 +236,7 @@ export interface SessionSummary {
   mode?: string;
   thought?: string;
   skipPermissions: boolean;
+  autoAllowReads?: boolean;
   createdAt: number;
   updatedAt: number;
   lastText?: string;
@@ -280,6 +281,7 @@ export interface SessionDetail {
   mode?: string;
   thought?: string;
   skipPermissions: boolean;
+  autoAllowReads?: boolean;
   createdAt: number;
   updatedAt: number;
   lastText?: string;
@@ -321,6 +323,7 @@ export interface SessionDetail {
 
 export interface SessionFlags {
   skipPermissions?: boolean | null;
+  autoAllowReads?: boolean | null;
   sandbox?: boolean;
   sandboxMode?: string;
   approvalPolicy?: string;
@@ -337,6 +340,7 @@ export interface SessionFlags {
 
 export interface CreateSessionParams {
   skipPermissions?: boolean | null;
+  autoAllowReads?: boolean | null;
   sandbox?: boolean;
   sandboxMode?: string;
   approvalPolicy?: string;
@@ -766,6 +770,8 @@ export interface UsageBucket {
 
 export interface UsageSummary {
   days: number;
+  hours?: number;
+  allTime?: boolean;
   turns: number;
   inputTokens: number;
   outputTokens: number;

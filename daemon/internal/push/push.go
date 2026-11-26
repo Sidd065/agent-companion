@@ -39,17 +39,107 @@ type ServiceAccount struct {
 	TokenURI     string `json:"token_uri"`
 }
 
+// DefaultEvents are the notification categories enabled when a client has not
+// customized its filter: input required, task done, and halted/error (no minor progress spam).
+var DefaultEvents = []string{"input", "done", "halted"}
+
+// Category maps a wire notification kind to one of the 4 user-configurable
+// categories ("input", "done", "halted", "progress"), or "" for control/test events.
+func Category(kind string) string {
+	switch strings.ToLower(strings.TrimSpace(kind)) {
+	case "permission", "question", "plan", "term_blocked":
+		return "input"
+	case "done", "term_done", "aside":
+		return "done"
+	case "error", "term_failed", "schedule_error", "halted":
+		return "halted"
+	case "progress", "schedule_started":
+		return "progress"
+	default:
+		return ""
+	}
+}
+
+// NormalizeEvents canonicalizes a list of notification category names.
+// An explicit empty list becomes ["none"] so JSON persistence distinguishes
+// "mute all categories" from "unset (use DefaultEvents)".
+func NormalizeEvents(in []string) []string {
+	if in == nil {
+		return nil
+	}
+	seen := map[string]bool{}
+	var out []string
+	add := func(c string) {
+		if !seen[c] {
+			seen[c] = true
+			out = append(out, c)
+		}
+	}
+	for _, raw := range in {
+		for _, part := range strings.Split(raw, ",") {
+			switch strings.ToLower(strings.TrimSpace(part)) {
+			case "":
+				continue
+			case "all", "*":
+				return []string{"input", "done", "halted", "progress"}
+			case "none", "off":
+				return []string{"none"}
+			case "input", "waiting", "approval":
+				add("input")
+			case "done", "completed", "complete":
+				add("done")
+			case "halted", "error", "failed", "halt":
+				add("halted")
+			case "progress", "updates", "minor":
+				add("progress")
+			}
+		}
+	}
+	if len(out) == 0 {
+		return []string{"none"}
+	}
+	return out
+}
+
+// AllowsEvents reports whether kind passes the given normalized category filter.
+// When events is empty/nil, DefaultEvents ("input", "done", "halted") applies.
+func AllowsEvents(events []string, kind string) bool {
+	cat := Category(kind)
+	if cat == "" {
+		return true
+	}
+	evs := events
+	if len(evs) == 0 {
+		evs = DefaultEvents
+	}
+	for _, e := range evs {
+		if e == "all" || e == cat {
+			return true
+		}
+		if e == "none" {
+			return false
+		}
+	}
+	return false
+}
+
 // Device is a registered app install.
 type Device struct {
-	Token      string `json:"token"`
-	DeviceID   string `json:"deviceId,omitempty"` // paired device (secure.Device.ID)
-	HostKey    string `json:"hostKey"`
-	Device     string `json:"device"`
-	Login      string `json:"login"`
-	Node       string `json:"node"`
-	Registered int64  `json:"registered"`
-	LastOK     int64  `json:"lastOk,omitempty"`
-	LastErr    string `json:"lastErr,omitempty"`
+	Token      string   `json:"token"`
+	DeviceID   string   `json:"deviceId,omitempty"` // paired device (secure.Device.ID)
+	HostKey    string   `json:"hostKey"`
+	Device     string   `json:"device"`
+	Login      string   `json:"login"`
+	Node       string   `json:"node"`
+	Events     []string `json:"events,omitempty"`
+	Registered int64    `json:"registered"`
+	LastOK     int64    `json:"lastOk,omitempty"`
+	LastErr    string   `json:"lastErr,omitempty"`
+}
+
+// Allows reports whether this device wants push notifications of kind.
+func (d Device) Allows(kind string) bool {
+	return AllowsEvents(d.Events, kind)
 }
 
 // Message is what gets delivered (all values become strings).
@@ -230,9 +320,15 @@ func (p *Pusher) accessToken(ctx context.Context) (string, string, error) {
 func (p *Pusher) Register(d Device) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	if d.Events != nil {
+		d.Events = NormalizeEvents(d.Events)
+	}
 	if old, ok := p.devices[d.Token]; ok {
 		d.Registered = old.Registered
 		d.LastOK = old.LastOK
+		if d.Events == nil {
+			d.Events = old.Events
+		}
 	} else {
 		d.Registered = time.Now().UnixMilli()
 		log.Printf("push: registered device %q (%s)", d.Device, d.Node)
@@ -275,8 +371,12 @@ func (p *Pusher) Status() map[string]any {
 	_ = p.loadSALocked()
 	devs := []map[string]any{}
 	for _, d := range p.devices {
+		evs := d.Events
+		if len(evs) == 0 {
+			evs = DefaultEvents
+		}
 		devs = append(devs, map[string]any{"device": d.Device, "node": d.Node, "hostKey": d.HostKey, "registered": d.Registered,
-			"lastOk": d.LastOK, "lastErr": d.LastErr, "token": d.Token[:min(12, len(d.Token))] + "…"})
+			"events": evs, "lastOk": d.LastOK, "lastErr": d.LastErr, "token": d.Token[:min(12, len(d.Token))] + "…"})
 	}
 	m := map[string]any{"configured": p.sa != nil, "serviceAccountPath": p.SAPath, "content": p.Content, "devices": devs,
 		"lastError": p.lastErr, "sent": p.sent}
@@ -342,6 +442,9 @@ func (p *Pusher) Send(m Message) {
 		return
 	}
 	for _, d := range devs {
+		if !d.Allows(m.Kind) {
+			continue
+		}
 		d := d
 		go func() {
 			ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
@@ -380,6 +483,8 @@ func (p *Pusher) sendOne(ctx context.Context, token string, data map[string]stri
 	android := map[string]any{"priority": "HIGH", "ttl": "86400s"}
 	if kind == "done" || kind == "term_done" {
 		android["ttl"] = "21600s"
+	} else if kind == "progress" || kind == "schedule_started" {
+		android["ttl"] = "3600s"
 	}
 	payload, _ := json.Marshal(map[string]any{"message": map[string]any{"token": token, "data": data, "android": android}})
 	var lastErr error

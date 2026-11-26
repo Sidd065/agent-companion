@@ -38,6 +38,7 @@ import {
 } from '../utils/multiHost.js';
 
 export type { RightTab, RightTabKind };
+import { allowsDesktopNotification, type SessionNoteRecord } from '../utils/sessionHelpers.js';
 import { applyTheme } from './themes.js';
 
 export interface ClientSettings {
@@ -53,6 +54,13 @@ export interface ClientSettings {
   showWorkingShelf: boolean;
   groupByProject: boolean;
   notificationsEnabled: boolean;
+  notifyOnInput: boolean;
+  notifyOnDone: boolean;
+  notifyOnHalted: boolean;
+  notifyOnProgress: boolean;
+  expandToolCalls: boolean;
+  agyAutoAllowReads: boolean;
+  sidebarWidth: number;
   closeToTray: boolean;
   renderMath: boolean;
   chatMaxWidth: number;
@@ -77,6 +85,13 @@ export const DEFAULT_SETTINGS: ClientSettings = {
   showWorkingShelf: true,
   groupByProject: false,
   notificationsEnabled: true,
+  notifyOnInput: true,
+  notifyOnDone: true,
+  notifyOnHalted: true,
+  notifyOnProgress: false,
+  expandToolCalls: false,
+  agyAutoAllowReads: false,
+  sidebarWidth: 276,
   closeToTray: false,
   renderMath: true,
   chatMaxWidth: 860,
@@ -224,6 +239,14 @@ interface AppContextValue {
   allSessions: Array<SessionSummary & { hostId: string; hostName: string }>;
   allProjects: Array<Project & { hostId: string; hostName: string }>;
 
+  // Client-side session notes & quick navigation signals
+  sessionNotes: Record<string, SessionNoteRecord>;
+  setSessionNote: (hostId: string, sessionId: string, text: string) => void;
+  switchToPreviousThread: () => void;
+  jumpToLastNotifiedThread: () => void;
+  terminalCycleSignal: { delta: number; seq: number };
+  cycleTerminal: (delta: number) => void;
+
   // Composer bridge
   composerChips: ComposerContextChip[];
   addComposerChip: (chip: Omit<ComposerContextChip, 'id'>) => void;
@@ -256,6 +279,7 @@ const AppContext = createContext<AppContextValue | null>(null);
 
 const LS_HOSTS = 'agentc.desktop.hosts.v1';
 const LS_SETTINGS = 'agentc.desktop.settings.v1';
+const LS_NOTES = 'agentc.desktop.notes.v1';
 
 async function loadSavedHosts(): Promise<PairedHostCredentials[]> {
   if (window.agentcDesktop) {
@@ -295,6 +319,38 @@ async function persistSettings(s: ClientSettings): Promise<void> {
   }
 }
 
+async function loadSavedNotes(): Promise<Record<string, SessionNoteRecord>> {
+  try {
+    const raw = window.agentcDesktop
+      ? await window.agentcDesktop.loadNotes()
+      : (JSON.parse(localStorage.getItem(LS_NOTES) || '{}') as Record<string, unknown>);
+    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return {};
+    const out: Record<string, SessionNoteRecord> = {};
+    for (const [k, v] of Object.entries(raw)) {
+      if (v && typeof v === 'object' && typeof (v as { text?: unknown }).text === 'string') {
+        const text = (v as { text: string }).text;
+        if (text.trim()) {
+          out[k] = {
+            text,
+            updatedAt: Number((v as { updatedAt?: unknown }).updatedAt) || 0,
+          };
+        }
+      }
+    }
+    return out;
+  } catch {
+    return {};
+  }
+}
+
+async function persistNotes(notes: Record<string, SessionNoteRecord>): Promise<void> {
+  if (window.agentcDesktop) {
+    await window.agentcDesktop.saveNotes(notes as unknown as Record<string, unknown>);
+  } else {
+    localStorage.setItem(LS_NOTES, JSON.stringify(notes));
+  }
+}
+
 export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
   const supervisorsRef = useRef<Map<string, HostSupervisor>>(new Map());
   const [hosts, setHosts] = useState<Record<string, HostRuntime>>({});
@@ -331,6 +387,13 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
   const [details, setDetails] = useState<Record<string, SessionDetail>>({});
   const [asidesMap, setAsidesMap] = useState<Record<string, AsideItem[]>>({});
+  const [sessionNotes, setSessionNotes] = useState<Record<string, SessionNoteRecord>>({});
+  const recentThreadsRef = useRef<Array<{ hostId: string; sessionId: string }>>([]);
+  const lastNotifiedRef = useRef<{ hostId: string; sessionId: string } | null>(null);
+  const [terminalCycleSignal, setTerminalCycleSignal] = useState<{ delta: number; seq: number }>({
+    delta: 0,
+    seq: 0,
+  });
 
   // Layout state
   const [sidebarOpen, setSidebarOpen] = useState(true);
@@ -743,10 +806,28 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           setHosts((prev) => (prev[hostId] ? { ...prev, [hostId]: { ...prev[hostId], schedules: sc } } : prev));
           break;
         }
+        case 'host.url': {
+          const payload = data as { url?: string };
+          const nextUrl = payload?.url?.trim();
+          const sup = supervisorsRef.current.get(hostId);
+          if (sup && nextUrl && nextUrl !== sup.creds.url) {
+            const updatedCreds = { ...sup.creds, url: nextUrl };
+            sup.updateCredentials(updatedCreds);
+            setHosts((prev) =>
+              prev[hostId] ? { ...prev, [hostId]: { ...prev[hostId], creds: updatedCreds } } : prev,
+            );
+            const list = Array.from(supervisorsRef.current.values()).map((s) => s.creds);
+            void persistHosts(list);
+          }
+          break;
+        }
         case 'notify': {
           const n = data as Notification;
+          if (n.sessionId) {
+            lastNotifiedRef.current = { hostId, sessionId: n.sessionId };
+          }
           const isCurrent = activeHostRef.current === hostId && activeSessionRef.current === n.sessionId && document.hasFocus();
-          if (settingsRef.current.notificationsEnabled && !isCurrent) {
+          if (allowsDesktopNotification(n.kind, settingsRef.current) && !isCurrent) {
             if (window.agentcDesktop) {
               void window.agentcDesktop.showNotification({
                 title: n.title || 'Agent Companion',
@@ -848,7 +929,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
             ? `Desktop (${window.agentcDesktop.hostname})`
             : 'Agent Companion Web',
           platform: window.agentcDesktop ? 'linux-desktop' : 'web',
-          appVersion: window.agentcDesktop?.version ?? '0.5.0',
+          appVersion: window.agentcDesktop?.version ?? '0.6.0',
         },
       );
       supervisorsRef.current.set(creds.id, sup);
@@ -866,6 +947,10 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       ) {
         applyWorkspaceTabReset(hostId);
       }
+      recentThreadsRef.current = [
+        { hostId, sessionId },
+        ...recentThreadsRef.current.filter((x) => !(x.hostId === hostId && x.sessionId === sessionId)),
+      ].slice(0, 24);
       setActiveHostIdState(hostId);
       activeHostRef.current = hostId;
       setActiveSessionId(sessionId);
@@ -876,6 +961,56 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     },
     [applyWorkspaceTabReset, subscribeSession],
   );
+
+  const setSessionNote = useCallback((hostId: string, sessionId: string, text: string) => {
+    if (!hostId || !sessionId) return;
+    const key = threadKey(hostId, sessionId);
+    setSessionNotes((prev) => {
+      const next = { ...prev };
+      if (!text.trim()) {
+        delete next[key];
+      } else {
+        next[key] = { text, updatedAt: Date.now() };
+      }
+      void persistNotes(next);
+      return next;
+    });
+  }, []);
+
+  const switchToPreviousThread = useCallback(() => {
+    const curHost = activeHostRef.current;
+    const curSess = activeSessionRef.current;
+    const candidate = recentThreadsRef.current.find(
+      (item) =>
+        !(item.hostId === curHost && item.sessionId === curSess) &&
+        hostsRef.current[item.hostId]?.sessions.some((s) => s.id === item.sessionId && !s.archived),
+    );
+    if (candidate) {
+      selectSession(candidate.hostId, candidate.sessionId);
+    }
+  }, [selectSession]);
+
+  const jumpToLastNotifiedThread = useCallback(() => {
+    const target = lastNotifiedRef.current;
+    if (target && hostsRef.current[target.hostId]?.sessions.some((s) => s.id === target.sessionId)) {
+      selectSession(target.hostId, target.sessionId);
+      return;
+    }
+    for (const h of Object.values(hostsRef.current)) {
+      const attn = h.sessions.find(
+        (s) => !s.archived && (s.pendingPermissions > 0 || Boolean(s.attention)),
+      );
+      if (attn) {
+        selectSession(h.creds.id, attn.id);
+        return;
+      }
+    }
+  }, [selectSession]);
+
+  const cycleTerminal = useCallback((delta: number) => {
+    setTerminalDrawerOpen(true);
+    setTerminalCycleSignal((prev) => ({ delta, seq: prev.seq + 1 }));
+  }, []);
 
   const openDraft = useCallback(
     (partial?: Partial<DraftConfig>) => {
@@ -947,7 +1082,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           ? `Desktop (${window.agentcDesktop.hostname})`
           : 'Agent Companion Web',
         platform: window.agentcDesktop ? 'linux-desktop' : 'web',
-        appVersion: window.agentcDesktop?.version ?? '0.5.0',
+        appVersion: window.agentcDesktop?.version ?? '0.6.0',
         isLocal,
       });
       mountSupervisor(credentials);
@@ -998,6 +1133,11 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       setTranscripts((prev) => pruneHostPrefixMap(prev, hostId));
       setAsidesMap((prev) => pruneHostPrefixMap(prev, hostId));
       setProviderCatalogs((prev) => pruneHostPrefixMap(prev, hostId));
+      setSessionNotes((prev) => {
+        const next = pruneHostPrefixMap(prev, hostId);
+        if (next !== prev) void persistNotes(next);
+        return next;
+      });
       setSettings((prev) => {
         const nextScoped = pruneHostPrefixMap(prev.customModelsByScope ?? {}, hostId);
         if (nextScoped === prev.customModelsByScope) return prev;
@@ -1089,7 +1229,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     rightTabsRef.current = nextTabs;
     activeRightTabIdRef.current = targetId;
     setRightTabs(nextTabs);
-    if (tab.filePath) {
+    if (tab.filePath || tab.openFilePath || tab.line) {
       setRightTabFocusSeq((s) => s + 1);
     }
     setActiveRightTabId(targetId);
@@ -1127,8 +1267,13 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   useEffect(() => {
     let mounted = true;
     (async () => {
-      const [savedHosts, savedSettings] = await Promise.all([loadSavedHosts(), loadSavedSettings()]);
+      const [savedHosts, savedSettings, savedNotes] = await Promise.all([
+        loadSavedHosts(),
+        loadSavedSettings(),
+        loadSavedNotes(),
+      ]);
       if (!mounted) return;
+      setSessionNotes(savedNotes);
       const rawScoped = (savedSettings as Partial<ClientSettings>).customModelsByScope;
       const cleanScoped: Record<string, CustomModel[]> = {};
       if (rawScoped && typeof rawScoped === 'object' && !Array.isArray(rawScoped)) {
@@ -1327,6 +1472,12 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     activeAsides,
     allSessions,
     allProjects,
+    sessionNotes,
+    setSessionNote,
+    switchToPreviousThread,
+    jumpToLastNotifiedThread,
+    terminalCycleSignal,
+    cycleTerminal,
     composerChips,
     addComposerChip,
     removeComposerChip,

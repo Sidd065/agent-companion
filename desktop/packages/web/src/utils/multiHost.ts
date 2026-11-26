@@ -5,6 +5,7 @@ export type RightTabKind =
   | 'files'
   | 'side'
   | 'artifacts'
+  | 'notes'
   | 'pr'
   | 'git'
   | 'terminal'
@@ -18,6 +19,8 @@ export interface RightTab {
   diffScope?: 'uncommitted' | 'latest' | 'turn' | 'session' | 'branch' | 'staged';
   turnIndex?: number;
   filePath?: string;
+  openFilePath?: string;
+  line?: number;
   browserUrl?: string;
   termId?: string;
 }
@@ -120,6 +123,8 @@ export function upsertRightTab(
   if (existing) {
     const crossHost = Boolean(existing.hostId && stampedHostId && existing.hostId !== stampedHostId);
     const nextFilePath = crossHost && !tab.hostId ? undefined : tab.filePath;
+    const nextOpenFilePath = crossHost && !tab.hostId ? undefined : tab.openFilePath;
+    const nextLine = crossHost && !tab.hostId ? undefined : tab.line;
     const nextTermId = tab.termId ?? (!crossHost ? existing.termId : undefined);
     const nextBrowserUrl = tab.browserUrl ?? existing.browserUrl;
 
@@ -135,6 +140,8 @@ export function upsertRightTab(
           : {}),
       ...(tab.turnIndex !== undefined ? { turnIndex: tab.turnIndex } : {}),
       ...(nextFilePath !== undefined ? { filePath: nextFilePath } : {}),
+      ...(nextOpenFilePath !== undefined ? { openFilePath: nextOpenFilePath } : {}),
+      ...(nextLine !== undefined ? { line: nextLine } : {}),
       ...(nextBrowserUrl !== undefined ? { browserUrl: nextBrowserUrl } : {}),
       ...(nextTermId !== undefined ? { termId: nextTermId } : {}),
     };
@@ -175,11 +182,16 @@ export function clearWorkspacePinnedTabs(tabs: RightTab[], nextHostId: string): 
       return t;
     }
     const targetHostId = nextHostId || t.hostId;
-    if (t.filePath === undefined && t.hostId === targetHostId) {
+    if (
+      t.filePath === undefined &&
+      t.openFilePath === undefined &&
+      t.line === undefined &&
+      t.hostId === targetHostId
+    ) {
       return t;
     }
     changed = true;
-    const { filePath: _cleared, ...rest } = t;
+    const { filePath: _cleared, openFilePath: _clearedOpen, line: _clearedLine, ...rest } = t;
     return {
       ...rest,
       hostId: targetHostId,

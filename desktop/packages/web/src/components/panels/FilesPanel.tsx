@@ -248,6 +248,8 @@ export const FilesPanel: React.FC<{ tab: RightTab }> = ({ tab }) => {
   const [openFile, setOpenFile] = useState<ReadResult | null>(null);
   const openFileRef = useRef<ReadResult | null>(openFile);
   openFileRef.current = openFile;
+  const [videoUrl, setVideoUrl] = useState<string | null>(null);
+  const viewerScrollRef = useRef<HTMLDivElement | null>(null);
   const [editMode, setEditMode] = useState(false);
   const [editText, setEditText] = useState('');
   const editTextRef = useRef(editText);
@@ -682,9 +684,78 @@ export const FilesPanel: React.FC<{ tab: RightTab }> = ({ tab }) => {
     }
   };
 
+  // Auto-open explicit target file from file://#L<line> links
+  useEffect(() => {
+    if (!hostId || !tab.openFilePath) return;
+    if (tab.hostId && tab.hostId !== hostId) return;
+    void openPath(tab.openFilePath, hostId);
+  }, [hostId, tab.hostId, tab.openFilePath, rightTabFocusSeq, openPath]);
+
+  // Scroll to target line when `#L<line>` or `:line` was requested
+  useEffect(() => {
+    if (!tab.line || tab.line <= 0 || !openFile || openFile.binary) return;
+    const t = setTimeout(() => {
+      const lineEl = viewerScrollRef.current?.querySelector<HTMLElement>(`[data-file-line="${tab.line}"]`);
+      lineEl?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    }, 40);
+    return () => clearTimeout(t);
+  }, [openFile?.path, tab.line, rightTabFocusSeq]);
+
+  // Stream video preview when openFile is an mp4/webm/mov file
+  const isVideo = Boolean(
+    openFile &&
+      (openFile.mime?.startsWith('video/') || /\.(mp4|webm|mov|m4v)$/i.test(openFile.path)),
+  );
+  useEffect(() => {
+    if (!isVideo || !openFile || !hostId) {
+      setVideoUrl((prev) => {
+        if (prev) URL.revokeObjectURL(prev);
+        return null;
+      });
+      return;
+    }
+    let cancelled = false;
+    let createdUrl = '';
+    (async () => {
+      try {
+        const chunks: Uint8Array[] = [];
+        let offset = 0;
+        let mime = openFile.mime || 'video/mp4';
+        while (!cancelled && offset < 32 * 1024 * 1024) {
+          const res = await callHost<DownloadChunkResult>(hostId, 'fs.download', {
+            path: openFile.path,
+            offset,
+            length: UPLOAD_CHUNK_BYTES,
+          });
+          const bytes = res.data ? base64ToBytes(res.data) : new Uint8Array(0);
+          if (bytes.length > 0) chunks.push(bytes);
+          offset += bytes.length;
+          if (res.mime) mime = res.mime;
+          if (res.eof || bytes.length === 0) break;
+        }
+        if (cancelled || chunks.length === 0) return;
+        const total = chunks.reduce((acc, c) => acc + c.length, 0);
+        const merged = new Uint8Array(total);
+        let pos = 0;
+        for (const c of chunks) {
+          merged.set(c, pos);
+          pos += c.length;
+        }
+        createdUrl = URL.createObjectURL(new Blob([merged], { type: mime }));
+        setVideoUrl(createdUrl);
+      } catch {
+        // ignore preview stream error
+      }
+    })();
+    return () => {
+      cancelled = true;
+      if (createdUrl) URL.revokeObjectURL(createdUrl);
+    };
+  }, [isVideo, openFile?.path, hostId, callHost]);
+
   const listToDisplay = searchResults ?? entries;
   const isImage = Boolean(openFile?.mime?.startsWith('image/') && openFile?.base64);
-  const isMarkdown = Boolean(openFile?.path.toLowerCase().endsWith('.md'));
+  const isMarkdown = Boolean(openFile?.path.toLowerCase().endsWith('.md') && (!tab.line || tab.line <= 0));
 
   return (
     <div data-testid="files-panel" className="flex-1 flex min-h-0 text-xs">
@@ -1061,13 +1132,22 @@ export const FilesPanel: React.FC<{ tab: RightTab }> = ({ tab }) => {
               </div>
             )}
 
-            <div className="flex-1 overflow-auto min-h-0">
+            <div ref={viewerScrollRef} className="flex-1 overflow-auto min-h-0">
               {isImage ? (
                 <div className="p-4 flex items-center justify-center">
                   <img
                     src={`data:${openFile.mime};base64,${openFile.base64}`}
                     alt={openFile.path}
                     className="max-w-full max-h-[70vh] rounded-lg border border-[var(--border)]"
+                  />
+                </div>
+              ) : isVideo && videoUrl ? (
+                <div className="p-4 flex items-center justify-center">
+                  <video
+                    src={videoUrl}
+                    controls
+                    loop
+                    className="max-w-full max-h-[70vh] rounded-lg border border-[var(--border)] bg-black"
                   />
                 </div>
               ) : openFile.binary ? (
@@ -1097,8 +1177,19 @@ export const FilesPanel: React.FC<{ tab: RightTab }> = ({ tab }) => {
                 </div>
               ) : (
                 <div className="font-mono text-[12px] leading-[1.55] p-2">
-                  {(openFile.text ?? '').split('\n').map((ln, idx) => (
-                    <div key={idx} className="group flex hover:bg-[var(--bg-hover)]/40">
+                  {(openFile.text ?? '').split('\n').map((ln, idx) => {
+                    const lineNo = idx + 1;
+                    const isHighlighted = Boolean(tab.line && tab.line === lineNo);
+                    return (
+                    <div
+                      key={idx}
+                      data-file-line={lineNo}
+                      className={`group flex ${
+                        isHighlighted
+                          ? 'bg-[var(--accent-soft)] ring-1 ring-[var(--accent)]/40 rounded'
+                          : 'hover:bg-[var(--bg-hover)]/40'
+                      }`}
+                    >
                       <span className="w-10 shrink-0 select-none text-right pr-3 text-[10.5px] text-[var(--text-muted)]">
                         {idx + 1}
                       </span>
@@ -1119,7 +1210,8 @@ export const FilesPanel: React.FC<{ tab: RightTab }> = ({ tab }) => {
                       </button>
                       <span className="flex-1 whitespace-pre-wrap break-all text-[var(--text-primary)]">{ln}</span>
                     </div>
-                  ))}
+                    );
+                  })}
                 </div>
               )}
             </div>

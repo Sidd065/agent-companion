@@ -43,6 +43,7 @@ import androidx.compose.material.icons.outlined.Refresh
 import androidx.compose.material.icons.outlined.Share
 import androidx.compose.material.icons.outlined.StopCircle
 import androidx.compose.material.icons.outlined.Terminal
+import androidx.compose.material.icons.automirrored.outlined.StickyNote2
 import androidx.compose.material.icons.outlined.QuestionAnswer
 import androidx.compose.material.icons.outlined.DataUsage
 import androidx.compose.material.icons.outlined.Extension
@@ -164,10 +165,14 @@ fun ChatScreen(sessionId: String, prefill: String) {
     var hostPick by remember { mutableStateOf(false) }
 
     DisposableEffect(store, conn.config.id) {
+        io.github.sidd065.agentcompanion.ui.CurrentSession.id = sessionId
         store.attach()
         val hide = g.showSession(sessionId, hostId = conn.config.id)
         g.notifier.cancelFor(conn.config.id, sessionId)
         onDispose {
+            if (io.github.sidd065.agentcompanion.ui.CurrentSession.id == sessionId) {
+                io.github.sidd065.agentcompanion.ui.CurrentSession.id = null
+            }
             store.detach()
             hide()
         }
@@ -386,7 +391,7 @@ fun ChatScreen(sessionId: String, prefill: String) {
                     Column(Modifier.clickable { renaming = true }) {
                         // Until the agent names it, a new session goes by its first message.
                         val title = s?.displayTitle?.takeIf { s.title.isNotBlank() && s.title != "New session" }
-                            ?: items.firstOrNull { it.kind == "user" }?.text?.lineSequence()?.firstOrNull { it.isNotBlank() }?.trim()?.take(80)
+                            ?: items.firstOrNull { it.kind == "user" }?.text?.let { io.github.sidd065.agentcompanion.core.plainInlineTitle(it) }?.takeIf { it.isNotBlank() }?.take(80)
                             ?: s?.displayTitle ?: "Session"
                         Text(title, maxLines = 1, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.titleMedium)
                         Row(verticalAlignment = Alignment.CenterVertically) {
@@ -397,7 +402,7 @@ fun ChatScreen(sessionId: String, prefill: String) {
                                     stateLabel(s),
                                     // Ready, but a subagent or background command still runs.
                                     live?.let { l ->
-                                        val agents = l.subagents.count { it.alive }
+                                        val agents = l.activeAgents.size
                                         val shells = l.tasks.size
                                         when {
                                             s?.state != "idle" -> null
@@ -415,11 +420,20 @@ fun ChatScreen(sessionId: String, prefill: String) {
                 },
                 navigationIcon = { IconButton(onClick = { nav.popBackStack() }) { Icon(Icons.AutoMirrored.Filled.ArrowBack, null) } },
                 actions = {
+                    val sessionNote = settings.noteFor(conn.config.id, sessionId)
                     ContextRing(s) { sheet = "usage" }
+                    IconButton(onClick = { sheet = "notes" }) {
+                        Icon(
+                            Icons.AutoMirrored.Outlined.StickyNote2,
+                            "Session notes",
+                            tint = if (sessionNote != null) MaterialTheme.colorScheme.primary else androidx.compose.ui.graphics.Color.Unspecified,
+                        )
+                    }
                     IconButton(onClick = { nav.navigate(Routes.diff(sessionId, host = conn.config.id)) }) { Icon(Icons.Outlined.Difference, "Changes") }
                     Box {
                         IconButton(onClick = { menu = true }) { Icon(Icons.Outlined.MoreVert, "More") }
                         DropdownMenu(menu, { menu = false }) {
+                            MenuRow(Icons.AutoMirrored.Outlined.StickyNote2, "Session notes") { menu = false; sheet = "notes" }
                             MenuRow(Icons.Outlined.Inventory2, "Artifacts") { menu = false; activityTab = "artifacts" }
                             MenuRow(Icons.Outlined.Terminal, "Background shells & agents") { menu = false; activityTab = if (live?.subagents?.isNotEmpty() == true && live?.tasks.isNullOrEmpty()) "agents" else "tasks" }
                             MenuRow(Icons.Outlined.FolderOpen, "Browse folder") { menu = false; s?.cwd?.let { nav.navigate(Routes.files(it, host = conn.config.id)) } }
@@ -474,6 +488,20 @@ fun ChatScreen(sessionId: String, prefill: String) {
                         ) { Icon(Icons.Outlined.KeyboardArrowDown, "Scroll to bottom") }
                     }
                 }
+            }
+            val currentNote = settings.noteFor(conn.config.id, sessionId)
+            if (currentNote != null) {
+                SessionNotesBanner(
+                    noteText = currentNote.text,
+                    onOpen = { sheet = "notes" },
+                    onToggleTopTodo = {
+                        val firstUnchecked = parseNoteChecklist(currentNote.text).firstOrNull { !it.checked }
+                        if (firstUnchecked != null) {
+                            val toggled = toggleNoteChecklistLine(currentNote.text, firstUnchecked.lineIndex)
+                            scope.launch { g.prefs.update { it.withSessionNote(conn.config.id, sessionId, toggled) } }
+                        }
+                    },
+                )
             }
             ActivityStrip(live, onOpen = { activityTab = it }, onReview = { nav.navigate(Routes.artifact(sessionId, it.path, host = conn.config.id)) })
             unseenAside?.let { u ->
@@ -561,6 +589,17 @@ fun ChatScreen(sessionId: String, prefill: String) {
         "usage" -> UsageSheet(s, onDismiss = { sheet = null }, onCompact = { send("/compact", emptyList(), null) }, onContext = if (isClaude) ({ sheet = "context" }) else null)
         "context" -> ContextUsageSheet(conn, sessionId, onDismiss = { sheet = null }, onCompact = { send("/compact", emptyList(), null) })
         "mcp" -> McpStatusSheet(conn, sessionId, onDismiss = { sheet = null })
+        "notes" -> SessionNotesSheet(
+            note = settings.noteFor(conn.config.id, sessionId),
+            sessionTitle = s?.displayTitle.orEmpty(),
+            onSave = { nextText -> scope.launch { g.prefs.update { it.withSessionNote(conn.config.id, sessionId, nextText) } } },
+            onInsertIntoComposer = { snippet ->
+                val cur = composer.value.text.trimEnd()
+                composer.setText(if (cur.isEmpty()) snippet else "$cur\n$snippet")
+                runCatching { focus.requestFocus() }
+            },
+            onDismiss = { sheet = null },
+        )
         "artifacts" -> activityTab = "artifacts"
         "tasks" -> { sheet = null; activityTab = if (live?.tasks.isNullOrEmpty() && live?.subagents?.isNotEmpty() == true) "agents" else "tasks" }
         "status" -> StatusSheet(s, extras, agents.firstOrNull { it.id == s?.agent }?.version, conn.config.label, onDismiss = { sheet = null }, codexCatalog = codexCatalog)
@@ -696,6 +735,7 @@ private fun runLocal(
         "effort" -> setSheet("effort")
         "mode" -> setSheet("mode")
         "context", "usage" -> setSheet("usage")
+        "notes", "note" -> setSheet("notes")
         "artifacts" -> setSheet("artifacts")
         "help" -> setSheet("help")
         "rewind" -> if (conn.agentHasFeature(summary?.agent, "rewind")) setSheet("rewind") else snack("Rewind isn't supported by $agentName")

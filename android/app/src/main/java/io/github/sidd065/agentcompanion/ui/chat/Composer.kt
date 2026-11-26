@@ -90,6 +90,7 @@ val localCommands = listOf(
     CmdEntry("usage", "Context window and token usage", true),
     CmdEntry("copy", "Copy the latest response", true),
     CmdEntry("export", "Export the conversation as Markdown", true),
+    CmdEntry("notes", "Private client-side notes & next steps for this session", true),
     CmdEntry("artifacts", "Plans, task lists and other files the agent saved", true),
     CmdEntry("files", "Browse this session's folder", true),
     CmdEntry("terminal", "Continue this conversation in the agent's terminal UI", true),

@@ -576,10 +576,88 @@ func (h asideCaptureHandler) HandleRequest(c *acp.Conn, id json.RawMessage, _ st
 
 // ---- Global Search ----
 
-// GlobalSearch searches across session titles and transcript messages.
+// parseSearchTerms splits a search query into normalized terms, preserving
+// double-quoted exact phrases ("foo bar") alongside whitespace-separated tokens.
+func parseSearchTerms(raw string) []string {
+	s := strings.TrimSpace(raw)
+	if s == "" {
+		return nil
+	}
+	var terms []string
+	i := 0
+	for i < len(s) {
+		for i < len(s) && (s[i] == ' ' || s[i] == '\t' || s[i] == '\n' || s[i] == '\r') {
+			i++
+		}
+		if i >= len(s) {
+			break
+		}
+		if s[i] == '"' {
+			i++
+			start := i
+			for i < len(s) && s[i] != '"' {
+				i++
+			}
+			phrase := foldSearchText(s[start:i])
+			if strings.TrimSpace(phrase) != "" {
+				terms = append(terms, phrase)
+			}
+			if i < len(s) && s[i] == '"' {
+				i++
+			}
+		} else {
+			start := i
+			for i < len(s) && s[i] != ' ' && s[i] != '\t' && s[i] != '\n' && s[i] != '\r' && s[i] != '"' {
+				i++
+			}
+			tok := foldSearchText(s[start:i])
+			if tok != "" {
+				terms = append(terms, tok)
+			}
+		}
+	}
+	return terms
+}
+
+// foldSearchRune normalizes a rune for case-insensitive search while folding
+// Turkish dotted capital İ (U+0130 -> "i\u0307" in Unicode ToLower) and dotless ı (U+0131)
+// to plain "i" so ASCII/Unicode queries match cleanly without byte-offset drift.
+func foldSearchRune(r rune) string {
+	switch r {
+	case '\u0130', '\u0131':
+		return "i"
+	case '\u0307':
+		return ""
+	}
+	return strings.ReplaceAll(strings.ToLower(string(r)), "\u0307", "")
+}
+
+func foldSearchText(s string) string {
+	var b strings.Builder
+	b.Grow(len(s))
+	for _, r := range s {
+		b.WriteString(foldSearchRune(r))
+	}
+	return b.String()
+}
+
+func matchAllTerms(foldedHaystack string, terms []string) bool {
+	if len(terms) == 0 {
+		return false
+	}
+	for _, t := range terms {
+		if !strings.Contains(foldedHaystack, t) {
+			return false
+		}
+	}
+	return true
+}
+
+// GlobalSearch searches across session titles and transcript messages, supporting
+// quoted exact phrases ("...") and multi-token queries with Unicode-safe folding.
 func (m *Manager) GlobalSearch(ctx context.Context, query, projectID string, limit int) []SearchHit {
-	q := strings.ToLower(strings.TrimSpace(query))
-	if q == "" {
+	terms := parseSearchTerms(query)
+	if len(terms) == 0 {
 		return []SearchHit{}
 	}
 	if limit <= 0 || limit > 100 {
@@ -595,7 +673,8 @@ func (m *Manager) GlobalSearch(ctx context.Context, query, projectID string, lim
 		if projectID != "" && meta.ProjectID != projectID {
 			continue
 		}
-		if strings.Contains(strings.ToLower(meta.Title), q) || strings.Contains(strings.ToLower(meta.Branch), q) {
+		combinedMeta := foldSearchText(meta.Title + " " + meta.Branch)
+		if matchAllTerms(combinedMeta, terms) {
 			hits = append(hits, SearchHit{
 				Kind: "session", SessionID: meta.ID, ProjectID: meta.ProjectID,
 				Title: meta.Title, Snippet: meta.LastText, Path: meta.Cwd, UpdatedAt: meta.UpdatedAt,
@@ -606,7 +685,7 @@ func (m *Manager) GlobalSearch(ctx context.Context, query, projectID string, lim
 			if it.Kind != "user" && it.Kind != "agent" {
 				continue
 			}
-			if snip, ok := caseFoldSnippet(it.Text, q, 40, 80); ok {
+			if snip, ok := caseFoldTermsSnippet(it.Text, terms, 40, 80); ok {
 				hits = append(hits, SearchHit{
 					Kind: "message", SessionID: meta.ID, ProjectID: meta.ProjectID,
 					Title: meta.Title, Snippet: snip, UpdatedAt: it.Ts,
@@ -629,11 +708,18 @@ func caseFoldSnippet(text, queryLower string, contextRunesBefore, contextRunesAf
 	if queryLower == "" {
 		return "", false
 	}
+	return caseFoldTermsSnippet(text, []string{foldSearchText(queryLower)}, contextRunesBefore, contextRunesAfter)
+}
+
+func caseFoldTermsSnippet(text string, terms []string, contextRunesBefore, contextRunesAfter int) (string, bool) {
+	if len(terms) == 0 {
+		return "", false
+	}
 	var lowBuf strings.Builder
 	lowBuf.Grow(len(text))
 	foldedByteToOrigByte := make([]int, 0, len(text)+1)
 	for origIdx, r := range text {
-		folded := strings.ToLower(string(r))
+		folded := foldSearchRune(r)
 		for k := 0; k < len(folded); k++ {
 			foldedByteToOrigByte = append(foldedByteToOrigByte, origIdx)
 		}
@@ -642,12 +728,23 @@ func caseFoldSnippet(text, queryLower string, contextRunesBefore, contextRunesAf
 	foldedByteToOrigByte = append(foldedByteToOrigByte, len(text))
 
 	lowStr := lowBuf.String()
-	idx := strings.Index(lowStr, queryLower)
-	if idx < 0 {
+	firstIdx := -1
+	firstLen := 0
+	for _, term := range terms {
+		idx := strings.Index(lowStr, term)
+		if idx < 0 {
+			return "", false
+		}
+		if firstIdx < 0 || idx < firstIdx {
+			firstIdx = idx
+			firstLen = len(term)
+		}
+	}
+	if firstIdx < 0 {
 		return "", false
 	}
-	matchStart := foldedByteToOrigByte[idx]
-	endFoldIdx := min(idx+len(queryLower), len(foldedByteToOrigByte)-1)
+	matchStart := foldedByteToOrigByte[firstIdx]
+	endFoldIdx := min(firstIdx+firstLen, len(foldedByteToOrigByte)-1)
 	matchEnd := foldedByteToOrigByte[endFoldIdx]
 	if matchEnd < len(text) && (matchEnd <= matchStart || (endFoldIdx > 0 && endFoldIdx < len(foldedByteToOrigByte)-1 && foldedByteToOrigByte[endFoldIdx] == foldedByteToOrigByte[endFoldIdx-1])) {
 		_, sz := utf8.DecodeRuneInString(text[matchEnd:])

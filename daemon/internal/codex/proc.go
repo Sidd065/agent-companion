@@ -346,7 +346,7 @@ func StartAppServer(ctx context.Context, cfg ProcConfig) (*AppServerProc, error)
 		"clientInfo": map[string]any{
 			"name":    "agentc",
 			"title":   "Agent Companion",
-			"version": "0.5.0",
+			"version": "0.6.0",
 		},
 		"capabilities": map[string]any{
 			"experimentalApi": true,

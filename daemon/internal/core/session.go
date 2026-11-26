@@ -30,6 +30,7 @@ type SessionMeta struct {
 	Cwd            string             `json:"cwd"`
 	AddDirs        []string           `json:"addDirs,omitempty"`
 	SkipPerms      bool               `json:"skipPermissions"`
+	AutoAllowReads bool               `json:"autoAllowReads,omitempty"`
 	Sandbox        bool               `json:"sandbox,omitempty"`
 	SandboxMode    string             `json:"sandboxMode,omitempty"`
 	ApprovalPolicy string             `json:"approvalPolicy,omitempty"`
@@ -111,6 +112,7 @@ type Summary struct {
 	Mode           string                      `json:"mode,omitempty"`
 	Thought        string                      `json:"thought,omitempty"`
 	SkipPerms      bool                        `json:"skipPermissions"`
+	AutoAllowReads bool                        `json:"autoAllowReads,omitempty"`
 	CreatedAt      int64                       `json:"createdAt"`
 	UpdatedAt      int64                       `json:"updatedAt"`
 	LastText       string                      `json:"lastText,omitempty"`
@@ -156,12 +158,15 @@ type Detail struct {
 }
 
 type pendingPerm struct {
-	rpcID  json.RawMessage
-	conn   *acp.Conn
-	itemID string
-	callID string
-	key    string // agent-side request key (Claude), for withdrawals
-	kind   string // tool|question|plan
+	rpcID    json.RawMessage
+	conn     *acp.Conn
+	itemID   string
+	callID   string
+	key      string // agent-side request key (Claude), for withdrawals
+	kind     string // tool|question|plan
+	toolKind string
+	tool     string
+	options  []acp.PermissionOption
 }
 
 // agentProc is a running agent backend: `agy acp` or the Claude Code adapter.
@@ -204,8 +209,10 @@ type Session struct {
 	autoTurn   bool        // the agent is working on a turn it started itself
 	agy        agyRunState // agy's run state from its agent state stream
 	autoFrom   int         // transcript length when the agent started its own turn
-	autoCancel bool        // the user stopped the agent's own turn
-	awaitAck   bool        // a prompt went to agy, which hasn't produced output since
+	autoCancel          bool // the user stopped the agent's own turn
+	awaitAck            bool // a prompt went to agy, which hasn't produced output since
+	deferredDone        bool // a turn ended with background tasks/subagents active; emit "done" once fully idle
+	pendingTurnProgress bool // waiting for agy state stream IDLE update to classify turn as "done" vs "progress"
 	saveMu     sync.Mutex  // serializes saves of this session
 	// Following a Claude transcript that another process (a terminal) writes:
 	// the replayer, the last entry shown and the file's last seen stamp.
@@ -247,7 +254,7 @@ func (s *Session) summaryLocked() Summary {
 	m := s.meta
 	sum := Summary{
 		ID: m.ID, Agent: firstNonEmpty(m.Agent, "agy"), Title: m.Title, Cwd: m.Cwd, State: s.stateLocked(), Live: s.proc != nil, Known: true,
-		Attention: m.Attention, Pending: len(s.perms), Queued: len(m.Queue), SkipPerms: m.SkipPerms,
+		Attention: m.Attention, Pending: len(s.perms), Queued: len(m.Queue), SkipPerms: m.SkipPerms, AutoAllowReads: m.AutoAllowReads,
 		CreatedAt: m.CreatedAt, UpdatedAt: m.UpdatedAt, LastText: m.LastText, ContextUsed: m.ContextUsed,
 		ContextSize: m.ContextSize, Usage: m.Usage, Turns: m.Turns, Archived: m.Archived, Pinned: m.Pinned,
 		ForkedFrom: m.ForkedFrom, Origin: m.Origin, Error: m.LastError, Status: s.status, Suggestion: s.suggestion,
@@ -711,9 +718,26 @@ func (s *Session) onPermission(c *acp.Conn, id json.RawMessage, params json.RawM
 	if am.Kind == "question" || am.Kind == "plan" {
 		p.Input = tc.RawInput
 	}
+	if isAgyReadPermission(s.meta.Agent, tc.Kind, am.Tool, am.Kind) && (s.meta.AutoAllowReads || (s.m != nil && s.m.AgyAutoAllowReads())) {
+		if optID := firstAllowOptionID(req.Options); optID != "" {
+			_, addOp := s.tr.AddPerm(p)
+			s.queueOpsLocked(addOp)
+			if resOp, ok := s.tr.ResolvePerm(reqID, "resolved", optID); ok {
+				s.queueOpsLocked(resOp)
+			}
+			s.mu.Unlock()
+			_ = c.Reply(id, map[string]any{"outcome": map[string]any{"outcome": "selected", "optionId": optID}})
+			s.emit()
+			return
+		}
+	}
 	it, op := s.tr.AddPerm(p)
 	s.queueOpsLocked(op)
-	s.perms[reqID] = &pendingPerm{rpcID: id, conn: c, itemID: it.ID, callID: tc.ToolCallID, key: am.Key, kind: firstNonEmpty(am.Kind, "tool")}
+	s.perms[reqID] = &pendingPerm{
+		rpcID: id, conn: c, itemID: it.ID, callID: tc.ToolCallID,
+		key: am.Key, kind: firstNonEmpty(am.Kind, "tool"),
+		toolKind: tc.Kind, tool: am.Tool, options: req.Options,
+	}
 	title := s.meta.Title
 	sid := s.meta.ID
 	label := s.agentLabelLocked()
@@ -811,6 +835,86 @@ func (s *Session) agentLabelLocked() string {
 type PermAnswer struct {
 	Answers map[string]any `json:"answers,omitempty"`
 	Message string         `json:"message,omitempty"`
+}
+
+func isAgyReadPermission(agent, toolKind, toolName, agentcKind string) bool {
+	if agent != "" && agent != "agy" {
+		return false
+	}
+	if agentcKind == "question" || agentcKind == "plan" {
+		return false
+	}
+	k := strings.ToLower(strings.TrimSpace(toolKind))
+	if k == "read" || k == "search" {
+		return true
+	}
+	switch strings.ToLower(strings.TrimSpace(toolName)) {
+	case "read_file", "view_file", "list_dir", "grep_search", "find_by_name":
+		return true
+	}
+	return false
+}
+
+func firstAllowOptionID(opts []acp.PermissionOption) string {
+	for _, o := range opts {
+		if o.Kind == "allow_always" && o.OptionID != "" {
+			return o.OptionID
+		}
+	}
+	for _, o := range opts {
+		if strings.HasPrefix(o.Kind, "allow") && o.OptionID != "" {
+			return o.OptionID
+		}
+	}
+	return ""
+}
+
+// SetAutoAllowReads updates per-session read auto-approval for agy and resolves any waiting read prompts when enabled.
+func (s *Session) SetAutoAllowReads(v bool) {
+	s.mu.Lock()
+	s.meta.AutoAllowReads = v
+	s.scheduleSaveLocked()
+	s.mu.Unlock()
+	if v {
+		s.AutoResolvePendingReads()
+	}
+	s.emit()
+}
+
+// AutoResolvePendingReads immediately approves any pending agy read/search permission requests on this session.
+func (s *Session) AutoResolvePendingReads() int {
+	type toReply struct {
+		p     *pendingPerm
+		optID string
+	}
+	var replies []toReply
+	s.mu.Lock()
+	for reqID, p := range s.perms {
+		if !isAgyReadPermission(s.meta.Agent, p.toolKind, p.tool, p.kind) {
+			continue
+		}
+		optID := firstAllowOptionID(p.options)
+		if optID == "" {
+			continue
+		}
+		delete(s.perms, reqID)
+		if op, ok := s.tr.ResolvePerm(reqID, "resolved", optID); ok {
+			s.queueOpsLocked(op)
+		}
+		replies = append(replies, toReply{p: p, optID: optID})
+	}
+	s.mu.Unlock()
+	for _, r := range replies {
+		if r.p.conn != nil {
+			_ = r.p.conn.Reply(r.p.rpcID, map[string]any{
+				"outcome": map[string]any{"outcome": "selected", "optionId": r.optID},
+			})
+		}
+	}
+	if len(replies) > 0 {
+		s.emit()
+	}
+	return len(replies)
 }
 
 // RespondPermission answers a pending permission request.
@@ -1203,26 +1307,42 @@ func (s *Session) watchProc(p agentProc) {
 		return
 	}
 	s.proc = nil
+	wasAutoTurn := s.autoTurn
+	wasInflight := s.inflight
+	wasBusy := s.agyBusyLocked() || s.deferredDone || s.pendingTurnProgress || s.hasClaudeBackgroundWorkLocked()
 	perms := s.cancelPermsLocked()
+	s.agy = agyRunState{}
+	s.deferredDone, s.pendingTurnProgress = false, false
 	if s.autoTurn {
-		// No prompt call will return for a turn Claude started itself.
+		// No prompt call will return for a turn Claude/agy started itself.
 		s.autoTurn = false
 		if s.inflight > 0 {
 			s.inflight--
 		}
 	}
+	sid, title, label := s.meta.ID, s.meta.Title, s.agentLabelLocked()
+	notifyMsg := ""
 	if !s.closing {
-		msg := s.agentLabelLocked() + " process exited"
-		if err := p.ExitErr(); err != nil {
-			msg += ": " + err.Error()
+		exitErr := p.ExitErr()
+		msg := label + " process exited"
+		if exitErr != nil {
+			msg += ": " + exitErr.Error()
 		}
 		s.meta.LastError = msg
 		s.queueOpsLocked(s.tr.AddNotice("error", msg+". Send a message to restart it."))
+		// If a foreground runPrompt is in flight (!wasAutoTurn && wasInflight > 0),
+		// finishPrompt will report the error; otherwise emit the halted alert here.
+		if wasAutoTurn || (wasInflight == 0 && (wasBusy || len(perms) > 0 || exitErr != nil)) {
+			notifyMsg = msg
+		}
 	}
 	s.mu.Unlock()
 	_ = perms // connection is gone; nothing to reply to
 	s.emit()
 	s.m.saveSession(s)
+	if notifyMsg != "" {
+		s.m.notify(Notification{SessionID: sid, Kind: "error", Title: firstNonEmpty(title, label+" session"), Body: notifyMsg})
+	}
 }
 
 // Hibernate stops the agy process; the session resumes on the next prompt.
@@ -1235,6 +1355,8 @@ func (s *Session) Hibernate() {
 	}
 	s.closing = true
 	s.proc = nil
+	s.agy = agyRunState{}
+	s.deferredDone, s.pendingTurnProgress = false, false
 	perms := s.cancelPermsLocked()
 	s.mu.Unlock()
 	replyCancelled(perms)
@@ -1377,6 +1499,9 @@ func (s *Session) ackSentLocked() {
 }
 
 func (s *Session) beginTurnLocked() {
+	if !s.autoTurn {
+		s.deferredDone, s.pendingTurnProgress = false, false
+	}
 	if s.inflight == 0 {
 		s.turnStart = time.Now()
 	}
@@ -1443,6 +1568,7 @@ func (s *Session) finishPromptWithCheckpoint(itemID string, res *acp.PromptResul
 	dur := time.Since(s.turnStart).Milliseconds()
 	notifyKind, notifyBody := "", ""
 	if err != nil {
+		s.deferredDone, s.pendingTurnProgress = false, false
 		msg := err.Error()
 		if errors.Is(err, acp.ErrClosed) || errors.Is(err, claude.ErrExited) {
 			msg = s.agentLabelLocked() + " process exited during the turn"
@@ -1506,8 +1632,28 @@ func (s *Session) finishPromptWithCheckpoint(itemID string, res *acp.PromptResul
 			case "plan":
 				notifyKind, notifyBody = "plan", "Plan ready for review"
 			default:
-				notifyKind, notifyBody = "done", firstNonEmpty(s.meta.LastText, "Turn finished")
+				if isHaltedAgentErrorText(s.meta.LastText) {
+					s.deferredDone, s.pendingTurnProgress = false, false
+					notifyKind, notifyBody = "error", s.meta.LastText
+				} else if s.isAgy() && s.agyBusyLocked() {
+					s.deferredDone = true
+					if itemID != "" && s.agy.running {
+						// Wait milliseconds for StreamAgentStateUpdates IDLE to report whether fullyIdle is true.
+						s.pendingTurnProgress = true
+					} else {
+						s.pendingTurnProgress = false
+						notifyKind, notifyBody = "progress", firstNonEmpty(s.meta.LastText, "Progress update")
+					}
+				} else if s.isClaude() && s.hasClaudeBackgroundWorkLocked() {
+					s.deferredDone = true
+					notifyKind, notifyBody = "progress", firstNonEmpty(s.meta.LastText, "Progress update")
+				} else {
+					s.deferredDone, s.pendingTurnProgress = false, false
+					notifyKind, notifyBody = "done", firstNonEmpty(s.meta.LastText, "Turn finished")
+				}
 			}
+		} else if cancelled {
+			s.deferredDone, s.pendingTurnProgress = false, false
 		}
 		if len(s.meta.Queue) > 0 && !cancelled && s.proc != nil {
 			q := s.meta.Queue[0]
@@ -1519,6 +1665,7 @@ func (s *Session) finishPromptWithCheckpoint(itemID string, res *acp.PromptResul
 			s.promptSentLocked()
 			s.beginTurnLocked()
 			notifyKind = "" // the agent continues with the queued message
+			s.deferredDone, s.pendingTurnProgress = false, false
 		}
 	}
 	sid, title, label, cwd := s.meta.ID, s.meta.Title, s.agentLabelLocked(), s.meta.Cwd
@@ -1990,4 +2137,18 @@ func decodeB64(data string) ([]byte, error) {
 		data = data[i+1:]
 	}
 	return base64.StdEncoding.DecodeString(data)
+}
+
+func (s *Session) hasClaudeBackgroundWorkLocked() bool {
+	for _, t := range s.tasks {
+		if strings.EqualFold(t.Status, "running") {
+			return true
+		}
+	}
+	return false
+}
+
+func isHaltedAgentErrorText(text string) bool {
+	t := strings.TrimSpace(text)
+	return strings.HasPrefix(t, "⚠") || strings.HasPrefix(t, "Error:") || strings.HasPrefix(t, "Fatal:")
 }

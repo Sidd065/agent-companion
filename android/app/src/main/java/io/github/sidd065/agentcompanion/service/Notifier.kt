@@ -123,7 +123,7 @@ class Notifier(private val ctx: Context) {
             if (seen.containsKey(dedupKey)) return
             seen[dedupKey] = true
         }
-        if (!g.prefs.value.notificationsEnabled) return
+        if (!g.prefs.value.allowsNotificationKind(n0.kind)) return
         if (g.foreground.value && n0.sessionId != null && g.covers(n0.sessionId, n0.kind, conn.config.id)) {
             // On screen now; if the app goes to the background before it's answered, it notifies then.
             if (n0.kind in setOf("permission", "question", "plan")) synchronized(heldBack) { heldBack[conn.config.id + "/" + n0.sessionId] = conn to n0 }
@@ -150,7 +150,7 @@ class Notifier(private val ctx: Context) {
         }
         held.forEach { (conn, n) ->
             val waiting = n.sessionId?.let { conn.session(it) }?.needsInput == true
-            if (waiting && g.prefs.value.notificationsEnabled) show(conn, n)
+            if (waiting && g.prefs.value.allowsNotificationKind(n.kind)) show(conn, n)
         }
     }
 
@@ -176,7 +176,7 @@ class Notifier(private val ctx: Context) {
             }.let { body ->
                 when (n0.kind) {
                     // Agent text is Markdown; commands and terminal output are not.
-                    "done", "question", "plan", "error", "aside" -> io.github.sidd065.agentcompanion.ui.components.markdownToPlain(body)
+                    "done", "progress", "question", "plan", "error", "aside" -> io.github.sidd065.agentcompanion.ui.components.markdownToPlain(body)
                     // The title already names the session: "<tool> — <session>" → "<tool>".
                     "permission" -> listOfNotNull(known?.title, known?.displayTitle).fold(body) { b, t -> b.removeSuffix(" — $t") }
                     else -> body
@@ -200,6 +200,7 @@ class Notifier(private val ctx: Context) {
             "question" -> "Question · ${n.title}"
             "plan" -> "Plan ready · ${n.title}"
             "error" -> "Error · ${n.title}"
+            "progress" -> "Update · ${n.title}"
             "term_blocked" -> "Waiting · ${n.title}"
             "term_failed" -> "Failed · ${n.title}"
             else -> n.title

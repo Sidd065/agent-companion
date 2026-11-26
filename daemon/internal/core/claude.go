@@ -481,10 +481,14 @@ func (m *Manager) claudeLive(s *Session) *Live {
 		switch t.Type {
 		case "local_agent", "remote_agent", "in_process_teammate", "local_workflow":
 			role := firstNonEmpty(t.Description, t.SubagentType, "Subagent")
-			if t.Progress != "" && t.Status == "running" {
+			st := strings.ToUpper(t.Status)
+			if !running && st == "RUNNING" {
+				st = "STOPPED"
+			}
+			if t.Progress != "" && st == "RUNNING" {
 				role += " · " + t.Progress
 			}
-			live.Subagents = append(live.Subagents, Subagent{ID: t.ID, Role: role, Type: t.SubagentType, State: strings.ToUpper(t.Status), Updated: upd})
+			live.Subagents = append(live.Subagents, Subagent{ID: t.ID, Role: role, Type: t.SubagentType, State: st, Updated: upd})
 		default:
 			if t.Status == "running" && t.Background {
 				live.Tasks = append(live.Tasks, Task{ID: t.ID, Tool: "Bash", Summary: t.Description, Description: t.Progress, Start: t.Start, Log: t.OutputFile})

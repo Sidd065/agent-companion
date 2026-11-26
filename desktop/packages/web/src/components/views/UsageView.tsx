@@ -3,11 +3,21 @@ import { Activity, Coins, Cpu, RefreshCw } from 'lucide-react';
 import type { UsageBucket, UsageSummary } from '@agentc/protocol';
 import { useApp } from '../../state/appStore.js';
 
-const RANGES = [
-  { days: 1, label: '24h' },
-  { days: 7, label: '7 days' },
-  { days: 30, label: '30 days' },
-  { days: 90, label: '90 days' },
+interface UsageRangeSpec {
+  id: string;
+  label: string;
+  params: { days?: number; hours?: number; allTime?: boolean };
+}
+
+const RANGES: UsageRangeSpec[] = [
+  { id: '5h', label: '5h', params: { hours: 5 } },
+  { id: '12h', label: '12h', params: { hours: 12 } },
+  { id: '24h', label: '24h', params: { hours: 24 } },
+  { id: '7d', label: '7d', params: { days: 7 } },
+  { id: '30d', label: '30d', params: { days: 30 } },
+  { id: '90d', label: '90d', params: { days: 90 } },
+  { id: '180d', label: '180d', params: { days: 180 } },
+  { id: 'all', label: 'All time', params: { allTime: true } },
 ];
 
 function fmtTokens(n: number): string {
@@ -19,7 +29,8 @@ function fmtTokens(n: number): string {
 export const UsageView: React.FC = () => {
   const { activeHost, setActiveHostId, hostList, callHost, pushToast } = useApp();
   const [hostId, setHostId] = useState(activeHost?.creds.id || hostList[0]?.creds.id || '');
-  const [days, setDays] = useState(30);
+  const [rangeId, setRangeId] = useState('30d');
+  const activeRange = RANGES.find((r) => r.id === rangeId) ?? RANGES[4];
   const [metric, setMetric] = useState<'cost' | 'tokens'>('tokens');
   const [summary, setSummary] = useState<UsageSummary | null>(null);
   const [claudeLimits, setClaudeLimits] = useState<Record<string, unknown> | null>(null);
@@ -41,7 +52,7 @@ export const UsageView: React.FC = () => {
     setLoading(true);
     try {
       const [u, cl, aq] = await Promise.all([
-        callHost<UsageSummary>(hostId, 'usage.summary', { days }),
+        callHost<UsageSummary>(hostId, 'usage.summary', activeRange.params),
         callHost<Record<string, unknown>>(hostId, 'claude.usage', {}).catch(() => null),
         callHost<Record<string, unknown>>(hostId, 'agy.quota', {}).catch(() => null),
       ]);
@@ -57,7 +68,7 @@ export const UsageView: React.FC = () => {
         setLoading(false);
       }
     }
-  }, [hostId, days, callHost, pushToast]);
+  }, [hostId, activeRange, callHost, pushToast]);
 
   useEffect(() => {
     reqSeqRef.current++;
@@ -140,11 +151,11 @@ export const UsageView: React.FC = () => {
             <div className="inline-flex rounded-lg border border-[var(--border)] bg-[var(--bg-surface)] p-0.5 text-xs">
               {RANGES.map((r) => (
                 <button
-                  key={r.days}
+                  key={r.id}
                   type="button"
-                  onClick={() => setDays(r.days)}
-                  className={`rounded-md px-2.5 py-1 cursor-pointer ${
-                    days === r.days ? 'bg-[var(--accent-soft)] text-[var(--accent)] font-medium' : 'text-[var(--text-muted)]'
+                  onClick={() => setRangeId(r.id)}
+                  className={`rounded-md px-2 py-1 cursor-pointer ${
+                    rangeId === r.id ? 'bg-[var(--accent-soft)] text-[var(--accent)] font-medium' : 'text-[var(--text-muted)]'
                   }`}
                 >
                   {r.label}

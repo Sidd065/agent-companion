@@ -43,6 +43,8 @@ type Bucket struct {
 // Summary is the response of `usage.summary`.
 type Summary struct {
 	Days         int      `json:"days"`
+	Hours        int      `json:"hours,omitempty"`
+	AllTime      bool     `json:"allTime,omitempty"`
 	Turns        int      `json:"turns"`
 	InputTokens  int64    `json:"inputTokens"`
 	OutputTokens int64    `json:"outputTokens"`
@@ -93,19 +95,40 @@ func (l *Log) Append(r Record) {
 	_ = f.Close()
 }
 
-// Query aggregates records over the last `days` days (default 30, max 92).
+// Query aggregates records over the last `days` days (default 30; <0 means all time).
 func (l *Log) Query(days int) Summary {
-	if days <= 0 {
-		days = 30
+	return l.QueryWindow(days, 0, days < 0)
+}
+
+// QueryWindow aggregates usage records over hours (`5h`, `12h`, `24h`), days (`7d`..`366d`), or all time.
+func (l *Log) QueryWindow(days, hours int, allTime bool) Summary {
+	res := Summary{ByDay: []Bucket{}, ByAgent: []Bucket{}, ByModel: []Bucket{}, ByProject: []Bucket{}}
+	var cutoff int64
+	hourlyBuckets := false
+	switch {
+	case allTime || days < 0:
+		res.AllTime = true
+		cutoff = 0
+	case hours > 0:
+		if hours > 366*24 {
+			hours = 366 * 24
+		}
+		res.Hours = hours
+		hourlyBuckets = hours <= 48
+		cutoff = time.Now().Add(-time.Duration(hours) * time.Hour).UnixMilli()
+	default:
+		if days <= 0 {
+			days = 30
+		}
+		if days > 366 {
+			days = 366
+		}
+		res.Days = days
+		cutoff = time.Now().Add(-time.Duration(days) * 24 * time.Hour).UnixMilli()
 	}
-	if days > 92 {
-		days = 92
-	}
-	res := Summary{Days: days, ByDay: []Bucket{}, ByAgent: []Bucket{}, ByModel: []Bucket{}, ByProject: []Bucket{}}
 	if l == nil || l.path == "" {
 		return res
 	}
-	cutoff := time.Now().Add(-time.Duration(days) * 24 * time.Hour).UnixMilli()
 	l.mu.Lock()
 	f, err := os.Open(l.path)
 	l.mu.Unlock()
@@ -148,7 +171,11 @@ func (l *Log) Query(days int) Summary {
 		res.CachedTokens += r.CachedReadTokens + r.CachedWriteTokens
 		res.TotalTokens += r.TotalTokens
 		res.CostUSD += r.CostUSD
-		day := time.UnixMilli(r.Ts).Format("2006-01-02")
+		dayFmt := "2006-01-02"
+		if hourlyBuckets {
+			dayFmt = "2006-01-02 15:00"
+		}
+		day := time.UnixMilli(r.Ts).Format(dayFmt)
 		addTo(byDay, day, r)
 		addTo(byAgent, r.Agent, r)
 		addTo(byModel, r.Model, r)

@@ -205,6 +205,18 @@ fun AgyFlagsSheet(conn: HostConnection?, onDismiss: () -> Unit) {
                 }
                 AssistChip(onClick = { if (conn != null) picking = true }, enabled = conn != null, label = { Text("Add folder") }, leadingIcon = { Icon(Icons.Outlined.Folder, null, Modifier.size(16.dp)) })
             }
+            FlagSwitch("Auto-allow read requests", "Auto-approve agy file read & search prompts outside the workspace", f.autoAllowReads) { v ->
+                upd { it.copy(autoAllowReads = v) }
+                if (conn != null && conn.rpc.isConnected) {
+                    scope.launch {
+                        runCatching {
+                            conn.rpc.call("daemon.config.set", io.github.sidd065.agentcompanion.net.params {
+                                put("agyAutoAllowReads", kotlinx.serialization.json.JsonPrimitive(v))
+                            })
+                        }
+                    }
+                }
+            }
             FlagSwitch("--disable-telemetry", "Chat sessions only", f.disableTelemetry) { v -> upd { it.copy(disableTelemetry = v) } }
             FlagSwitch("--include-default-customizations", "Load agy's default customizations (chat sessions)", f.includeDefaultCustomizations) { v -> upd { it.copy(includeDefaultCustomizations = v) } }
             FlagText(gen = gen, label = "Extra arguments for chat sessions", placeholder = "appended to agy acp, e.g. --process-per-session", value = f.acpExtra, mono = true) { v -> upd { it.copy(acpExtra = v) } }

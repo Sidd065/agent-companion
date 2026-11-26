@@ -5,6 +5,9 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"sync"
+	"net"
+	"context"
 	"time"
 
 	"agentc/internal/acp"
@@ -185,4 +188,219 @@ func TestReviewAnswered(t *testing.T) {
 	if got := s.lastUserTs(); got != 2000 {
 		t.Fatalf("after reload: last prompt %d", got)
 	}
+}
+
+type errFakeProc struct {
+	exited chan struct{}
+	err    error
+}
+
+func (f *errFakeProc) ACP() *acp.Conn          { return nil }
+func (f *errFakeProc) Pid() int                { return 5151 }
+func (f *errFakeProc) Alive() bool             { return false }
+func (f *errFakeProc) Exited() <-chan struct{} { return f.exited }
+func (f *errFakeProc) ExitErr() error          { return f.err }
+func (f *errFakeProc) Close(time.Duration)     {}
+func (f *errFakeProc) RSSKiB() int64           { return 0 }
+
+func TestAgyNotificationFilteringAndHaltedAlerts(t *testing.T) {
+	s := newAgyTestSession(t)
+	var kinds []string
+	s.m.Sink = func(n Notification) {
+		// Sink runs in a goroutine; use NotificationsSince below for deterministic ordering.
+		_ = n
+	}
+
+	// 1. Foreground prompt spawns background work: turn ends while RUNNING -> IDLE (fullyIdle=false).
+	s.mu.Lock()
+	it, op := s.tr.AddUser("run multi-agent task", nil, "sent")
+	s.queueOpsLocked(op)
+	s.beginTurnLocked()
+	s.mu.Unlock()
+	s.onAgyState(agyUpdate("RUNNING"))
+	s.onUpdate(json.RawMessage(`{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"Spawned 3 subagents, working..."}}`))
+	s.finishPrompt(it.ID, &acp.PromptResult{StopReason: "end_turn"}, nil)
+	// Stream reports IDLE with background work still active (fullyIdle=false): should emit "progress", NOT "done"!
+	s.onAgyState(agyUpdate("IDLE", false))
+
+	// 2. Two intermediate subagent reports arrive; each writes progress text with fullyIdle=false.
+	for _, msg := range []string{"Subagent 1 finished.", "Subagent 2 finished."} {
+		s.onAgyState(agyUpdate("RUNNING"))
+		s.onUpdate(json.RawMessage(`{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"` + msg + `"}}`))
+		s.onAgyState(agyUpdate("IDLE", false))
+	}
+
+	// 3. Final subagent finishes and agy writes final report with fullyIdle=true -> emits ONE "done"!
+	s.onAgyState(agyUpdate("RUNNING"))
+	s.onUpdate(json.RawMessage(`{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"All 3 subagents complete!"}}`))
+	s.onAgyState(agyUpdate("IDLE", true))
+
+	for _, n := range s.m.NotificationsSince(0) {
+		kinds = append(kinds, n.Kind)
+	}
+	want := []string{"progress", "progress", "progress", "done"}
+	if len(kinds) != len(want) {
+		t.Fatalf("got notification kinds %v, want %v", kinds, want)
+	}
+	for i := range want {
+		if kinds[i] != want[i] {
+			t.Fatalf("notification[%d] = %q, want %q (all=%v)", i, kinds[i], want[i], kinds)
+		}
+	}
+
+	// 4. Vertex/API error message starting with warning symbol classifies as "error" (halted), not "done".
+	prevSeq := s.m.NotificationsSince(0)[len(kinds)-1].Seq
+	s.mu.Lock()
+	itErr, opErr := s.tr.AddUser("test carbon", nil, "sent")
+	s.queueOpsLocked(opErr)
+	s.beginTurnLocked()
+	s.mu.Unlock()
+	s.onUpdate(json.RawMessage(`{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"⚠️ Permission 'aiplatform.endpoints.predict' denied"}}`))
+	s.finishPrompt(itErr.ID, &acp.PromptResult{StopReason: "end_turn"}, nil)
+	gotErr := s.m.NotificationsSince(prevSeq)
+	if len(gotErr) != 1 || gotErr[0].Kind != "error" {
+		t.Fatalf("expected halted error notification for ⚠️ message, got %+v", gotErr)
+	}
+
+	// 5. Unexpected process exit in watchProc emits "error".
+	prevSeq = gotErr[0].Seq
+	ep := &errFakeProc{exited: make(chan struct{}), err: os.ErrClosed}
+	s.mu.Lock()
+	s.proc = ep
+	s.closing = false
+	s.mu.Unlock()
+	doneWatch := make(chan struct{})
+	go func() {
+		s.watchProc(ep)
+		close(doneWatch)
+	}()
+	close(ep.exited)
+	<-doneWatch
+	gotCrash := s.m.NotificationsSince(prevSeq)
+	if len(gotCrash) != 1 || gotCrash[0].Kind != "error" {
+		t.Fatalf("expected crash error notification, got %+v", gotCrash)
+	}
+}
+
+func TestAgyAutoAllowReadsAutoApprovesWithoutNotification(t *testing.T) {
+	dir := t.TempDir()
+	hub := NewHub()
+	var got []Notification
+	var mu sync.Mutex
+	m := NewManager(Config{
+		StateDir: filepath.Join(dir, "state"),
+		HomeDir:  dir,
+	}, hub)
+	m.Sink = func(n Notification) {
+		mu.Lock()
+		got = append(got, n)
+		mu.Unlock()
+	}
+
+	s := newSession(m, SessionMeta{ID: "s-read", Agent: "agy", Title: "Webmirror"})
+	m.mu.Lock()
+	m.sessions["s-read"] = s
+	m.mu.Unlock()
+
+	c1, c2 := net.Pipe()
+	defer c1.Close()
+	defer c2.Close()
+	agentSide := acp.NewConn(c1, c1, nil)
+	daemonSide := acp.NewConn(c2, c2, procHandler{s: s})
+
+	resCh := make(chan map[string]any, 1)
+	go func() {
+		var out map[string]any
+		_ = agentSide.Call(context.Background(), "session/request_permission", map[string]any{
+			"toolCall": map[string]any{
+				"toolCallId": "tc-1",
+				"title":      "File ../.claude/projects/memory/foo.md",
+				"kind":       "read",
+			},
+			"options": []map[string]any{
+				{"optionId": "allow-1", "name": "Allow once", "kind": "allow_once"},
+				{"optionId": "deny-1", "name": "Deny", "kind": "reject_once"},
+			},
+		}, &out)
+		resCh <- out
+	}()
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if s.Summary().Pending == 1 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if s.Summary().Pending != 1 {
+		t.Fatalf("expected 1 pending perm before auto-allow, got %d", s.Summary().Pending)
+	}
+
+	m.SetAgyAutoAllowReads(true)
+	select {
+	case out := <-resCh:
+		outcome, _ := out["outcome"].(map[string]any)
+		if outcome["optionId"] != "allow-1" {
+			t.Fatalf("expected allow-1, got %#v", out)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for pending read permission to auto-resolve")
+	}
+	if s.Summary().Pending != 0 {
+		t.Fatalf("expected 0 pending perms after SetAgyAutoAllowReads(true), got %d", s.Summary().Pending)
+	}
+
+	mu.Lock()
+	got = nil
+	mu.Unlock()
+	var out2 map[string]any
+	if err := agentSide.Call(context.Background(), "session/request_permission", map[string]any{
+		"toolCall": map[string]any{
+			"toolCallId": "tc-2",
+			"title":      "File ../.claude/projects/memory/bar.md",
+			"kind":       "read",
+		},
+		"options": []map[string]any{
+			{"optionId": "allow-2", "name": "Allow once", "kind": "allow_once"},
+			{"optionId": "deny-2", "name": "Deny", "kind": "reject_once"},
+		},
+	}, &out2); err != nil {
+		t.Fatalf("second request_permission failed: %v", err)
+	}
+	outcome2, _ := out2["outcome"].(map[string]any)
+	if outcome2["optionId"] != "allow-2" {
+		t.Fatalf("expected allow-2, got %#v", out2)
+	}
+	mu.Lock()
+	notifCount := len(got)
+	mu.Unlock()
+	if notifCount != 0 {
+		t.Fatalf("expected 0 notifications for auto-allowed read, got %d", notifCount)
+	}
+
+	go func() {
+		var out3 map[string]any
+		_ = agentSide.Call(context.Background(), "session/request_permission", map[string]any{
+			"toolCall": map[string]any{
+				"toolCallId": "tc-3",
+				"title":      "rm -rf /important",
+				"kind":       "execute",
+			},
+			"options": []map[string]any{
+				{"optionId": "allow-3", "name": "Allow once", "kind": "allow_once"},
+				{"optionId": "deny-3", "name": "Deny", "kind": "reject_once"},
+			},
+		}, &out3)
+	}()
+	deadline = time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if s.Summary().Pending == 1 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if s.Summary().Pending != 1 {
+		t.Fatalf("expected execute permission to remain pending, got %d", s.Summary().Pending)
+	}
+	_ = daemonSide
 }

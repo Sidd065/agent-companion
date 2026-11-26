@@ -33,6 +33,7 @@ import { customModelsScopeKey, providerCatalogKey, useApp } from '../../state/ap
 import { DEFAULT_KEYBINDINGS, displayChord, formatEventChord } from '../../state/keybindings.js';
 import { BUILTIN_THEMES } from '../../state/themes.js';
 import { buildProviderUpsertPayload } from '../../utils/codexModels.js';
+import { plainInlineTitle } from '../../utils/sessionHelpers.js';
 
 const TABS = [
   { id: 'general', label: 'General', icon: Sliders },
@@ -604,7 +605,7 @@ export const SettingsModal: React.FC = () => {
                 </div>
 
                 {[
-                  ['notificationsEnabled', 'Desktop notifications', 'Alert on approvals, questions, and finished turns'],
+                  ['notificationsEnabled', 'Desktop notifications', 'Master toggle for system notifications on Linux'],
                   ['closeToTray', 'Close window to system tray', 'Keep Agent Companion running in the tray on Linux'],
                   ['showWorkingShelf', 'Show Working Shelf in sidebar', 'Pin active & pending-approval threads at the top'],
                   ['groupByProject', 'Group threads by Project', 'Organize sidebar threads under their project folders'],
@@ -624,6 +625,76 @@ export const SettingsModal: React.FC = () => {
                     />
                   </label>
                 ))}
+
+                {settings.notificationsEnabled && (
+                  <div className="rounded-xl border border-[var(--border)] bg-[var(--bg-base)] p-3.5 space-y-2.5">
+                    <div>
+                      <div className="font-medium">Notification Categories</div>
+                      <div className="text-[11px] text-[var(--text-muted)]">
+                        Choose which agent events trigger notifications (minor intermediate progress updates are off by default)
+                      </div>
+                    </div>
+                    {(
+                      [
+                        ['notifyOnInput', 'input', 'Action required', 'Permissions, questions, plan reviews, and blocked terminals'],
+                        ['notifyOnDone', 'done', 'Task completed', 'Final turn completion when no background tasks remain'],
+                        ['notifyOnHalted', 'halted', 'Halted or errored', 'Agent crashes, API halts, and failed commands'],
+                        ['notifyOnProgress', 'progress', 'Minor progress updates', 'Intermediate turns while subagents or timers are still running'],
+                      ] as const
+                    ).map(([field, _evKey, label, desc]) => (
+                      <label key={field} className="flex items-center justify-between gap-3 py-1 cursor-pointer">
+                        <div>
+                          <div className="font-medium text-[11.5px]">{label}</div>
+                          <div className="text-[10.5px] text-[var(--text-muted)]">{desc}</div>
+                        </div>
+                        <input
+                          type="checkbox"
+                          checked={Boolean(settings[field])}
+                          onChange={(e) => {
+                            const nextPatch = { [field]: e.target.checked } as Partial<typeof settings>;
+                            const merged = { ...settings, ...nextPatch };
+                            updateSettings(nextPatch);
+                            const events: string[] = [];
+                            if (merged.notifyOnInput) events.push('input');
+                            if (merged.notifyOnDone) events.push('done');
+                            if (merged.notifyOnHalted) events.push('halted');
+                            if (merged.notifyOnProgress) events.push('progress');
+                            for (const h of hostList) {
+                              if (h.state === 'connected') {
+                                void callHost(h.creds.id, 'daemon.config.set', { notifyEvents: events }).catch(() => {});
+                              }
+                            }
+                          }}
+                        />
+                      </label>
+                    ))}
+                  </div>
+                )}
+
+                <label
+                  data-testid="settings-agy-auto-allow-reads"
+                  className="flex items-center justify-between rounded-xl border border-[var(--border)] bg-[var(--bg-base)] p-3 cursor-pointer"
+                >
+                  <div>
+                    <div className="font-medium">Auto-allow Antigravity (agy) read requests</div>
+                    <div className="text-[11px] text-[var(--text-muted)]">
+                      Automatically approve read &amp; search prompts outside the workspace without notification spam
+                    </div>
+                  </div>
+                  <input
+                    type="checkbox"
+                    checked={Boolean(settings.agyAutoAllowReads)}
+                    onChange={(e) => {
+                      const next = e.target.checked;
+                      updateSettings({ agyAutoAllowReads: next });
+                      for (const h of hostList) {
+                        if (h.state === 'connected') {
+                          void callHost(h.creds.id, 'daemon.config.set', { agyAutoAllowReads: next }).catch(() => {});
+                        }
+                      }
+                    }}
+                  />
+                </label>
               </div>
             )}
 
@@ -832,8 +903,31 @@ export const SettingsModal: React.FC = () => {
                     {/* Connected devices on this host */}
                     {h.devices.length > 0 && (
                       <div className="border-t border-[var(--border)] pt-2 space-y-1">
-                        <div className="text-[10px] font-semibold uppercase tracking-wider text-[var(--text-muted)]">
-                          Authorized Devices ({h.devices.length})
+                        <div className="flex items-center justify-between">
+                          <div className="text-[10px] font-semibold uppercase tracking-wider text-[var(--text-muted)]">
+                            Authorized Devices ({h.devices.length})
+                          </div>
+                          {h.devices.length > 1 && (
+                            <button
+                              type="button"
+                              data-testid={`revoke-others-btn-${h.creds.id}`}
+                              onClick={async () => {
+                                if (!window.confirm(`Revoke all other paired devices on "${h.creds.name}"?`)) return;
+                                try {
+                                  const res = await callHost<{ revoked?: number }>(h.creds.id, 'devices.revokeOthers', {});
+                                  pushToast({
+                                    text: `Revoked ${res?.revoked ?? 0} other device(s)`,
+                                    level: 'info',
+                                  });
+                                } catch (e) {
+                                  pushToast({ text: (e as Error).message, level: 'error' });
+                                }
+                              }}
+                              className="text-[10.5px] font-medium text-[var(--danger)] hover:underline cursor-pointer"
+                            >
+                              Revoke All Others
+                            </button>
+                          )}
                         </div>
                         {h.devices.map((d) => (
                           <div key={d.id} className="flex items-center justify-between text-[11px]">
@@ -1264,6 +1358,18 @@ export const SettingsModal: React.FC = () => {
 
                 <label className="flex items-center justify-between rounded-xl border border-[var(--border)] bg-[var(--bg-base)] p-3 cursor-pointer">
                   <div>
+                    <div className="font-medium">Expand tool call details by default</div>
+                    <div className="text-[11px] text-[var(--text-muted)]">Start tool inputs/outputs and completed turn steps open</div>
+                  </div>
+                  <input
+                    type="checkbox"
+                    checked={Boolean(settings.expandToolCalls)}
+                    onChange={(e) => updateSettings({ expandToolCalls: e.target.checked })}
+                  />
+                </label>
+
+                <label className="flex items-center justify-between rounded-xl border border-[var(--border)] bg-[var(--bg-base)] p-3 cursor-pointer">
+                  <div>
                     <div className="font-medium">Wrap long diff lines</div>
                     <div className="text-[11px] text-[var(--text-muted)]">Avoid horizontal scrollbars in narrow panels</div>
                   </div>
@@ -1522,7 +1628,7 @@ export const SettingsModal: React.FC = () => {
                         }}
                         className="text-left min-w-0 flex-1 cursor-pointer"
                       >
-                        <div className="font-medium truncate">{s.title || s.id}</div>
+                        <div className="font-medium truncate">{plainInlineTitle(s.title) || s.id}</div>
                         <div className="text-[10.5px] text-[var(--text-muted)] font-mono truncate">
                           {s.hostName} · {s.cwd}
                         </div>
@@ -1563,7 +1669,7 @@ export const SettingsModal: React.FC = () => {
                   hosts.
                 </p>
                 <div className="rounded-xl border border-[var(--border)] bg-[var(--bg-base)] p-3 font-mono text-[11px] space-y-1">
-                  <div>Desktop Version: {window.agentcDesktop?.version || '0.5.0'}</div>
+                  <div>Desktop Version: {window.agentcDesktop?.version || '0.6.0'}</div>
                   <div>Protocol Version: v{targetHost?.info?.protocolVersion ?? 2}</div>
                   <div>Active Daemon: {targetHost?.info?.version ?? 'not connected'}</div>
                   <div>OpenRouter Configured: {targetHost?.info?.openRouterConfigured ? 'yes' : 'no'}</div>

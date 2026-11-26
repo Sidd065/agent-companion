@@ -26,6 +26,7 @@ import (
 	"agentc/internal/lsapi"
 	"agentc/internal/projects"
 	"agentc/internal/providers"
+	"agentc/internal/push"
 	"agentc/internal/scheduler"
 	"agentc/internal/usage"
 )
@@ -47,6 +48,8 @@ type Config struct {
 	IdleHibernate        time.Duration
 	MaxLive              int
 	DefaultSkip          bool
+	AgyAutoAllowReads    bool
+	NotifyEvents         []string
 }
 
 // Notification is pushed to every connected client.
@@ -92,6 +95,8 @@ type Manager struct {
 	notMu           sync.Mutex
 	notifs          []Notification
 	notSeq          int64
+	notifyEvents      []string
+	agyAutoAllowReads atomic.Bool
 	agentsMu        sync.Mutex
 	agentsList      []AgentProfile
 	agentsAt        time.Time
@@ -122,7 +127,8 @@ func NewManager(cfg Config, hub *Hub) *Manager {
 	if cfg.MaxLive == 0 {
 		cfg.MaxLive = 8
 	}
-	m := &Manager{cfg: cfg, hub: hub, sessions: map[string]*Session{}, stopCh: make(chan struct{}), liveWatches: map[string]*liveWatch{}, Git: gitops.New()}
+	m := &Manager{cfg: cfg, hub: hub, sessions: map[string]*Session{}, stopCh: make(chan struct{}), liveWatches: map[string]*liveWatch{}, Git: gitops.New(), notifyEvents: push.NormalizeEvents(cfg.NotifyEvents)}
+	m.agyAutoAllowReads.Store(cfg.AgyAutoAllowReads)
 	_ = os.MkdirAll(filepath.Join(cfg.StateDir, "sessions"), 0o700)
 	_ = os.MkdirAll(filepath.Join(cfg.StateDir, "attachments"), 0o700)
 	cfgDir := cfg.ConfigDir
@@ -371,8 +377,56 @@ func (m *Manager) emitSummary(s *Session) {
 
 // ---- notifications ----
 
+// SetNotifyEvents updates the optional host-level notification category filter.
+// Passing nil clears the host override so connected clients filter per-device.
+func (m *Manager) SetNotifyEvents(events []string) {
+	m.notMu.Lock()
+	if events == nil {
+		m.notifyEvents = nil
+	} else {
+		m.notifyEvents = push.NormalizeEvents(events)
+	}
+	m.notMu.Unlock()
+}
+
+// AgyAutoAllowReads reports whether agy file read/search permission prompts are auto-approved.
+func (m *Manager) AgyAutoAllowReads() bool {
+	return m.agyAutoAllowReads.Load()
+}
+
+// SetAgyAutoAllowReads updates host-level agy read auto-approval and unblocks any waiting read prompts.
+func (m *Manager) SetAgyAutoAllowReads(v bool) {
+	m.agyAutoAllowReads.Store(v)
+	if !v {
+		return
+	}
+	m.mu.Lock()
+	list := make([]*Session, 0, len(m.sessions))
+	for _, s := range m.sessions {
+		list = append(list, s)
+	}
+	m.mu.Unlock()
+	for _, s := range list {
+		s.AutoResolvePendingReads()
+	}
+}
+
+// NotifyEvents returns the configured host-level notification category filter (nil if unset).
+func (m *Manager) NotifyEvents() []string {
+	m.notMu.Lock()
+	defer m.notMu.Unlock()
+	if len(m.notifyEvents) == 0 {
+		return nil
+	}
+	return append([]string(nil), m.notifyEvents...)
+}
+
 func (m *Manager) notify(n Notification) {
 	m.notMu.Lock()
+	if len(m.notifyEvents) > 0 && !push.AllowsEvents(m.notifyEvents, n.Kind) {
+		m.notMu.Unlock()
+		return
+	}
 	m.notSeq++
 	n.Seq = m.notSeq
 	n.ID = fmt.Sprintf("n%d-%d", time.Now().Unix(), m.notSeq)
@@ -883,6 +937,7 @@ func (m *Manager) List(ctx context.Context, force bool) []Summary {
 // Flags are the agent launch options chosen by Desktop, Android, or CLI callers.
 type Flags struct {
 	SkipPermissions  *bool    `json:"skipPermissions,omitempty"`
+	AutoAllowReads   *bool    `json:"autoAllowReads,omitempty"`
 	Sandbox          bool     `json:"sandbox,omitempty"`
 	SandboxMode      string   `json:"sandboxMode,omitempty"`
 	ApprovalPolicy   string   `json:"approvalPolicy,omitempty"`
@@ -900,6 +955,7 @@ type Flags struct {
 func (f *Flags) UnmarshalJSON(b []byte) error {
 	type rawFlags struct {
 		SkipPermissions  *bool           `json:"skipPermissions,omitempty"`
+		AutoAllowReads   *bool           `json:"autoAllowReads,omitempty"`
 		Sandbox          json.RawMessage `json:"sandbox,omitempty"`
 		SandboxMode      string          `json:"sandboxMode,omitempty"`
 		ApprovalPolicy   string          `json:"approvalPolicy,omitempty"`
@@ -918,6 +974,7 @@ func (f *Flags) UnmarshalJSON(b []byte) error {
 		return err
 	}
 	f.SkipPermissions = rf.SkipPermissions
+	f.AutoAllowReads = rf.AutoAllowReads
 	f.SandboxMode = strings.TrimSpace(rf.SandboxMode)
 	f.ApprovalPolicy = strings.TrimSpace(rf.ApprovalPolicy)
 	f.Provider = strings.TrimSpace(rf.Provider)
@@ -989,6 +1046,9 @@ func (p *CreateParams) UnmarshalJSON(b []byte) error {
 		if n.SkipPermissions != nil {
 			p.Flags.SkipPermissions = n.SkipPermissions
 		}
+		if n.AutoAllowReads != nil {
+			p.Flags.AutoAllowReads = n.AutoAllowReads
+		}
 		if n.Sandbox {
 			p.Flags.Sandbox = true
 		}
@@ -1045,6 +1105,9 @@ func (m *Manager) applyFlags(meta *SessionMeta, f *Flags) {
 	}
 	if f.SkipPermissions != nil {
 		meta.SkipPerms = *f.SkipPermissions
+	}
+	if f.AutoAllowReads != nil {
+		meta.AutoAllowReads = *f.AutoAllowReads
 	}
 	if f.Sandbox || f.SandboxMode != "" {
 		meta.Sandbox = f.Sandbox
@@ -1139,7 +1202,7 @@ func (m *Manager) Create(ctx context.Context, p CreateParams) (*Session, error) 
 	ts := now()
 	title := firstNonEmpty(p.Title, "New session")
 	meta := SessionMeta{Agent: agent, Cwd: cwd, ProjectID: projID, WorktreePath: wtPath, Branch: branch,
-		GroupedUnder: p.GroupedUnder, SkipPerms: m.cfg.DefaultSkip, WantModel: m.defaultModel(agent),
+		GroupedUnder: p.GroupedUnder, SkipPerms: m.cfg.DefaultSkip, AutoAllowReads: m.AgyAutoAllowReads(), WantModel: m.defaultModel(agent),
 		CreatedAt: ts, UpdatedAt: ts, Origin: "app", Title: title, TitleLocked: strings.TrimSpace(p.Title) != ""}
 	m.applyFlags(&meta, p.FlagsNested)
 	m.applyFlags(&meta, &p.Flags)
@@ -1227,7 +1290,7 @@ func (m *Manager) OpenWith(ctx context.Context, id string, flags *Flags) (*Sessi
 	if st, err := os.Stat(cwd); cwd == "" || err != nil || !st.IsDir() {
 		cwd = m.cfg.HomeDir
 	}
-	meta := SessionMeta{ID: id, Agent: "agy", Cwd: cwd, SkipPerms: m.cfg.DefaultSkip, Title: firstNonEmpty(h.Title, "Conversation"),
+	meta := SessionMeta{ID: id, Agent: "agy", Cwd: cwd, SkipPerms: m.cfg.DefaultSkip, AutoAllowReads: m.AgyAutoAllowReads(), Title: firstNonEmpty(h.Title, "Conversation"),
 		CreatedAt: h.UpdatedAt, UpdatedAt: h.UpdatedAt, Origin: "history", Archived: h.Archived, Pinned: h.Pinned, NeedsReload: true}
 	if flags != nil {
 		// An existing conversation keeps its own model, mode, effort and agent;

@@ -2,6 +2,7 @@ package io.github.sidd065.agentcompanion.ui.components
 
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.material.icons.outlined.CheckBox
@@ -149,6 +150,49 @@ fun MarkdownText(
     color: Color = Color.Unspecified,
     compact: Boolean = false,
 ) {
+    val segments = remember(text) { splitRichMarkdownSegments(text) }
+    if (segments.size > 1 || segments.firstOrNull() !is RichMarkdownSegment.Standard) {
+        val hostId = io.github.sidd065.agentcompanion.ui.LocalHostId.current
+        androidx.compose.foundation.layout.Column(
+            modifier = modifier,
+            verticalArrangement = androidx.compose.foundation.layout.Arrangement.spacedBy(if (compact) 4.dp else 8.dp),
+        ) {
+            segments.forEach { seg ->
+                when (seg) {
+                    is RichMarkdownSegment.Standard -> MarkdownLeaf(seg.markdown, selectable = selectable, immediate = immediate, style = style, color = color, compact = compact)
+                    is RichMarkdownSegment.Mermaid -> MermaidDiagram(seg.source)
+                    is RichMarkdownSegment.Carousel -> CarouselView(seg.source, selectable = selectable)
+                    is RichMarkdownSegment.Alert -> GitHubAlertCard(seg.data, selectable = selectable)
+                    is RichMarkdownSegment.Media -> {
+                        if (isVideoPath(seg.path)) {
+                            RemoteVideoPlayerCard(hostId = hostId, remotePath = seg.path, caption = seg.caption)
+                        } else {
+                            coil3.compose.AsyncImage(
+                                model = if (hostId != null) io.github.sidd065.agentcompanion.net.RemoteImage(hostId, path = seg.path) else seg.path,
+                                contentDescription = seg.caption,
+                                contentScale = androidx.compose.ui.layout.ContentScale.FillWidth,
+                                modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
+                            )
+                        }
+                    }
+                }
+            }
+        }
+        return
+    }
+    MarkdownLeaf(text, modifier = modifier, selectable = selectable, immediate = immediate, style = style, color = color, compact = compact)
+}
+
+@Composable
+private fun MarkdownLeaf(
+    text: String,
+    modifier: Modifier = Modifier,
+    selectable: Boolean = true,
+    immediate: Boolean = false,
+    style: TextStyle? = null,
+    color: Color = Color.Unspecified,
+    compact: Boolean = false,
+) {
     val ex = LocalExtra.current
     val t = MaterialTheme.typography
     val state = rememberMarkdownState(text, retainState = true, immediate = immediate)
@@ -199,7 +243,15 @@ fun MarkdownText(
                     })
                 },
                 codeBlock = { MarkdownHighlightedCodeBlock(content = it.content, node = it.node, style = it.typography.code, showHeader = true) },
-                codeFence = { MarkdownHighlightedCodeFence(content = it.content, node = it.node, style = it.typography.code, showHeader = true) },
+                codeFence = { m ->
+                    val rawFence = m.content.substring(m.node.startOffset, m.node.endOffset)
+                    val (lang, inner) = extractFencedCodeContent(rawFence)
+                    when (lang) {
+                        "mermaid" -> MermaidDiagram(inner)
+                        "carousel" -> CarouselView(inner, selectable = selectable)
+                        else -> MarkdownHighlightedCodeFence(content = m.content, node = m.node, style = m.typography.code, showHeader = true)
+                    }
+                },
                 // Cells wrap instead of being cut off after one line.
                 table = { m ->
                     MarkdownTable(

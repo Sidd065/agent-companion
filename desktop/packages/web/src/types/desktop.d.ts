@@ -28,6 +28,8 @@ export interface DesktopBridge {
   saveHosts(hosts: PairedHostCredentials[]): Promise<void>;
   loadSettings(): Promise<Record<string, unknown>>;
   saveSettings(settings: Record<string, unknown>): Promise<void>;
+  loadNotes(): Promise<Record<string, unknown>>;
+  saveNotes(notes: Record<string, unknown>): Promise<void>;
   detectLocalDaemon(): Promise<LocalDaemonStatus>;
   requestLocalPairLink(customUrl?: string): Promise<{ url: string; host: string; fingerprint: string }>;
   listEditors(): Promise<DetectedEditor[]>;

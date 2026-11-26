@@ -45,6 +45,7 @@ export const TerminalPanel: React.FC<Props> = ({ tab, initialTermId, onCloseDraw
     activeSession,
     draft,
     callHost,
+    terminalCycleSignal,
     upsertHostTerminal,
     refreshHostTerminals,
     addComposerChip,
@@ -133,6 +134,23 @@ export const TerminalPanel: React.FC<Props> = ({ tab, initialTermId, onCloseDraw
     refreshHostTerminals,
     probingInitialTerm,
   ]);
+
+  const prevCycleSeqRef = useRef(terminalCycleSignal.seq);
+  useEffect(() => {
+    if (terminalCycleSignal.seq === prevCycleSeqRef.current) return;
+    prevCycleSeqRef.current = terminalCycleSignal.seq;
+    if (terminals.length < 2) return;
+    const curIdx = Math.max(
+      0,
+      terminals.findIndex((t) => t.id === selectedId),
+    );
+    const nextIdx = (curIdx + terminalCycleSignal.delta + terminals.length) % terminals.length;
+    const nextTerm = terminals[nextIdx];
+    if (nextTerm) {
+      userPickedRef.current = true;
+      setSelectedId(nextTerm.id);
+    }
+  }, [terminalCycleSignal, terminals, selectedId]);
 
   const activeTerm: TerminalInfo | null = terminals.find((t) => t.id === selectedId) ?? null;
 

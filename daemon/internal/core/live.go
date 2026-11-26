@@ -248,13 +248,16 @@ func (m *Manager) ComputeLive(ctx context.Context, id string, ls *lsapi.Client) 
 	}
 	sort.SliceStable(live.Artifacts, func(i, j int) bool { return live.Artifacts[i].Updated > live.Artifacts[j].Updated })
 	// Subagents.
+	parentSession := m.Get(id)
+	parentCanRunSubagents := ls != nil && (parentSession == nil || !parentSession.agyFullyIdleSafe())
 	sys := filepath.Join(dir, ".system_generated")
 	if ents, err := os.ReadDir(filepath.Join(sys, "subagents")); err == nil {
 		for _, e := range ents {
 			if !strings.HasSuffix(e.Name(), ".json") {
 				continue
 			}
-			b, err := os.ReadFile(filepath.Join(sys, "subagents", e.Name()))
+			metaPath := filepath.Join(sys, "subagents", e.Name())
+			b, err := os.ReadFile(metaPath)
 			if err != nil {
 				continue
 			}
@@ -270,10 +273,19 @@ func (m *Manager) ComputeLive(ctx context.Context, id string, ls *lsapi.Client) 
 			if json.Unmarshal(b, &sa) != nil || sa.ConversationID == "" {
 				continue
 			}
-			sub := Subagent{ID: sa.ConversationID, Role: firstNonEmpty(sa.Desc.Role, sa.Desc.TypeName, "Subagent"), Type: sa.Desc.TypeName,
-				State: strings.TrimPrefix(sa.State, "SUBAGENT_STATE_"), SpawnStep: sa.Spawn}
-			if st, err := os.Stat(filepath.Join(m.cfg.AgyDataDir, "brain", sa.ConversationID, ".system_generated", "logs", "transcript.jsonl")); err == nil {
-				sub.Updated = st.ModTime().UnixMilli()
+			rawState := strings.TrimPrefix(sa.State, "SUBAGENT_STATE_")
+			var metaMtime int64
+			if mst, err := os.Stat(metaPath); err == nil {
+				metaMtime = mst.ModTime().UnixMilli()
+			}
+			resState, updated := m.resolveAgySubagentState(sa.ConversationID, rawState, metaMtime, parentCanRunSubagents, 0)
+			sub := Subagent{
+				ID:        sa.ConversationID,
+				Role:      firstNonEmpty(sa.Desc.Role, sa.Desc.TypeName, "Subagent"),
+				Type:      sa.Desc.TypeName,
+				State:     resState,
+				SpawnStep: sa.Spawn,
+				Updated:   updated,
 			}
 			live.Subagents = append(live.Subagents, sub)
 		}
@@ -757,4 +769,149 @@ func protoField(b []byte, num uint64) []byte {
 		}
 	}
 	return nil
+}
+
+type agyTailStep struct {
+	Type      string            `json:"type"`
+	Status    string            `json:"status"`
+	Source    string            `json:"source"`
+	ToolCalls []json.RawMessage `json:"tool_calls"`
+}
+
+func inspectAgySubagentTranscriptTail(path string) (last *agyTailStep, updated int64, ok bool) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, 0, false
+	}
+	defer f.Close()
+	st, err := f.Stat()
+	if err != nil {
+		return nil, 0, false
+	}
+	updated = st.ModTime().UnixMilli()
+	size := st.Size()
+	if size == 0 {
+		return nil, updated, true
+	}
+	const window = 64 * 1024
+	offset := int64(0)
+	if size > window {
+		offset = size - window
+	}
+	if _, err := f.Seek(offset, io.SeekStart); err != nil {
+		return nil, updated, true
+	}
+	buf, err := io.ReadAll(io.LimitReader(f, window))
+	if err != nil {
+		return nil, updated, true
+	}
+	lines := strings.Split(strings.TrimRight(string(buf), "\r\n "), "\n")
+	for i := len(lines) - 1; i >= 0; i-- {
+		l := strings.TrimSpace(lines[i])
+		if l == "" || !strings.HasPrefix(l, "{") {
+			continue
+		}
+		var step agyTailStep
+		if json.Unmarshal([]byte(l), &step) == nil && (step.Type != "" || step.Status != "" || step.Source != "") {
+			return &step, updated, true
+		}
+	}
+	return nil, updated, true
+}
+
+// resolveAgySubagentState maps agy's persistent SUBAGENT_STATE_ALIVE descriptor state
+// to the subagent's true execution state ("RUNNING", "DONE", "STOPPED", or "FAILED")
+// using an O(1) tail read of its transcript.jsonl and child subagents.
+func (m *Manager) resolveAgySubagentState(subID, rawState string, metaMtime int64, parentActive bool, depth int) (string, int64) {
+	u := strings.ToUpper(strings.TrimSpace(rawState))
+	subDir, err := m.brainDir(subID)
+	var last *agyTailStep
+	updated := metaMtime
+	hasTranscript := false
+	if err == nil {
+		if step, mtime, ok := inspectAgySubagentTranscriptTail(filepath.Join(subDir, ".system_generated", "logs", "transcript.jsonl")); ok {
+			last = step
+			hasTranscript = true
+			if mtime > 0 {
+				updated = mtime
+			}
+		}
+	}
+	switch u {
+	case "KILLED", "STOPPED", "TERMINATED", "CANCELLED", "CANCELED":
+		return "STOPPED", updated
+	case "FAILED", "ERROR":
+		return "FAILED", updated
+	case "DONE", "COMPLETED", "FINISHED", "IDLE":
+		return "DONE", updated
+	}
+	if last != nil {
+		st := strings.ToUpper(strings.TrimSpace(last.Status))
+		switch st {
+		case "FAILED", "ERROR":
+			return "FAILED", updated
+		case "CANCELLED", "CANCELED":
+			return "STOPPED", updated
+		}
+	}
+	// When the parent agy process is sleeping or confirmed fullyIdle, no subagent is running.
+	if !parentActive {
+		return "DONE", updated
+	}
+	hasRunningChild := func() bool {
+		if depth >= 3 || err != nil {
+			return false
+		}
+		ents, rerr := os.ReadDir(filepath.Join(subDir, ".system_generated", "subagents"))
+		if rerr != nil {
+			return false
+		}
+		for _, e := range ents {
+			if !strings.HasSuffix(e.Name(), ".json") {
+				continue
+			}
+			fp := filepath.Join(subDir, ".system_generated", "subagents", e.Name())
+			b, berr := os.ReadFile(fp)
+			if berr != nil {
+				continue
+			}
+			var child struct {
+				ConversationID string `json:"conversationId"`
+				State          string `json:"state"`
+			}
+			if json.Unmarshal(b, &child) != nil || child.ConversationID == "" {
+				continue
+			}
+			var cmtime int64
+			if cst, cerr := os.Stat(fp); cerr == nil {
+				cmtime = cst.ModTime().UnixMilli()
+			}
+			cstState, _ := m.resolveAgySubagentState(child.ConversationID, strings.TrimPrefix(child.State, "SUBAGENT_STATE_"), cmtime, parentActive, depth+1)
+			if cstState == "RUNNING" {
+				return true
+			}
+		}
+		return false
+	}
+	nowMs := time.Now().UnixMilli()
+	if !hasTranscript || last == nil {
+		if updated > 0 && nowMs-updated > 2*60*1000 && !hasRunningChild() {
+			return "DONE", updated
+		}
+		return "RUNNING", updated
+	}
+	// A subagent turn finishes when the model emits a PLANNER_RESPONSE with status DONE and no tool calls.
+	if strings.EqualFold(last.Source, "MODEL") &&
+		strings.EqualFold(last.Type, "PLANNER_RESPONSE") &&
+		strings.EqualFold(last.Status, "DONE") &&
+		len(last.ToolCalls) == 0 {
+		if hasRunningChild() {
+			return "RUNNING", updated
+		}
+		return "DONE", updated
+	}
+	if updated > 0 && nowMs-updated > 15*60*1000 && !hasRunningChild() {
+		return "DONE", updated
+	}
+	return "RUNNING", updated
 }

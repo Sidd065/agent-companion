@@ -78,3 +78,37 @@ func TestGlobalSearchUTF8CaseExpansionNoPanic(t *testing.T) {
 		}
 	}
 }
+
+func TestGlobalSearchQuotedPhraseAndDottedIFolding(t *testing.T) {
+	root := nonTmpTestDir(t, "global-search-phrases")
+	mgr := NewManager(Config{StateDir: root, ConfigDir: root, HomeDir: root}, NewHub())
+	defer mgr.Shutdown()
+
+	s1 := newSession(mgr, SessionMeta{ID: "s-phrase-match", Agent: "agy", Cwd: root, Title: "Cloudflare static tunnel setup", UpdatedAt: 100})
+	s1.tr.LoadItems([]*Item{{ID: "1", Kind: "user", Text: "Configure static tunnel on jdlf.cc for İSTANBUL gateway", Ts: 100}}, 1)
+
+	s2 := newSession(mgr, SessionMeta{ID: "s-phrase-split", Agent: "agy", Cwd: root, Title: "Other session", UpdatedAt: 90})
+	s2.tr.LoadItems([]*Item{{ID: "1", Kind: "user", Text: "Configure a dynamic tunnel and later a static IP", Ts: 90}}, 1)
+
+	mgr.mu.Lock()
+	mgr.sessions[s1.meta.ID] = s1
+	mgr.sessions[s2.meta.ID] = s2
+	mgr.mu.Unlock()
+
+	// Exact quoted phrase `"static tunnel"` matches s1, NOT s2.
+	hits := mgr.GlobalSearch(context.Background(), `"static tunnel"`, "", 20)
+	for _, h := range hits {
+		if h.SessionID == "s-phrase-split" {
+			t.Fatalf("quoted phrase matched split tokens in s2: %+v", hits)
+		}
+	}
+	if len(hits) == 0 || hits[0].SessionID != "s-phrase-match" {
+		t.Fatalf("quoted phrase missed s1: %+v", hits)
+	}
+
+	// ASCII "istanbul" matches "İSTANBUL" cleanly via dotted-İ folding.
+	hitsI := mgr.GlobalSearch(context.Background(), "istanbul", "", 20)
+	if len(hitsI) != 1 || hitsI[0].SessionID != "s-phrase-match" || !utf8.ValidString(hitsI[0].Snippet) {
+		t.Fatalf("dotted-İ query 'istanbul' failed: %+v", hitsI)
+	}
+}

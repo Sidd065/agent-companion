@@ -40,6 +40,9 @@ var Capabilities = []string{
 	"providers.codex",
 	"providers.openrouter",
 	"customModels",
+	"tunnel.cloudflare",
+	"notifications.filter",
+	"devices.revokeOthers",
 }
 
 func (s *Server) registerParityMethods() {
@@ -640,9 +643,11 @@ func (s *Server) registerParityMethods() {
 	}
 	m["usage.summary"] = func(ctx context.Context, c *core.Client, p json.RawMessage) (any, error) {
 		in, _ := bind[struct {
-			Days int `json:"days"`
+			Days    int  `json:"days"`
+			Hours   int  `json:"hours"`
+			AllTime bool `json:"allTime"`
 		}](p)
-		return s.Mgr.Usage.Query(in.Days), nil
+		return s.Mgr.Usage.QueryWindow(in.Days, in.Hours, in.AllTime), nil
 	}
 	m["skills.list"] = func(ctx context.Context, c *core.Client, p json.RawMessage) (any, error) {
 		in, _ := bind[struct {

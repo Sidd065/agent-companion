@@ -273,6 +273,18 @@ fun ManageScreen() {
                         TextButton(onClick = { revoking = o }) { Text("Unpair") }
                     }
                 }
+                if (list != null && list.size > 1) {
+                    OutlinedButton(
+                        onClick = {
+                            scope.launch {
+                                runCatching { conn.rpc.call("devices.revokeOthers") }
+                                    .onSuccess { snack.showSnackbar("Unpaired all other devices"); reload++ }
+                                    .onFailure { snack.showSnackbar("Revoke failed: ${it.message}") }
+                            }
+                        },
+                        modifier = Modifier.padding(top = 6.dp),
+                    ) { Text("Unpair all other devices") }
+                }
                 Text("Pair another phone with `agentc pair` on ${conn.config.label}.", style = MaterialTheme.typography.labelSmall, color = LocalExtra.current.muted)
             }
 
@@ -359,6 +371,17 @@ fun ManageScreen() {
                     Text("Allow access outside the workspace", style = MaterialTheme.typography.bodyMedium, modifier = Modifier.weight(1f))
                     val v = st?.get("allowNonWorkspaceAccess")?.jsonPrimitive?.booleanOrNull == true
                     Switch(v, { setSetting(conn, "allowNonWorkspaceAccess", JsonPrimitive(it)) { reload++ } })
+                }
+                Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                    Text("Auto-allow read requests (agentc)", style = MaterialTheme.typography.bodyMedium, modifier = Modifier.weight(1f))
+                    val autoReads = daemon?.o("config")?.get("agyAutoAllowReads")?.jsonPrimitive?.booleanOrNull == true || settings.agyFlags.autoAllowReads
+                    Switch(autoReads, { next ->
+                        scope.launch {
+                            g.prefs.update { it.copy(agyFlags = it.agyFlags.copy(autoAllowReads = next)) }
+                            runCatching { conn.rpc.call("daemon.config.set", params { put("agyAutoAllowReads", next) }) }
+                            reload++
+                        }
+                    })
                 }
                 KV("Default model", st.s("model"))
                 TextButton(onClick = { files.firstOrNull { it.name == "settings.json" }?.let { nav.navigate(Routes.file(it.path, edit = true, host = conn.config.id)) } }) { Text("Edit settings.json") }

@@ -87,16 +87,21 @@ func (s *Server) registerMethods() {
 	}
 	m["push.register"] = func(ctx context.Context, c *core.Client, p json.RawMessage) (any, error) {
 		in, _ := bind[struct {
-			Token   string `json:"token"`
-			HostKey string `json:"hostKey"`
-			Device  string `json:"device"`
+			Token   string    `json:"token"`
+			HostKey string    `json:"hostKey"`
+			Device  string    `json:"device"`
+			Events  *[]string `json:"events"`
 		}](p)
 		if s.Push == nil || in.Token == "" {
 			return nil, errors.New("push is not available")
 		}
+		var evs []string
+		if in.Events != nil {
+			evs = append([]string{}, (*in.Events)...)
+		}
 		// The token belongs to the authenticated device; the host key is this
 		// daemon's identity (the app routes notifications by it).
-		s.Push.Register(push.Device{Token: in.Token, HostKey: s.Identity.ID(), Device: firstNonEmpty(in.Device, c.Device), DeviceID: c.Peer})
+		s.Push.Register(push.Device{Token: in.Token, HostKey: s.Identity.ID(), Device: firstNonEmpty(in.Device, c.Device), DeviceID: c.Peer, Events: evs})
 		return s.Push.Status(), nil
 	}
 	m["push.unregister"] = func(ctx context.Context, c *core.Client, p json.RawMessage) (any, error) {
@@ -142,6 +147,19 @@ func (s *Server) registerMethods() {
 		in, _ := bind[idParam](p)
 		ok, err := s.revokeDevice(in.ID)
 		return map[string]any{"removed": ok}, err
+	}
+	m["devices.revokeOthers"] = func(ctx context.Context, c *core.Client, p json.RawMessage) (any, error) {
+		if c.Peer == "" {
+			return nil, errors.New("caller device id unknown")
+		}
+		n, err := s.revokeOtherDevices(c.Peer)
+		return map[string]any{"ok": err == nil, "removed": n, "revoked": n}, err
+	}
+	m["daemon.tunnel.reload"] = func(ctx context.Context, c *core.Client, p json.RawMessage) (any, error) {
+		if s.TunnelReload == nil {
+			return nil, errors.New("tunnel reload not supported")
+		}
+		return s.TunnelReload()
 	}
 	m["devices.rename"] = func(ctx context.Context, c *core.Client, p json.RawMessage) (any, error) {
 		in, _ := bind[struct {
@@ -243,11 +261,12 @@ func (s *Server) registerMethods() {
 	}
 	m["session.permission"] = func(ctx context.Context, c *core.Client, p json.RawMessage) (any, error) {
 		in, _ := bind[struct {
-			ID       string         `json:"id"`
-			ReqID    string         `json:"reqId"`
-			OptionID string         `json:"optionId"`
-			Answers  map[string]any `json:"answers"`
-			Message  string         `json:"message"`
+			ID             string         `json:"id"`
+			ReqID          string         `json:"reqId"`
+			OptionID       string         `json:"optionId"`
+			Answers        map[string]any `json:"answers"`
+			Message        string         `json:"message"`
+			AutoAllowReads bool           `json:"autoAllowReads"`
 		}](p)
 		ss := s.Mgr.Get(in.ID)
 		if ss == nil {
@@ -257,7 +276,15 @@ func (s *Server) registerMethods() {
 		if len(in.Answers) > 0 || strings.TrimSpace(in.Message) != "" {
 			ans = &core.PermAnswer{Answers: in.Answers, Message: strings.TrimSpace(in.Message)}
 		}
-		return map[string]any{"ok": true}, ss.RespondPermissionWith(in.ReqID, in.OptionID, ans)
+		err := ss.RespondPermissionWith(in.ReqID, in.OptionID, ans)
+		if in.AutoAllowReads {
+			ss.SetAutoAllowReads(true)
+			s.Mgr.SetAgyAutoAllowReads(true)
+			if s.ConfigSet != nil {
+				_, _ = s.ConfigSet(map[string]any{"agyAutoAllowReads": true})
+			}
+		}
+		return map[string]any{"ok": true}, err
 	}
 	// Side questions (/btw): answered from the conversation, not added to it.
 	m["session.aside"] = func(ctx context.Context, c *core.Client, p json.RawMessage) (any, error) {

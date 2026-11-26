@@ -13,10 +13,12 @@ import {
   RefreshCw,
   Search,
   Server,
+  StickyNote,
   Trash2,
 } from 'lucide-react';
 import type { SessionSummary } from '@agentc/protocol';
-import { useApp } from '../../state/appStore.js';
+import { threadKey, useApp } from '../../state/appStore.js';
+import { matchesClientSearch, nextNoteSummary, plainInlineTitle } from '../../utils/sessionHelpers.js';
 
 type RowSession = SessionSummary & { hostId: string; hostName: string };
 
@@ -64,6 +66,7 @@ export const Sidebar: React.FC = () => {
     openDraft,
     setAddProjectModalOpen,
     setPairModalOpen,
+    sessionNotes,
     settings,
     callHost,
     pushToast,
@@ -80,7 +83,7 @@ export const Sidebar: React.FC = () => {
   const [collapsedProjectGroups, setCollapsedProjectGroups] = useState<Record<string, boolean>>({});
 
   const filteredSessions = useMemo(() => {
-    const q = query.trim().toLowerCase();
+    const q = query.trim();
     return allSessions.filter((s) => {
       if (s.archived) return false;
       if (selectedHostFilter !== 'all' && s.hostId !== selectedHostFilter) return false;
@@ -88,12 +91,14 @@ export const Sidebar: React.FC = () => {
         return false;
       }
       if (q) {
-        const hay = `${s.title} ${s.cwd} ${s.branch || ''} ${s.agent} ${s.hostName}`.toLowerCase();
-        if (!hay.includes(q)) return false;
+        const noteText = sessionNotes[threadKey(s.hostId, s.id)]?.text;
+        if (!matchesClientSearch(q, s.title, s.cwd, s.branch, s.agent, s.hostName, noteText)) {
+          return false;
+        }
       }
       return true;
     });
-  }, [allSessions, query, selectedHostFilter, selectedProjectFilter]);
+  }, [allSessions, query, selectedHostFilter, selectedProjectFilter, sessionNotes]);
 
   const { pinned, working, active, settled } = useMemo(() => {
     const pinnedList: RowSession[] = [];
@@ -231,8 +236,15 @@ export const Sidebar: React.FC = () => {
         </div>
 
         <div className="text-[13px] font-medium text-[var(--text-primary)] truncate pr-10">
-          {s.title || 'Untitled session'}
+          {plainInlineTitle(s.title) || 'Untitled session'}
         </div>
+
+        {nextNoteSummary(sessionNotes[threadKey(s.hostId, s.id)]?.text) && (
+          <div className="flex items-center gap-1 mt-0.5 text-[10.5px] text-[var(--accent)] truncate">
+            <StickyNote className="w-2.5 h-2.5 shrink-0" />
+            <span className="truncate">{nextNoteSummary(sessionNotes[threadKey(s.hostId, s.id)]?.text)}</span>
+          </div>
+        )}
 
         <div className="flex items-center gap-2 mt-0.5 text-[11px] text-[var(--text-muted)]">
           {s.branch && (
@@ -299,7 +311,8 @@ export const Sidebar: React.FC = () => {
   return (
     <aside
       data-testid="sidebar"
-      className="w-[276px] shrink-0 h-full flex flex-col border-r border-[var(--border)] bg-[var(--bg-sidebar)] select-none"
+      style={{ width: settings.sidebarWidth || 276 }}
+      className="shrink-0 h-full flex flex-col bg-[var(--bg-sidebar)] select-none"
     >
       {/* Top actions: New Thread + Add Project */}
       <div className="p-2.5 space-y-2 border-b border-[var(--border)]">

@@ -7,8 +7,8 @@ Client Protocol) agent**. Manage projects, isolated Git worktrees, per-turn chec
 PRs & Issues, scripts, scheduled tasks, usage/cost telemetry, and real interactive terminals — across any
 number of local or remote hosts, all end-to-end encrypted.
 
-**[Download Linux Desktop (.deb)](https://github.com/Sidd065/agent-companion/releases/latest/download/agent-companion_0.5.0_amd64.deb)**
-· **[Linux AppImage](https://github.com/Sidd065/agent-companion/releases/latest/download/Agent-Companion-0.5.0-x86_64.AppImage)**
+**[Download Linux Desktop (.deb)](https://github.com/Sidd065/agent-companion/releases/latest/download/agent-companion_0.6.0_amd64.deb)**
+· **[Linux AppImage](https://github.com/Sidd065/agent-companion/releases/latest/download/Agent-Companion-0.6.0-x86_64.AppImage)**
 · **[Android APK](https://github.com/Sidd065/agent-companion/releases/latest/download/agent-companion.apk)**
 · [Releases](https://github.com/Sidd065/agent-companion/releases) · [Install](#install)
 
@@ -196,9 +196,24 @@ agentc adopts its running cloudflared again when the daemon restarts, so upgrade
 to paired phones (this needs push notifications), and you can always re-scan `agentc pair` on a paired phone
 to update it.
 
-To use a stable URL instead, such as a named Cloudflare tunnel, a reverse proxy or a LAN address, set
-`"publicUrl"` and `"tunnel": "none"`. To pair over a LAN, run `agentc pair --url http://192.168.1.5:9473`.
-Plain `http://` is still end-to-end encrypted.
+### Static Cloudflare Tunnels (with Free Quick-Tunnel Fallback)
+
+If you have a domain on Cloudflare (for example `jdlf.cc`) and an API token in `~/.cloudflare_creds`
+(`CLOUDFLARE_API_TOKEN` + optional `CLOUDFLARE_ACCOUNT_ID`), configure static named tunnels directly in `agentc`:
+
+```sh
+agentc tunnel auth --domain jdlf.cc
+# or with an explicit creds path / custom subdomain:
+agentc tunnel auth --creds-file ~/.cloudflare_creds --hostname agentc-box.jdlf.cc
+```
+
+`agentc` provisions a dedicated named tunnel (`agentc-<host>-<id>`) and manages **only** its own scoped
+`CNAME` (`agentc-<host>.jdlf.cc`), leaving the rest of your domain and other tunnels untouched. If static
+auth is not configured or temporarily unreachable, `agentc` automatically falls back to a free
+`trycloudflare.com` quick tunnel (unless `--no-fallback` is set).
+
+To bring your own external reverse proxy or LAN address instead, set `"publicUrl"` and `"tunnel": "none"`, or
+pair over LAN with `agentc pair --url http://192.168.1.5:9473` (plain `http://` is still end-to-end encrypted).
 
 ## Commands
 

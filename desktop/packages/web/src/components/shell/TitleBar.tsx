@@ -10,9 +10,11 @@ import {
   Plus,
   Server,
   Settings,
+  StickyNote,
   TerminalSquare,
 } from 'lucide-react';
 import { useApp } from '../../state/appStore.js';
+import { plainInlineTitle } from '../../utils/sessionHelpers.js';
 
 export const TitleBar: React.FC = () => {
   const {
@@ -100,7 +102,7 @@ export const TitleBar: React.FC = () => {
             <>
               {projectName && <span className="text-[var(--text-muted)]">/ {projectName}</span>}
               <span className="font-medium text-[var(--text-primary)] truncate max-w-[340px]">
-                / {activeSession.title || 'Untitled session'}
+                / {plainInlineTitle(activeSession.title) || 'Untitled session'}
               </span>
               {(activeSession.branch || activeDetail?.branch) && (
                 <span className="inline-flex items-center gap-1 text-[11px] text-[var(--text-muted)] bg-[var(--bg-surface)] px-1.5 py-0.5 rounded border border-[var(--border)]">
@@ -161,6 +163,18 @@ export const TitleBar: React.FC = () => {
         </button>
 
         <div className="w-px h-4 bg-[var(--border)] mx-1" />
+
+        {activeSession && (
+          <button
+            type="button"
+            data-testid="open-notes-btn"
+            title="Session Notes (Ctrl+Shift+N)"
+            onClick={() => openRightTab({ id: 'notes', kind: 'notes', title: 'Notes' })}
+            className="p-1.5 rounded hover:bg-[var(--bg-hover)] text-[var(--text-secondary)] hover:text-[var(--accent)] cursor-pointer"
+          >
+            <StickyNote className="w-4 h-4" />
+          </button>
+        )}
 
         <button
           type="button"

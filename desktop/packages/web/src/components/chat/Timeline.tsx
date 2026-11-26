@@ -78,10 +78,63 @@ function extractCommand(tool: ToolCall): string | null {
   return null;
 }
 
-const ToolRow: React.FC<{ item: TranscriptItem; onCite: (label: string, content: string) => void }> = React.memo(
-  ({ item, onCite }) => {
+interface AskQuestionEntry {
+  question?: string;
+  options?: string[];
+  is_multi_select?: boolean;
+}
+
+function extractAskQuestions(tool: ToolCall): AskQuestionEntry[] {
+  const inp = tool.input as { questions?: unknown } | undefined;
+  if (!inp || !Array.isArray(inp.questions)) return [];
+  return inp.questions.filter((q): q is AskQuestionEntry => Boolean(q && typeof q === 'object'));
+}
+
+function renderLinkifiedText(
+  raw: string | undefined,
+  onOpenUrl: (href: string) => void,
+): React.ReactNode {
+  if (!raw) return null;
+  const parts: React.ReactNode[] = [];
+  const re = /(https?:\/\/[^\s<>()]+|file:\/\/[^\s<>()]+)/g;
+  let last = 0;
+  let m: RegExpExecArray | null;
+  let idx = 0;
+  while ((m = re.exec(raw)) !== null) {
+    if (m.index > last) {
+      parts.push(raw.slice(last, m.index));
+    }
+    const url = m[0];
+    parts.push(
+      <a
+        key={`lnk-${idx++}`}
+        href={url}
+        onClick={(e) => {
+          e.preventDefault();
+          onOpenUrl(url);
+        }}
+        className="underline text-[var(--accent)] hover:opacity-85 cursor-pointer"
+      >
+        {url}
+      </a>,
+    );
+    last = m.index + url.length;
+  }
+  if (last < raw.length) parts.push(raw.slice(last));
+  return parts;
+}
+
+const ToolRow: React.FC<{
+  item: TranscriptItem;
+  defaultOpen?: boolean;
+  onCite: (label: string, content: string) => void;
+}> = React.memo(
+  ({ item, defaultOpen = false, onCite }) => {
     const tool = item.tool;
-    const [open, setOpen] = useState(false);
+    const [open, setOpen] = useState(defaultOpen);
+    useEffect(() => {
+      if (defaultOpen) setOpen(true);
+    }, [defaultOpen]);
     if (!tool) return null;
 
     const kind = (tool.kind || tool.name || '').toLowerCase();
@@ -92,6 +145,7 @@ const ToolRow: React.FC<{ item: TranscriptItem; onCite: (label: string, content:
     const isRead = kind.includes('read') || kind.includes('search') || kind.includes('glob') || kind.includes('grep');
 
     const cmd = isExec ? extractCommand(tool) : null;
+    const askQuestions = extractAskQuestions(tool);
     const inlineDiffs = isEdit ? extractToolInlineDiffs(tool) : [];
     const outStr = extractToolOutputText(tool);
     const inpStr = stringifyVal(tool.input);
@@ -123,7 +177,7 @@ const ToolRow: React.FC<{ item: TranscriptItem; onCite: (label: string, content:
             {tool.name || tool.kind || 'Tool'}
           </span>
           <span className="font-mono text-[11px] text-[var(--text-secondary)] truncate flex-1">
-            {cmd ? `$ ${cmd}` : tool.title || inlineDiffs[0]?.path || ''}
+            {cmd ? `$ ${cmd}` : askQuestions[0]?.question || tool.title || inlineDiffs[0]?.path || ''}
           </span>
           {durMs > 0 && <span className="text-[10px] font-mono text-[var(--text-muted)]">{formatDuration(durMs)}</span>}
           {isRunning ? (
@@ -162,6 +216,26 @@ const ToolRow: React.FC<{ item: TranscriptItem; onCite: (label: string, content:
                           + {ln}
                         </div>
                       ))}
+                  </div>
+                ))}
+              </div>
+            ) : askQuestions.length > 0 ? (
+              <div className="space-y-1.5">
+                {askQuestions.map((aq, qi) => (
+                  <div key={qi} className="rounded-md border border-[var(--border)] bg-[var(--bg-base)] p-2 space-y-1">
+                    <div className="font-medium text-[var(--text-primary)]">{aq.question}</div>
+                    {Array.isArray(aq.options) && aq.options.length > 0 && (
+                      <div className="flex flex-wrap gap-1">
+                        {aq.options.map((opt, oi) => (
+                          <span
+                            key={oi}
+                            className="rounded border border-[var(--border)] bg-[var(--bg-surface)] px-1.5 py-0.5 text-[10.5px] text-[var(--text-secondary)]"
+                          >
+                            {opt}
+                          </span>
+                        ))}
+                      </div>
+                    )}
                   </div>
                 ))}
               </div>
@@ -556,7 +630,9 @@ export const Timeline: React.FC<Props> = ({
             const visibleWork = filterWorkItems(g.workItems);
             const hasCompletedTurn = Boolean(g.turnItem);
             const defaultExpanded = !hasCompletedTurn || settings.toolVerbosity === 'showAll';
-            const workExpanded = expandedWorkGroups[g.id] ?? (hasCompletedTurn ? false : defaultExpanded);
+            const workExpanded =
+              expandedWorkGroups[g.id] ??
+              (Boolean(settings.expandToolCalls) || (hasCompletedTurn ? false : defaultExpanded));
 
             const turnCp =
               g.turnItem?.turn?.checkpoint ??
@@ -579,7 +655,22 @@ export const Timeline: React.FC<Props> = ({
                   >
                     <div className="max-w-[82%] space-y-1">
                       <div className="rounded-2xl rounded-tr-sm border border-[var(--border-strong)] bg-[var(--bg-elevated)] px-3.5 py-2.5 text-[13.5px] leading-relaxed text-[var(--text-primary)] whitespace-pre-wrap break-words">
-                        {g.userItem.text}
+                        {renderLinkifiedText(g.userItem.text, (href) => {
+                          if (href.startsWith('http://') || href.startsWith('https://')) {
+                            if (window.agentcDesktop) void window.agentcDesktop.openExternal(href);
+                            else window.open(href, '_blank', 'noopener,noreferrer');
+                          } else if (href.startsWith('file://')) {
+                            const rawP = decodeURIComponent(href.slice('file://'.length)).split('#')[0];
+                            const sl = rawP.lastIndexOf('/');
+                            openRightTab({
+                              id: 'files',
+                              kind: 'files',
+                              title: 'Files',
+                              filePath: sl > 0 ? rawP.slice(0, sl) : '/',
+                              openFilePath: rawP,
+                            });
+                          }
+                        })}
                         {g.userItem.blocks && g.userItem.blocks.length > 0 && (
                           <div className="mt-2 flex flex-wrap gap-1.5">
                             {g.userItem.blocks.map((b, bi) => (
@@ -672,7 +763,11 @@ export const Timeline: React.FC<Props> = ({
                           if (w.kind === 'tool') {
                             return (
                               <div key={w.id} id={`msg-${w.id}`} className={hit ? 'ring-1 ring-[var(--warning)] rounded-lg' : ''}>
-                                <ToolRow item={w} onCite={handleCite} />
+                                <ToolRow
+                                  item={w}
+                                  defaultOpen={Boolean(settings.expandToolCalls)}
+                                  onCite={handleCite}
+                                />
                               </div>
                             );
                           }
@@ -727,18 +822,25 @@ export const Timeline: React.FC<Props> = ({
                 )}
 
                 {/* Assistant Markdown Messages */}
-                {g.agentItems.map((a) => (
-                  <div
-                    key={a.id}
-                    id={`msg-${a.id}`}
-                    data-testid="agent-message"
-                    className={`rounded-xl px-1 py-0.5 text-[var(--text-primary)] ${
-                      matchedIds.includes(a.id) ? 'ring-2 ring-[var(--warning)] bg-[var(--warning)]/5 px-2' : ''
-                    }`}
-                  >
-                    {a.text && <MarkdownRenderer text={a.text} citable />}
-                  </div>
-                ))}
+                {g.agentItems.map((a) => {
+                  const isHaltedAlert = Boolean(a.text?.trimStart().startsWith('⚠️'));
+                  return (
+                    <div
+                      key={a.id}
+                      id={`msg-${a.id}`}
+                      data-testid="agent-message"
+                      className={`rounded-xl ${
+                        isHaltedAlert
+                          ? 'border border-[var(--danger)]/45 bg-[var(--danger)]/10 px-3.5 py-2.5 text-[var(--text-primary)]'
+                          : 'px-1 py-0.5 text-[var(--text-primary)]'
+                      } ${
+                        matchedIds.includes(a.id) ? 'ring-2 ring-[var(--warning)] bg-[var(--warning)]/5 px-2' : ''
+                      }`}
+                    >
+                      {a.text && <MarkdownRenderer text={a.text} citable />}
+                    </div>
+                  );
+                })}
 
                 {/* Notices */}
                 {g.noticeItems.map((n) => (

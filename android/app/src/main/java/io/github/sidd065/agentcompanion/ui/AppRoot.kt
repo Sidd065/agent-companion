@@ -77,6 +77,29 @@ fun dec(s: String?): String = s?.let { Uri.decode(it) }.orEmpty()
 
 internal fun android.os.Bundle?.navString(key: String): String = this?.getString(key).orEmpty()
 
+data class LocalFileTarget(val path: String, val line: Int = 0)
+
+private val fragmentLineRegex = Regex("^L?(\\d+)(?:-L?\\d+)?$", RegexOption.IGNORE_CASE)
+private val colonLineSuffixRegex = Regex("^(/.+?):(\\d+)(?::\\d+)?$")
+
+internal fun resolveLocalFileTarget(uri: String): LocalFileTarget? {
+    if (!uri.startsWith("file://") && !uri.startsWith("/")) return null
+    val frag = uri.substringAfter('#', "")
+    var line = fragmentLineRegex.find(frag)?.groupValues?.get(1)?.toIntOrNull() ?: 0
+    var rawPath = when {
+        uri.startsWith("file://") -> Uri.parse(uri).path ?: uri.removePrefix("file://").substringBefore('#')
+        else -> uri.substringBefore('#')
+    }
+    if (line == 0) {
+        val m = colonLineSuffixRegex.find(rawPath)
+        if (m != null) {
+            rawPath = m.groupValues[1]
+            line = m.groupValues[2].toIntOrNull() ?: 0
+        }
+    }
+    return LocalFileTarget(rawPath, line.coerceAtLeast(0))
+}
+
 internal fun resolveLocalFileUriPath(uri: String): String? = when {
     uri.startsWith("file://") -> Uri.parse(uri).path ?: uri.removePrefix("file://").substringBefore('#')
     uri.startsWith("/") -> uri.substringBefore('#')
@@ -89,6 +112,25 @@ internal fun resolveLocalFileUriPath(uri: String): String? = when {
  */
 object CurrentHost {
     @Volatile var id: String? = null
+}
+
+object CurrentSession {
+    @Volatile var id: String? = null
+}
+
+object PendingFileJump {
+    @Volatile private var pending: Pair<String, Int>? = null
+    fun set(path: String, line: Int) {
+        if (line > 0) pending = path to line
+    }
+    fun consume(path: String): Int {
+        val cur = pending ?: return 0
+        if (cur.first == path) {
+            pending = null
+            return cur.second
+        }
+        return 0
+    }
 }
 
 val LocalHostId = staticCompositionLocalOf<String?> { null }
@@ -143,7 +185,10 @@ object Routes {
     private fun h(h: String?) = "h=" + enc(h ?: CurrentHost.id ?: "")
     fun chat(id: String, prefill: String = "", host: String? = null) = "chat/$id?prefill=${enc(prefill)}&${h(host)}"
     fun newSession(cwd: String = "", text: String = "", host: String? = null) = "new?cwd=${enc(cwd)}&text=${enc(text)}&${h(host)}"
-    fun file(path: String, edit: Boolean = false, host: String? = null) = "file?path=${enc(path)}&edit=$edit&${h(host)}"
+    fun file(path: String, edit: Boolean = false, host: String? = null, line: Int = 0): String {
+        if (line > 0) PendingFileJump.set(path, line)
+        return "file?path=${enc(path)}&edit=$edit&${h(host)}"
+    }
     fun files(path: String, host: String? = null) = "folder?path=${enc(path)}&${h(host)}"
     fun term(id: String, host: String? = null) = "term/$id?${h(host)}"
     fun diff(sessionId: String = "-", path: String = "", host: String? = null) = "diff/$sessionId?path=${enc(path)}&${h(host)}"
@@ -203,9 +248,18 @@ fun AppRoot() {
         val uriHandler = remember(nav) {
             object : UriHandler {
                 override fun openUri(uri: String) {
-                    val path = resolveLocalFileUriPath(uri)
-                    if (path != null) {
-                        nav.navigate(Routes.file(path, host = CurrentHost.id))
+                    val target = resolveLocalFileTarget(uri)
+                    if (target != null) {
+                        val sid = CurrentSession.id
+                        val isArtifactPath = sid != null && (
+                            target.path.contains("/.gemini/antigravity-cli/brain/$sid/") ||
+                                target.path.contains("/.claude/plans/")
+                            ) && target.line == 0
+                        if (isArtifactPath) {
+                            nav.navigate(Routes.artifact(sid, target.path, host = CurrentHost.id))
+                        } else {
+                            nav.navigate(Routes.file(target.path, host = CurrentHost.id, line = target.line))
+                        }
                     } else {
                         runCatching { external.openUri(uri) }
                     }

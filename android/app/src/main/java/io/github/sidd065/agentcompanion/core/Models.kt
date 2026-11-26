@@ -67,6 +67,7 @@ data class SessionSummary(
     val mode: String? = null,
     val thought: String? = null,
     val skipPermissions: Boolean = true,
+    val autoAllowReads: Boolean = false,
     val createdAt: Long = 0,
     val updatedAt: Long = 0,
     val lastText: String? = null,
@@ -98,12 +99,32 @@ data class SessionSummary(
 ) {
     val busy: Boolean get() = state == "running" || state == "starting" || state == "waiting"
     val needsInput: Boolean get() = !attention.isNullOrEmpty() || state == "waiting"
-    val displayTitle: String get() = title.ifBlank { "Untitled conversation" }
+    val displayTitle: String get() = plainInlineTitle(title).ifBlank { "Untitled conversation" }
     val isClaude: Boolean get() = agent == "claude"
     val isCodex: Boolean get() = agent == "codex"
     /** How the agent is named in messages ("agy", "Claude", "Codex"). */
     val agentLabel: String get() = agentLabel(agent)
 }
+
+private val inlineCodeTitleRe = Regex("`+([^`]+)`+")
+private val inlineLinkTitleRe = Regex("\\[([^\\]]+)\\]\\([^)]*\\)")
+private val inlineEmphTitleRe = Regex("(?<![\\w\\\\])(\\*\\*|__|~~|\\*|_)(?=\\S)(.+?)(?<=\\S)\\1(?!\\w)")
+
+/** Strips raw Markdown marks (backticks, emphasis, headings, links) for clean single-line UI titles. */
+fun plainInlineTitle(raw: String): String {
+    if (raw.isBlank()) return ""
+    var t = raw.lineSequence().firstOrNull { it.isNotBlank() }?.trim().orEmpty()
+    t = t.trimStart('#', ' ')
+    t = t.replace(inlineCodeTitleRe, "$1").replace(inlineLinkTitleRe, "$1")
+    repeat(2) { t = t.replace(inlineEmphTitleRe, "$2") }
+    return t.replace(Regex("\\s+"), " ").trim()
+}
+
+@Serializable
+data class SessionNote(
+    val text: String = "",
+    val updatedAt: Long = 0L,
+)
 
 fun agentLabel(agent: String?): String = when {
     agent.isNullOrBlank() || agent == "agy" -> "agy"
@@ -440,6 +461,7 @@ data class AgyModel(val id: String, val name: String = "", val default: Boolean 
 @Serializable
 data class AgyFlags(
     val skipPermissions: Boolean = true,
+    val autoAllowReads: Boolean = false,
     val sandbox: Boolean = false,
     val model: String = "",
     val effort: String = "",
@@ -507,6 +529,7 @@ data class AgyFlags(
     /** JSON for the daemon's session.create / session.open "flags". */
     fun daemonJson(): kotlinx.serialization.json.JsonObject = kotlinx.serialization.json.buildJsonObject {
         put("skipPermissions", kotlinx.serialization.json.JsonPrimitive(skipPermissions))
+        if (autoAllowReads) put("autoAllowReads", kotlinx.serialization.json.JsonPrimitive(true))
         put("sandbox", kotlinx.serialization.json.JsonPrimitive(sandbox))
         put("disableTelemetry", kotlinx.serialization.json.JsonPrimitive(disableTelemetry))
         if (agent.isNotBlank()) put("agentName", kotlinx.serialization.json.JsonPrimitive(agent.trim()))

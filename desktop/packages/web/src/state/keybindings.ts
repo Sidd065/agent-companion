@@ -23,6 +23,11 @@ export const DEFAULT_KEYBINDINGS: KeybindingDef[] = [
   { id: 'undoThreadAction', label: 'Undo Last Sidebar Action', group: 'Threads', defaultChord: 'mod+z' },
   { id: 'openModelPicker', label: 'Open Model Picker', group: 'Composer', defaultChord: 'mod+shift+m' },
   { id: 'openSideChat', label: 'Open Side Chat (/btw)', group: 'Panels', defaultChord: 'mod+shift+b' },
+  { id: 'openSessionNotes', label: 'Open Session Notes', group: 'Panels', defaultChord: 'mod+shift+n' },
+  { id: 'cycleTerminalPrev', label: 'Previous Terminal Tab', group: 'Panels', defaultChord: 'mod+shift+[' },
+  { id: 'cycleTerminalNext', label: 'Next Terminal Tab', group: 'Panels', defaultChord: 'mod+shift+]' },
+  { id: 'switchRecentThread', label: 'Switch to Previous Thread (MRU)', group: 'Navigation', defaultChord: 'mod+tab' },
+  { id: 'jumpLastNotified', label: 'Jump to Last Notified Thread', group: 'Navigation', defaultChord: 'mod+shift+u' },
 ];
 
 export function formatEventChord(e: KeyboardEvent): string {
@@ -32,7 +37,8 @@ export function formatEventChord(e: KeyboardEvent): string {
   if (e.shiftKey) parts.push('shift');
   const k = e.key.toLowerCase();
   if (!['control', 'meta', 'alt', 'shift'].includes(k)) {
-    parts.push(k === ' ' ? 'space' : k);
+    const norm = k === '{' ? '[' : k === '}' ? ']' : k === ' ' ? 'space' : k;
+    parts.push(norm);
   }
   return parts.join('+');
 }

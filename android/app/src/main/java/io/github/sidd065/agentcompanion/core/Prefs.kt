@@ -27,12 +27,18 @@ data class AppSettings(
     val hosts: List<HostConfig> = emptyList(),
     val activeHostId: String? = null,
     val notificationsEnabled: Boolean = true,
+    val notifyOnInput: Boolean = true,
+    val notifyOnDone: Boolean = true,
+    val notifyOnHalted: Boolean = true,
+    val notifyOnProgress: Boolean = false,
     val backgroundConnection: Boolean = false, // WebSocket fallback when push isn't available
     val theme: String = "system", // system|dark|light
     val dynamicColor: Boolean = false,
     val textScale: Float = 1f,
     val codeWrap: Boolean = false,
     val showThoughts: Boolean = true,
+    val expandToolCalls: Boolean = false,
+    val sessionNotes: Map<String, SessionNote> = emptyMap(),
     val terminalFontSize: Int = 12,
     val defaultSkipPermissions: Boolean = true,
     val defaultModel: String = "",
@@ -50,6 +56,36 @@ data class AppSettings(
     val defaultAgent: String = "agy",
 ) {
     val activeHost: HostConfig? get() = hosts.firstOrNull { it.id == activeHostId } ?: hosts.firstOrNull()
+
+    fun allowsNotificationKind(kind: String): Boolean {
+        if (!notificationsEnabled) return false
+        return when (kind.trim().lowercase()) {
+            "test" -> true
+            "permission", "question", "plan", "term_blocked", "input" -> notifyOnInput
+            "error", "term_failed", "halted", "failed" -> notifyOnHalted
+            "progress" -> notifyOnProgress
+            else -> notifyOnDone
+        }
+    }
+
+    fun enabledPushEvents(): List<String> = buildList {
+        if (notifyOnInput) add("input")
+        if (notifyOnDone) add("done")
+        if (notifyOnHalted) add("halted")
+        if (notifyOnProgress) add("progress")
+    }
+
+    fun noteFor(hostId: String, sessionId: String): SessionNote? =
+        sessionNotes["${hostId.trim()}:${sessionId.trim()}"]?.takeIf { it.text.isNotBlank() }
+
+    fun withSessionNote(hostId: String, sessionId: String, text: String, nowMs: Long = System.currentTimeMillis()): AppSettings {
+        val key = "${hostId.trim()}:${sessionId.trim()}"
+        return if (text.isBlank()) {
+            copy(sessionNotes = sessionNotes - key)
+        } else {
+            copy(sessionNotes = sessionNotes + (key to SessionNote(text = text, updatedAt = nowMs)))
+        }
+    }
 
     /** The saved launch flags for an agent, as the daemon's "flags" object. */
     fun flagsJson(agent: String?): kotlinx.serialization.json.JsonObject = when {
@@ -115,6 +151,12 @@ class Prefs(
         val hostsV1 = stringPreferencesKey("hosts")
         val active = stringPreferencesKey("active_host")
         val notif = booleanPreferencesKey("notifications")
+        val notifInput = booleanPreferencesKey("notify_input")
+        val notifDone = booleanPreferencesKey("notify_done")
+        val notifHalted = booleanPreferencesKey("notify_halted")
+        val notifProgress = booleanPreferencesKey("notify_progress")
+        val expandTools = booleanPreferencesKey("expand_tool_calls")
+        val sessionNotes = stringPreferencesKey("session_notes_v1")
         val bgConn = booleanPreferencesKey("background_connection")
         val theme = stringPreferencesKey("theme")
         val dynamic = booleanPreferencesKey("dynamic_color")
@@ -141,17 +183,24 @@ class Prefs(
     private val seqSer = MapSerializer(String.serializer(), Long.serializer())
     private val customModelsSer = ListSerializer(CustomModel.serializer())
     private val stringListSer = ListSerializer(String.serializer())
+    private val notesSer = MapSerializer(String.serializer(), SessionNote.serializer())
 
     private fun read(p: Preferences): AppSettings = AppSettings(
         hosts = p[K.hosts]?.let { runCatching { AppJson.decodeFromString(hostsSer, it) }.getOrNull() } ?: emptyList(),
         activeHostId = p[K.active],
         notificationsEnabled = p[K.notif] ?: true,
+        notifyOnInput = p[K.notifInput] ?: true,
+        notifyOnDone = p[K.notifDone] ?: true,
+        notifyOnHalted = p[K.notifHalted] ?: true,
+        notifyOnProgress = p[K.notifProgress] ?: false,
         backgroundConnection = p[K.bgConn] ?: false,
         theme = p[K.theme] ?: "system",
         dynamicColor = p[K.dynamic] ?: false,
         textScale = p[K.textScale] ?: 1f,
         codeWrap = p[K.codeWrap] ?: false,
         showThoughts = p[K.thoughts] ?: true,
+        expandToolCalls = p[K.expandTools] ?: false,
+        sessionNotes = p[K.sessionNotes]?.let { runCatching { AppJson.decodeFromString(notesSer, it) }.getOrNull() } ?: emptyMap(),
         terminalFontSize = p[K.termFont] ?: 12,
         defaultSkipPermissions = p[K.skip] ?: true,
         defaultModel = p[K.model] ?: "",
@@ -188,6 +237,12 @@ class Prefs(
             p.remove(K.hostsV1)
             if (n.activeHostId != null) p[K.active] = n.activeHostId else p.remove(K.active)
             p[K.notif] = n.notificationsEnabled
+            p[K.notifInput] = n.notifyOnInput
+            p[K.notifDone] = n.notifyOnDone
+            p[K.notifHalted] = n.notifyOnHalted
+            p[K.notifProgress] = n.notifyOnProgress
+            p[K.expandTools] = n.expandToolCalls
+            p[K.sessionNotes] = AppJson.encodeToString(notesSer, n.sessionNotes)
             p[K.bgConn] = n.backgroundConnection
             p[K.theme] = n.theme
             p[K.dynamic] = n.dynamicColor

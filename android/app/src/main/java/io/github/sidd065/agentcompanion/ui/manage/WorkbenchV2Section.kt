@@ -158,7 +158,7 @@ fun WorkbenchV2Section(
     val providerModelsMap by conn.providerModels.collectAsState()
     val codexModels = providerModelsMap["codex"]
 
-    var days by remember { mutableIntStateOf(30) }
+    var rangeKey by remember { mutableStateOf("30d") }
     var usage by remember(conn.config.id) { mutableStateOf<UsageSummary?>(null) }
     var tasks by remember(conn.config.id) { mutableStateOf<List<ScheduledTask>>(emptyList()) }
     var health by remember(conn.config.id) { mutableStateOf<HostHealth?>(null) }
@@ -171,9 +171,22 @@ fun WorkbenchV2Section(
     var showAddCustomModel by remember(conn.config.id) { mutableStateOf(false) }
     var showConfigureCodex by remember(conn.config.id) { mutableStateOf(false) }
 
-    LaunchedEffect(conn.config.id, reloadKey, localRefresh, days) {
+    LaunchedEffect(conn.config.id, reloadKey, localRefresh, rangeKey) {
         usage = runCatching {
-            conn.rpc.call("usage.summary", params { put("days", days) }).decode(UsageSummary.serializer())
+            val p = params {
+                when (rangeKey) {
+                    "5h" -> put("hours", 5)
+                    "12h" -> put("hours", 12)
+                    "24h" -> put("hours", 24)
+                    "7d" -> put("days", 7)
+                    "30d" -> put("days", 30)
+                    "90d" -> put("days", 90)
+                    "180d" -> put("days", 180)
+                    "all" -> put("allTime", true)
+                    else -> put("days", 30)
+                }
+            }
+            conn.rpc.call("usage.summary", p).decode(UsageSummary.serializer())
         }.getOrNull()
         tasks = runCatching {
             val obj = conn.rpc.call("schedules.list").jsonObject
@@ -210,12 +223,10 @@ fun WorkbenchV2Section(
         // 1. Usage & Cost Card
         Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainer)) {
             Column(Modifier.fillMaxWidth().padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
-                    Text("Usage & Cost", style = MaterialTheme.typography.titleSmall)
-                    Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                        listOf(7 to "7d", 30 to "30d", 90 to "90d").forEach { (d, lbl) ->
-                            FilterChip(selected = days == d, onClick = { days = d }, label = { Text(lbl) })
-                        }
+                Text("Usage & Cost", style = MaterialTheme.typography.titleSmall)
+                FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                    listOf("5h" to "5h", "12h" to "12h", "24h" to "24h", "7d" to "7d", "30d" to "30d", "90d" to "90d", "180d" to "180d", "all" to "All time").forEach { (k, lbl) ->
+                        FilterChip(selected = rangeKey == k, onClick = { rangeKey = k }, label = { Text(lbl) })
                     }
                 }
                 val u = usage

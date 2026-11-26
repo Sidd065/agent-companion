@@ -111,8 +111,7 @@ fun ActivityStrip(live: LiveState?, onOpen: (String) -> Unit, onReview: (LiveArt
             leadingIcon = { Icon(Icons.Outlined.Terminal, null, Modifier.size(16.dp), tint = ex.running) },
         )
         if (l.subagents.isNotEmpty()) {
-            // "Working" only while agy runs and the subagent wrote to its transcript recently.
-            val n = if (l.running) l.activeAgents.count { System.currentTimeMillis() - it.updated < 120_000 } else 0
+            val n = l.activeAgents.size
             AssistChip(
                 onClick = { onOpen("agents") },
                 label = { Text(if (n > 0) "$n agent${if (n > 1) "s" else ""} working" else "${l.subagents.size} subagent${if (l.subagents.size > 1) "s" else ""}") },
@@ -154,7 +153,7 @@ fun ActivitySheet(
         Column(Modifier.fillMaxWidth().fillMaxHeight(0.92f)) {
             when {
                 task != null -> TaskOutputView(conn, sessionId, task!!, stillRunning = live.tasks.any { it.id == task!!.id }) { task = null }
-                agent != null -> SubagentView(conn, sessionId, live.subagents.firstOrNull { it.id == agent!!.id } ?: agent!!) { agent = null }
+                agent != null -> SubagentView(conn, sessionId, live.subagents.firstOrNull { it.id == agent!!.id } ?: agent!!, sessionRunning = live.running) { agent = null }
                 else -> {
                     PrimaryTabRow(selectedTabIndex = tab) {
                         tabs.forEachIndexed { i, (k, l) ->
@@ -181,8 +180,10 @@ fun ActivitySheet(
                         }
                         "agents" -> ListOrEmpty(live.subagents.isEmpty(), "No subagents in this conversation.") {
                             items(live.subagents, key = { it.id }) { a ->
+                                val statusLabel = a.displayState(live.running)
                                 ActivityRow(Icons.Outlined.SmartToy, a.role.ifBlank { "Subagent" }, a.type?.let { "type: $it" },
-                                    (if (a.alive) "working" else a.state.lowercase()) + (if (a.updated > 0) " · ${relTime(a.updated)}" else "")) { agent = a }
+                                    statusLabel + (if (a.updated > 0) " · ${relTime(a.updated)}" else ""),
+                                    highlight = a.isWorking(live.running)) { agent = a }
                             }
                         }
                         "artifacts" -> ListOrEmpty(live.artifacts.isEmpty(), "No artifacts yet.") {
@@ -358,19 +359,20 @@ fun TaskOutputView(conn: HostConnection, sessionId: String, task: LiveTask, stil
 
 /** A subagent's transcript, refreshed while it works, with Stop. */
 @Composable
-fun SubagentView(conn: HostConnection, sessionId: String, agent: LiveSubagent, onBack: () -> Unit) {
+fun SubagentView(conn: HostConnection, sessionId: String, agent: LiveSubagent, sessionRunning: Boolean = true, onBack: () -> Unit) {
     val ex = LocalExtra.current
     val scope = rememberCoroutineScope()
     var steps by remember { mutableStateOf<List<SubStep>?>(null) }
     var error by remember { mutableStateOf<String?>(null) }
     val list = rememberLazyListState()
-    LaunchedEffect(agent.id) {
+    val working = agent.isWorking(sessionRunning)
+    LaunchedEffect(agent.id, working) {
         while (isActive) {
             runCatching {
                 conn.rpc.call("session.subagent", params { put("id", sessionId); put("subId", agent.id) }).jsonObject["steps"]!!
                     .decode(ListSerializer(SubStep.serializer()))
             }.onSuccess { steps = it; error = null }.onFailure { error = it.message }
-            delay(if (agent.alive) 2000 else 10_000)
+            delay(if (working) 2000 else 10_000)
         }
     }
     val visible = steps.orEmpty().filter { it.type != "SYSTEM_MESSAGE" }
@@ -380,10 +382,10 @@ fun SubagentView(conn: HostConnection, sessionId: String, agent: LiveSubagent, o
             IconButton(onClick = onBack) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "Back") }
             Column(Modifier.weight(1f)) {
                 Text(agent.role.ifBlank { "Subagent" }, style = MaterialTheme.typography.titleMedium)
-                Text(listOfNotNull(agent.type, if (agent.alive) "working" else agent.state.lowercase()).joinToString(" · "),
-                    style = MaterialTheme.typography.labelSmall, color = if (agent.alive) ex.running else ex.muted)
+                Text(listOfNotNull(agent.type, agent.displayState(sessionRunning)).joinToString(" · "),
+                    style = MaterialTheme.typography.labelSmall, color = if (working) ex.running else ex.muted)
             }
-            if (agent.alive) OutlinedButton(onClick = {
+            if (working) OutlinedButton(onClick = {
                 scope.launch { runCatching { conn.rpc.call("session.subagentStop", params { put("id", sessionId); put("subId", agent.id) }) }.onFailure { error = it.message } }
             }) {
                 Icon(Icons.Outlined.StopCircle, null, Modifier.size(18.dp))

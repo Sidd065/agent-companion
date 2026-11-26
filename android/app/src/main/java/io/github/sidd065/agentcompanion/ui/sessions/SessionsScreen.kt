@@ -31,6 +31,7 @@ import androidx.compose.material.icons.outlined.ContentCopy
 import androidx.compose.material.icons.outlined.Delete
 import androidx.compose.material.icons.outlined.DriveFileRenameOutline
 import androidx.compose.material.icons.outlined.FilterList
+import androidx.compose.material.icons.automirrored.outlined.StickyNote2
 import androidx.compose.material.icons.outlined.PushPin
 import androidx.compose.material.icons.outlined.Search
 import androidx.compose.material.icons.outlined.Settings
@@ -106,6 +107,56 @@ import kotlinx.serialization.json.put
 
 fun HostConnection.homeDir(): String? = hello.value?.get("home")?.jsonPrimitive?.content
 
+internal fun foldSearchText(s: String): String = buildString(s.length) {
+    for (ch in s) {
+        when (ch) {
+            '\u0130', '\u0131', 'I', 'i' -> append('i')
+            else -> append(ch.lowercaseChar())
+        }
+    }
+}
+
+internal fun parseClientSearchTerms(raw: String): List<String> {
+    val q = raw.trim()
+    if (q.isEmpty()) return emptyList()
+    val out = ArrayList<String>()
+    var i = 0
+    while (i < q.length) {
+        while (i < q.length && q[i].isWhitespace()) i++
+        if (i >= q.length) break
+        if (q[i] == '"') {
+            val start = i + 1
+            val end = q.indexOf('"', start)
+            if (end >= start) {
+                val phrase = foldSearchText(q.substring(start, end).trim())
+                if (phrase.isNotEmpty()) out += phrase
+                i = end + 1
+                continue
+            }
+            val rest = foldSearchText(q.substring(start).trim())
+            if (rest.isNotEmpty()) out += rest
+            break
+        }
+        val start = i
+        while (i < q.length && !q[i].isWhitespace() && q[i] != '"') i++
+        val tok = foldSearchText(q.substring(start, i))
+        if (tok.isNotEmpty()) out += tok
+    }
+    return out
+}
+
+internal fun matchesSessionSearch(query: String, s: SessionSummary, noteText: String = ""): Boolean {
+    val terms = parseClientSearchTerms(query)
+    if (terms.isEmpty()) return true
+    val hay = foldSearchText(buildString {
+        append(s.title).append('\n')
+        append(s.cwd).append('\n')
+        if (!s.lastText.isNullOrBlank()) append(s.lastText).append('\n')
+        if (noteText.isNotBlank()) append(noteText)
+    })
+    return terms.all { hay.contains(it) }
+}
+
 @Composable
 fun ConnectionBanner(conn: HostConnection) {
     val st by conn.rpc.state.collectAsState()
@@ -163,6 +214,7 @@ fun SessionsScreen() {
     var searching by remember { mutableStateOf(false) }
     var refreshing by remember { mutableStateOf(false) }
     var menuFor by remember { mutableStateOf<Pair<HostConnection, SessionSummary>?>(null) }
+    var notesFor by remember { mutableStateOf<Pair<HostConnection, SessionSummary>?>(null) }
     var hostMenu by remember { mutableStateOf(false) }
     var groupMenu by remember { mutableStateOf(false) }
     fun rpc(label: String, block: suspend () -> Unit) = scope.launch {
@@ -180,7 +232,7 @@ fun SessionsScreen() {
         }
         f && (agentFilter == null || s.agent == agentFilter) &&
             (projectFilter == null || "${c.config.id}:${s.projectId}" == projectFilter) &&
-            (query.isBlank() || s.title.contains(query, true) || s.cwd.contains(query, true) || (s.lastText?.contains(query, true) == true))
+            matchesSessionSearch(query, s, settings.noteFor(c.config.id, s.id)?.text.orEmpty())
     }
     val agentsPresent = sessions.map { it.agent }.distinct().sorted()
     val counts = mapOf(
@@ -288,13 +340,33 @@ fun SessionsScreen() {
                     ) { Button(onClick = { nav.navigate(Routes.newSession(host = hostFilter)) }) { Text("Start your first session") } }
                     visible.isEmpty() -> EmptyState(Icons.Outlined.Search, "Nothing here", null)
                     else -> SessionList(visible, hostedTerms, settings.groupBy, multi && hostFilter == null,
+                        noteLookup = { hId, sId -> settings.noteFor(hId, sId)?.text },
                         onOpen = { (c, s) -> nav.navigate(Routes.chat(s.id, host = c.config.id)) }, onLong = { menuFor = it })
                 }
             }
         }
     }
 
-    menuFor?.let { (c, s) -> SessionActionsSheet(c, s, onDismiss = { menuFor = null }, rpc = { l, b -> rpc(l, b) }) }
+    menuFor?.let { (c, s) ->
+        SessionActionsSheet(
+            c, s,
+            onDismiss = { menuFor = null },
+            onOpenNotes = { menuFor = null; notesFor = c to s },
+            rpc = { l, b -> rpc(l, b) },
+        )
+    }
+    notesFor?.let { (c, s) ->
+        io.github.sidd065.agentcompanion.ui.chat.SessionNotesSheet(
+            note = settings.noteFor(c.config.id, s.id),
+            sessionTitle = s.displayTitle,
+            onSave = { txt -> scope.launch { g.prefs.update { it.withSessionNote(c.config.id, s.id, txt) } } },
+            onInsertIntoComposer = { txt ->
+                notesFor = null
+                nav.navigate(Routes.chat(s.id, prefill = txt, host = c.config.id))
+            },
+            onDismiss = { notesFor = null },
+        )
+    }
 }
 
 @OptIn(ExperimentalFoundationApi::class)
@@ -304,6 +376,7 @@ private fun SessionList(
     terms: List<Pair<HostConnection, Term>>,
     groupBy: String,
     showHost: Boolean,
+    noteLookup: (String, String) -> String? = { _, _ -> null },
     onOpen: (Pair<HostConnection, SessionSummary>) -> Unit,
     onLong: (Pair<HostConnection, SessionSummary>) -> Unit,
 ) {
@@ -338,14 +411,14 @@ private fun SessionList(
             item { GroupHeader("Pinned") }
             items(pinned, key = { "p:" + it.first.config.id + it.second.id }) { p ->
                 SessionRow(p.second, p.first.rememberHomeDir(), Modifier.combinedClickable(onClick = { onOpen(p) }, onLongClick = { onLong(p) }),
-                    host = if (showHost) p.first.config.label else null)
+                    host = if (showHost) p.first.config.label else null, noteText = noteLookup(p.first.config.id, p.second.id))
             }
         }
         groups.forEach { (g, items) ->
             if (g.isNotEmpty()) item(key = "h:$g") { GroupHeader(g) }
             items(items, key = { it.first.config.id + it.second.id }) { p ->
                 SessionRow(p.second, p.first.rememberHomeDir(), Modifier.combinedClickable(onClick = { onOpen(p) }, onLongClick = { onLong(p) }).animateItem(),
-                    host = if (showHost && groupBy != "host") p.first.config.label else null)
+                    host = if (showHost && groupBy != "host") p.first.config.label else null, noteText = noteLookup(p.first.config.id, p.second.id))
             }
         }
     }
@@ -390,7 +463,7 @@ fun termStateLabel(s: String): String = when {
 private fun Modifier.combinedClickableCompat(onClick: () -> Unit): Modifier = this.combinedClickable(onClick = onClick)
 
 @Composable
-fun SessionRow(s: SessionSummary, home: String?, modifier: Modifier = Modifier, host: String? = null) {
+fun SessionRow(s: SessionSummary, home: String?, modifier: Modifier = Modifier, host: String? = null, noteText: String? = null) {
     val ex = LocalExtra.current
     Row(modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 10.dp), verticalAlignment = Alignment.Top) {
         Box(Modifier.padding(top = 6.dp)) { StatusDot(s.state, s.attention) }
@@ -430,6 +503,16 @@ fun SessionRow(s: SessionSummary, home: String?, modifier: Modifier = Modifier, 
                 color = if (status != null && s.needsInput) ex.warning else if (status != null) ex.running else ex.muted,
                 maxLines = 1, overflow = TextOverflow.Ellipsis,
             )
+            noteText?.takeIf { it.isNotBlank() }?.let { nt ->
+                val summary = io.github.sidd065.agentcompanion.ui.chat.nextNoteSummary(nt)
+                if (summary.isNotBlank()) {
+                    Row(Modifier.padding(top = 2.dp), verticalAlignment = Alignment.CenterVertically) {
+                        Icon(Icons.AutoMirrored.Outlined.StickyNote2, null, Modifier.size(13.dp), tint = MaterialTheme.colorScheme.secondary)
+                        Spacer(Modifier.width(4.dp))
+                        Text(summary, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.secondary, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    }
+                }
+            }
             s.lastText?.takeIf { it.isNotBlank() }?.let {
                 Text(
                     io.github.sidd065.agentcompanion.ui.chat.plainPreview(it).take(200), style = MaterialTheme.typography.bodySmall,
@@ -443,7 +526,7 @@ fun SessionRow(s: SessionSummary, home: String?, modifier: Modifier = Modifier, 
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun SessionActionsSheet(conn: HostConnection, s: SessionSummary, onDismiss: () -> Unit, rpc: (String, suspend () -> Unit) -> Unit) {
+fun SessionActionsSheet(conn: HostConnection, s: SessionSummary, onDismiss: () -> Unit, onOpenNotes: (() -> Unit)? = null, rpc: (String, suspend () -> Unit) -> Unit) {
     val ctx = LocalContext.current
     val nav = LocalNav.current
     val agents by conn.agents.collectAsState()
@@ -457,6 +540,9 @@ fun SessionActionsSheet(conn: HostConnection, s: SessionSummary, onDismiss: () -
             Text(s.cwd, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.padding(horizontal = 20.dp, vertical = 4.dp))
             Spacer(Modifier.height(8.dp))
             SheetItem(Icons.AutoMirrored.Outlined.Chat, "Open") { onDismiss(); nav.navigate(Routes.chat(s.id, host = conn.config.id)) }
+            if (onOpenNotes != null) {
+                SheetItem(Icons.AutoMirrored.Outlined.StickyNote2, "Session notes") { onOpenNotes() }
+            }
             SheetItem(Icons.Outlined.DriveFileRenameOutline, "Rename") { renaming = true }
             SheetItem(Icons.Outlined.PushPin, if (s.pinned) "Unpin" else "Pin") {
                 onDismiss(); rpc("Pin") { conn.rpc.call("session.pin", params { put("id", s.id); put("pinned", !s.pinned) }) }

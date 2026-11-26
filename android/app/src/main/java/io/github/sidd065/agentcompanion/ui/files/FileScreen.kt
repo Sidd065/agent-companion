@@ -113,7 +113,7 @@ private val langByExt = mapOf(
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun FileScreen(path: String, startEditing: Boolean) {
+fun FileScreen(path: String, startEditing: Boolean, initialLine: Int = io.github.sidd065.agentcompanion.ui.PendingFileJump.consume(path)) {
     val ctx = LocalContext.current
     val nav = LocalNav.current
     val snack = LocalSnack.current
@@ -130,7 +130,8 @@ fun FileScreen(path: String, startEditing: Boolean) {
     val activeDownload = allDownloads.firstOrNull { it.hostId == hostId && it.remotePath == path }
     var editing by remember(hostId, path) { mutableStateOf(startEditing) }
     var draft by remember(hostId, path) { mutableStateOf("") }
-    var preview by remember(hostId, path) { mutableStateOf(true) }
+    var targetLine by remember(hostId, path) { mutableIntStateOf(initialLine) }
+    var preview by remember(hostId, path) { mutableStateOf(initialLine <= 0) }
     var saving by remember(hostId, path) { mutableStateOf(false) }
     var conflict by remember(hostId, path) { mutableStateOf(false) }
     var menu by remember(hostId, path) { mutableStateOf(false) }
@@ -142,6 +143,7 @@ fun FileScreen(path: String, startEditing: Boolean) {
     val name = path.substringAfterLast('/')
     val ext = name.substringAfterLast('.', "").lowercase()
     val isImage = stat?.mime?.startsWith("image/") == true && ext != "svg"
+    val isVideo = io.github.sidd065.agentcompanion.ui.components.isVideoPath(name) || stat?.mime?.startsWith("video/") == true
     val isMarkdown = ext == "md" || ext == "markdown"
 
     LaunchedEffect(hostId, path, reload) {
@@ -277,6 +279,9 @@ fun FileScreen(path: String, startEditing: Boolean) {
                 error != null -> ErrorBox(error!!) { reload++ }
                 stat == null || loading -> LoadingBox()
                 isImage -> ZoomableImage(io.github.sidd065.agentcompanion.net.RemoteImage(conn.config.id, path = path))
+                isVideo -> Box(Modifier.fillMaxSize().padding(16.dp), contentAlignment = Alignment.Center) {
+                    io.github.sidd065.agentcompanion.ui.components.RemoteVideoPlayerCard(hostId = conn.config.id, remotePath = path, caption = name)
+                }
                 content == null || content!!.binary -> BinaryInfo(
                     e = stat!!,
                     download = activeDownload,
@@ -295,7 +300,7 @@ fun FileScreen(path: String, startEditing: Boolean) {
                     MarkdownText(content!!.text.orEmpty())
                     Spacer(Modifier.height(40.dp))
                 }
-                else -> CodeView(content!!.text.orEmpty(), langByExt[ext], settings.codeWrap, truncated = content!!.truncated)
+                else -> CodeView(content!!.text.orEmpty(), langByExt[ext], settings.codeWrap, truncated = content!!.truncated, highlightLine = targetLine)
             }
             }
         }
@@ -373,9 +378,9 @@ private fun Editor(text: String, onChange: (String) -> Unit) {
 }
 
 @Composable
-private fun CodeView(text: String, lang: String?, wrap: Boolean, truncated: Boolean) {
+private fun CodeView(text: String, lang: String?, wrap: Boolean, truncated: Boolean, highlightLine: Int = 0) {
     val ex = LocalExtra.current
-    if (text.length <= 60_000 && lang != null) {
+    if (highlightLine <= 0 && text.length <= 60_000 && lang != null) {
         Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(8.dp)) {
             if (truncated) Text("Showing the first 2 MB.", style = MaterialTheme.typography.labelSmall, color = ex.warning)
             MarkdownText("```$lang\n$text\n```")
@@ -384,13 +389,33 @@ private fun CodeView(text: String, lang: String?, wrap: Boolean, truncated: Bool
         return
     }
     val lines = remember(text) { text.split('\n') }
+    val listState = androidx.compose.foundation.lazy.rememberLazyListState()
+    LaunchedEffect(highlightLine, lines.size) {
+        if (highlightLine > 0 && lines.isNotEmpty()) {
+            val targetIdx = (highlightLine - 1).coerceIn(0, lines.size - 1)
+            listState.scrollToItem((targetIdx - 3).coerceAtLeast(0))
+        }
+    }
     val hs = rememberScrollState()
     SelectionContainer {
-        LazyColumn(Modifier.fillMaxSize().background(ex.codeBg).let { if (wrap) it else it.horizontalScroll(hs) }.padding(vertical = 8.dp)) {
+        LazyColumn(
+            state = listState,
+            modifier = Modifier.fillMaxSize().background(ex.codeBg).let { if (wrap) it else it.horizontalScroll(hs) }.padding(vertical = 8.dp),
+        ) {
             if (truncated) item { Text("Showing the first 2 MB.", style = MaterialTheme.typography.labelSmall, color = ex.warning, modifier = Modifier.padding(8.dp)) }
             itemsIndexed(lines) { i, l ->
-                Row {
-                    Text((i + 1).toString().padStart(5), style = codeStyle, color = ex.muted, modifier = Modifier.width(48.dp))
+                val isTarget = highlightLine > 0 && (i + 1) == highlightLine
+                Row(
+                    Modifier
+                        .fillMaxWidth()
+                        .background(if (isTarget) ex.warning.copy(alpha = 0.22f) else androidx.compose.ui.graphics.Color.Transparent),
+                ) {
+                    Text(
+                        (i + 1).toString().padStart(5),
+                        style = codeStyle,
+                        color = if (isTarget) ex.warning else ex.muted,
+                        modifier = Modifier.width(48.dp),
+                    )
                     val code = l.replace("\t", "    ")
                     Text(code, softWrap = wrap, modifier = Modifier.padding(end = 16.dp),
                         style = if (wrap) codeStyle.copy(textIndent = androidx.compose.ui.text.style.TextIndent(restLine = ((code.length - code.trimStart().length + 2) * 0.6).em)) else codeStyle)

@@ -80,8 +80,9 @@ type Server struct {
 	Tunnel    func() map[string]any // tunnel status
 	Started   time.Time
 	Listeners func() []string
-	ConfigSet func(map[string]any) (map[string]any, error)
-	ConfigGet func() map[string]any
+	ConfigSet    func(map[string]any) (map[string]any, error)
+	ConfigGet    func() map[string]any
+	TunnelReload func() (map[string]any, error)
 
 	clientSeq atomic.Int64
 	upgrader  websocket.Upgrader
@@ -546,6 +547,30 @@ func (s *Server) LocalHandler() http.Handler {
 		}
 		writeJSON(w, 200, map[string]any{"removed": ok})
 	})
+	mux.HandleFunc("POST /local/devices/revoke-others", func(w http.ResponseWriter, r *http.Request) {
+		var in struct {
+			KeepID string `json:"keepId"`
+		}
+		_ = json.NewDecoder(io.LimitReader(r.Body, 4096)).Decode(&in)
+		n, err := s.revokeOtherDevices(in.KeepID)
+		if err != nil {
+			writeJSON(w, 500, map[string]any{"error": err.Error()})
+			return
+		}
+		writeJSON(w, 200, map[string]any{"removed": n})
+	})
+	mux.HandleFunc("POST /local/tunnel/reload", func(w http.ResponseWriter, r *http.Request) {
+		if s.TunnelReload == nil {
+			writeJSON(w, 400, map[string]any{"error": "tunnel reload is not enabled"})
+			return
+		}
+		st, err := s.TunnelReload()
+		if err != nil {
+			writeJSON(w, 500, map[string]any{"error": err.Error()})
+			return
+		}
+		writeJSON(w, 200, st)
+	})
 	return mux
 }
 
@@ -566,6 +591,37 @@ func (s *Server) revokeDevice(id string) (bool, error) {
 	s.Mgr.Hub().Broadcast("devices.changed", s.Devices.List())
 	log.Printf("unpaired device %s", id)
 	return true, nil
+}
+
+// revokeOtherDevices unpairs every paired device except keepID ("" revokes all).
+func (s *Server) revokeOtherDevices(keepID string) (int, error) {
+	removed := 0
+	for _, d := range s.Devices.List() {
+		if keepID != "" && d.ID == keepID {
+			continue
+		}
+		ok, err := s.Devices.Remove(d.ID)
+		if err != nil {
+			return removed, err
+		}
+		if !ok {
+			continue
+		}
+		removed++
+		if s.Push != nil {
+			s.Push.UnregisterDevice(d.ID)
+		}
+		for _, c := range s.Mgr.Hub().Clients() {
+			if c.Peer == d.ID {
+				c.Close()
+			}
+		}
+	}
+	if removed > 0 {
+		s.Mgr.Hub().Broadcast("devices.changed", s.Devices.List())
+		log.Printf("unpaired %d other device(s) (kept %q)", removed, keepID)
+	}
+	return removed, nil
 }
 
 func (s *Server) onTermState(id, state, msg string) {

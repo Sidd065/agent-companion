@@ -53,7 +53,7 @@ export class TerminalStream {
           rows: this.rows,
           name: this.deviceName,
           platform: 'linux-desktop',
-          app: '0.5.0',
+          app: '0.6.0',
         },
       },
       {

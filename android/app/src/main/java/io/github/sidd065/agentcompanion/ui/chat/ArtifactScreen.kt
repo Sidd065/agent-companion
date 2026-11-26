@@ -122,11 +122,16 @@ fun parseMarkdownBlocks(src: String): List<ArtifactBlock> {
         val t = l.trimStart()
         when {
             t.isEmpty() -> i++
-            t.startsWith("```") || t.startsWith("~~~") -> {
-                val fence = t.take(3)
+            io.github.sidd065.agentcompanion.ui.components.parseFenceOpen(t) != null -> {
+                val open = io.github.sidd065.agentcompanion.ui.components.parseFenceOpen(t)!!
                 var j = i + 1
-                while (j < lines.size && !lines[j].trimStart().startsWith(fence)) j++
-                add(i, minOf(j, lines.size - 1), "code")
+                while (j < lines.size && !io.github.sidd065.agentcompanion.ui.components.isFenceClose(lines[j].trimStart(), open)) j++
+                val blockKind = when (open.lang) {
+                    "mermaid" -> "mermaid"
+                    "carousel" -> "carousel"
+                    else -> "code"
+                }
+                add(i, minOf(j, lines.size - 1), blockKind)
                 i = j + 1
             }
             t.startsWith("#") -> { add(i, i, "heading"); i++ }
@@ -138,7 +143,9 @@ fun parseMarkdownBlocks(src: String): List<ArtifactBlock> {
             t.startsWith(">") -> {
                 var j = i
                 while (j + 1 < lines.size && lines[j + 1].trimStart().startsWith(">")) j++
-                add(i, j, "quote"); i = j + 1
+                val quoteRaw = lines.subList(i, j + 1).joinToString("\n")
+                val k = if (io.github.sidd065.agentcompanion.ui.components.parseGitHubAlert(quoteRaw) != null) "alert" else "quote"
+                add(i, j, k); i = j + 1
             }
             listItem.containsMatchIn(l) -> {
                 // One block per item, nested items included, each with its indented
@@ -148,14 +155,14 @@ fun parseMarkdownBlocks(src: String): List<ArtifactBlock> {
                 val depth = listIndents.size
                 listIndents.addLast(indent)
                 var j = i
-                var fence: String? = null
+                var fence: io.github.sidd065.agentcompanion.ui.components.FenceHeader? = null
                 while (j + 1 < lines.size) {
                     val n = lines[j + 1]
                     val nt = n.trimStart()
                     val nIndent = n.length - nt.length
                     if (fence != null) {
                         j++
-                        if (nt.startsWith(fence)) fence = null
+                        if (io.github.sidd065.agentcompanion.ui.components.isFenceClose(nt, fence)) fence = null
                         continue
                     }
                     if (n.isBlank()) {
@@ -166,12 +173,17 @@ fun parseMarkdownBlocks(src: String): List<ArtifactBlock> {
                     }
                     if (nIndent <= indent) break // a sibling item or dedented text
                     if (listItem.containsMatchIn(n)) break // a nested item: its own block
-                    if (nt.startsWith("```") || nt.startsWith("~~~")) fence = nt.take(3)
+                    val open = io.github.sidd065.agentcompanion.ui.components.parseFenceOpen(nt)
+                    if (open != null) fence = open
                     j++
                 }
                 add(i, j, "item", depth, indent); i = j + 1
             }
-            imageOnly.matches(t) -> { add(i, i, "image"); i++ }
+            imageOnly.matches(t) -> {
+                val url = imageOnly.find(t)?.groupValues?.get(2).orEmpty()
+                add(i, i, if (io.github.sidd065.agentcompanion.ui.components.isVideoPath(url)) "video" else "image")
+                i++
+            }
             else -> {
                 var j = i
                 while (j + 1 < lines.size) {
@@ -211,11 +223,16 @@ fun ArtifactScreen(sessionId: String, path: String) {
         artInfo?.kind?.takeIf { it.isNotBlank() } ?: when (name.substringAfterLast('.', "").lowercase()) {
             "md", "markdown" -> "markdown"
             "png", "jpg", "jpeg", "gif", "webp" -> "image"
+            "mp4", "webm", "mov", "mkv", "m4v" -> "video"
             "txt", "json", "log", "py", "go", "js", "ts", "sh", "yaml", "yml", "csv" -> "text"
             else -> "file"
         }
     val kind = kindFor(info)
     val uri = info?.uri ?: "file://$path"
+    androidx.compose.runtime.DisposableEffect(sessionId) {
+        io.github.sidd065.agentcompanion.ui.CurrentSession.id = sessionId
+        onDispose { if (io.github.sidd065.agentcompanion.ui.CurrentSession.id == sessionId) io.github.sidd065.agentcompanion.ui.CurrentSession.id = null }
+    }
 
     LaunchedEffect(conn.config.id, sessionId, path, reload) {
         content = null
@@ -369,6 +386,9 @@ fun ArtifactScreen(sessionId: String, path: String) {
                 error != null -> Text(error!!, color = MaterialTheme.colorScheme.error, modifier = Modifier.padding(16.dp))
                 kind == "image" -> AsyncImage(model = RemoteImage(conn.config.id, path = path), contentDescription = name,
                     contentScale = ContentScale.Fit, modifier = Modifier.fillMaxSize())
+                kind == "video" -> Box(Modifier.fillMaxSize().padding(16.dp), contentAlignment = Alignment.Center) {
+                    io.github.sidd065.agentcompanion.ui.components.RemoteVideoPlayerCard(hostId = conn.config.id, remotePath = path, caption = name)
+                }
                 kind == "markdown" || kind == "text" -> if (content == null) LoadingBox(text = "Loading…") else Column(Modifier.fillMaxSize()) {
                     if (changedSince) Surface(color = MaterialTheme.colorScheme.primaryContainer, modifier = Modifier.fillMaxWidth().clickable { reload++ }) {
                         Text("$agentName updated this artifact — tap to reload", style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp))
@@ -423,15 +443,40 @@ private fun BlockView(hostId: String, artifactPath: String, b: ArtifactBlock, pl
                 Text("${b.start}", style = MaterialTheme.typography.bodySmall, fontFamily = FontFamily.Monospace, color = ex.muted, modifier = Modifier.width(36.dp))
                 Text(b.text, style = MaterialTheme.typography.bodySmall, fontFamily = FontFamily.Monospace)
             }
+            b.kind == "mermaid" -> {
+                val (_, inner) = io.github.sidd065.agentcompanion.ui.components.extractFencedCodeContent(b.text)
+                io.github.sidd065.agentcompanion.ui.components.MermaidDiagram(inner)
+            }
+            b.kind == "carousel" -> {
+                val (_, inner) = io.github.sidd065.agentcompanion.ui.components.extractFencedCodeContent(b.text)
+                io.github.sidd065.agentcompanion.ui.components.CarouselView(
+                    rawBody = inner,
+                    baseDir = artifactPath.substringBeforeLast('/'),
+                    selectable = !commenting,
+                )
+            }
+            b.kind == "alert" -> {
+                val alert = io.github.sidd065.agentcompanion.ui.components.parseGitHubAlert(b.text)
+                if (alert != null) {
+                    io.github.sidd065.agentcompanion.ui.components.GitHubAlertCard(alert, selectable = !commenting)
+                } else {
+                    MarkdownText(b.text, selectable = !commenting)
+                }
+            }
+            b.kind == "video" -> {
+                val m = imageOnly.find(b.text.trim())
+                val src = m?.groupValues?.get(2).orEmpty()
+                val resolved = io.github.sidd065.agentcompanion.ui.components.resolveArtifactMediaPath(src, artifactPath.substringBeforeLast('/'))
+                io.github.sidd065.agentcompanion.ui.components.RemoteVideoPlayerCard(
+                    hostId = hostId,
+                    remotePath = resolved,
+                    caption = m?.groupValues?.get(1).orEmpty(),
+                )
+            }
             b.kind == "image" -> {
                 val m = imageOnly.find(b.text.trim())
                 val src = m?.groupValues?.get(2).orEmpty()
-                val resolved = when {
-                    src.startsWith("file://") -> src.removePrefix("file://")
-                    src.startsWith("/") -> src
-                    src.startsWith("http") -> src
-                    else -> artifactPath.substringBeforeLast('/') + "/" + src
-                }
+                val resolved = io.github.sidd065.agentcompanion.ui.components.resolveArtifactMediaPath(src, artifactPath.substringBeforeLast('/'))
                 AsyncImage(
                     model = if (resolved.startsWith("http")) resolved else RemoteImage(hostId, path = resolved),
                     contentDescription = m?.groupValues?.get(1), contentScale = ContentScale.FillWidth,

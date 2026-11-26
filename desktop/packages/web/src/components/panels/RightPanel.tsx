@@ -10,6 +10,7 @@ import {
   MessageSquare,
   Minimize2,
   Plus,
+  StickyNote,
   TerminalSquare,
   X,
 } from 'lucide-react';
@@ -18,6 +19,7 @@ import { ArtifactsPanel } from './ArtifactsPanel.js';
 import { BrowserPanel } from './BrowserPanel.js';
 import { DiffPanel } from './DiffPanel.js';
 import { FilesPanel } from './FilesPanel.js';
+import { NotesPanel } from './NotesPanel.js';
 import { PullRequestPanel } from './PullRequestPanel.js';
 import { SideChatPanel } from './SideChatPanel.js';
 import { SourceControlPanel } from './SourceControlPanel.js';
@@ -28,6 +30,7 @@ const TAB_CHOICES: Array<{ kind: RightTabKind; title: string; icon: React.FC<{ c
   { kind: 'files', title: 'Files', icon: FileCode2 },
   { kind: 'git', title: 'Source Control', icon: GitBranch },
   { kind: 'pr', title: 'Pull Requests', icon: GitPullRequest },
+  { kind: 'notes', title: 'Notes', icon: StickyNote },
   { kind: 'side', title: 'Side Chat', icon: MessageSquare },
   { kind: 'artifacts', title: 'Artifacts', icon: FileText },
   { kind: 'terminal', title: 'Terminal', icon: TerminalSquare },
@@ -174,10 +177,12 @@ export const RightPanel: React.FC<{ widthPx: number }> = ({ widthPx }) => {
           <DiffPanel tab={activeTab} />
         ) : activeTab.kind === 'files' ? (
           <FilesPanel tab={activeTab} />
+        ) : activeTab.kind === 'notes' ? (
+          <NotesPanel />
         ) : activeTab.kind === 'side' ? (
           <SideChatPanel />
         ) : activeTab.kind === 'artifacts' ? (
-          <ArtifactsPanel />
+          <ArtifactsPanel tab={activeTab} />
         ) : activeTab.kind === 'pr' ? (
           <PullRequestPanel />
         ) : activeTab.kind === 'git' ? (

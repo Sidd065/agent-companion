@@ -17,6 +17,8 @@ export interface DesktopBridge {
   saveHosts(hosts: PairedHostCredentials[]): Promise<void>;
   loadSettings(): Promise<Record<string, unknown>>;
   saveSettings(settings: Record<string, unknown>): Promise<void>;
+  loadNotes(): Promise<Record<string, unknown>>;
+  saveNotes(notes: Record<string, unknown>): Promise<void>;
   detectLocalDaemon(): Promise<LocalDaemonStatus>;
   requestLocalPairLink(customUrl?: string): Promise<{ url: string; host: string; fingerprint: string }>;
   listEditors(): Promise<DetectedEditor[]>;
@@ -35,12 +37,14 @@ export interface DesktopBridge {
 const bridge: DesktopBridge = {
   isDesktop: true,
   platform: process.platform,
-  version: process.env.AGENTC_DESKTOP_VERSION || '0.5.0',
+  version: process.env.AGENTC_DESKTOP_VERSION || '0.6.0',
   hostname: process.env.HOSTNAME || 'linux-desktop',
   loadHosts: () => ipcRenderer.invoke('store:hosts:load'),
   saveHosts: (hosts) => ipcRenderer.invoke('store:hosts:save', hosts),
   loadSettings: () => ipcRenderer.invoke('store:settings:load'),
   saveSettings: (settings) => ipcRenderer.invoke('store:settings:save', settings),
+  loadNotes: () => ipcRenderer.invoke('store:notes:load'),
+  saveNotes: (notes) => ipcRenderer.invoke('store:notes:save', notes),
   detectLocalDaemon: () => ipcRenderer.invoke('local:detect'),
   requestLocalPairLink: (customUrl) => ipcRenderer.invoke('local:pair', customUrl),
   listEditors: () => ipcRenderer.invoke('editors:list'),

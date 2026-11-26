@@ -1,23 +1,29 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
   Activity,
+  Archive,
+  CheckCircle2,
   Clock,
   Cpu,
   FileDiff,
   FolderGit2,
   FolderPlus,
   GitBranch,
+  GitFork,
   MessageSquare,
   Palette,
+  Pin,
   Plus,
   Search,
   Server,
   Settings,
+  StickyNote,
   TerminalSquare,
 } from 'lucide-react';
-import type { SearchHit } from '@agentc/protocol';
+import type { SearchHit, SessionSummary, TerminalInfo } from '@agentc/protocol';
 import { useApp } from '../../state/appStore.js';
 import { BUILTIN_THEMES } from '../../state/themes.js';
+import { matchesClientSearch, plainInlineTitle } from '../../utils/sessionHelpers.js';
 
 interface PaletteAction {
   id: string;
@@ -35,6 +41,8 @@ export const CommandPalette: React.FC = () => {
     commandPaletteOpen,
     setCommandPaletteOpen,
     hostList,
+    activeHost,
+    activeSession,
     allSessions,
     allProjects,
     selectSession,
@@ -46,6 +54,9 @@ export const CommandPalette: React.FC = () => {
     openSettingsTab,
     setViewMode,
     updateSettings,
+    upsertHostTerminal,
+    refreshHostTerminals,
+    pushToast,
     callHost,
   } = useApp();
 
@@ -97,13 +108,128 @@ export const CommandPalette: React.FC = () => {
 
   const actions = useMemo<PaletteAction[]>(() => {
     const close = () => setCommandPaletteOpen(false);
-    const list: PaletteAction[] = [
+    const list: PaletteAction[] = [];
+
+    if (activeHost && activeSession) {
+      const hId = activeHost.creds.id;
+      const sId = activeSession.id;
+      const title = plainInlineTitle(activeSession.title) || 'Current thread';
+      list.push(
+        {
+          id: 'cur-notes',
+          label: 'Open Session Notes',
+          detail: title,
+          group: 'Current Thread',
+          icon: <StickyNote className="w-4 h-4 text-[var(--accent)]" />,
+          run: () => {
+            openRightTab({ id: 'notes', kind: 'notes', title: 'Notes' });
+            close();
+          },
+        },
+        {
+          id: 'cur-settle',
+          label: activeSession.settled ? 'Move Current Thread to Active' : 'Settle Current Thread',
+          detail: title,
+          group: 'Current Thread',
+          icon: <CheckCircle2 className="w-4 h-4" />,
+          run: () => {
+            void callHost(hId, 'session.settle', { id: sId, settled: !activeSession.settled });
+            close();
+          },
+        },
+        {
+          id: 'cur-pin',
+          label: activeSession.pinned ? 'Unpin Current Thread' : 'Pin Current Thread',
+          detail: title,
+          group: 'Current Thread',
+          icon: <Pin className="w-4 h-4" />,
+          run: () => {
+            void callHost(hId, 'session.pin', { id: sId, pinned: !activeSession.pinned });
+            close();
+          },
+        },
+        {
+          id: 'cur-snooze-1h',
+          label: 'Snooze Current Thread for 1 Hour',
+          detail: title,
+          group: 'Current Thread',
+          icon: <Clock className="w-4 h-4" />,
+          run: () => {
+            void callHost(hId, 'session.snooze', { id: sId, until: Date.now() + 3600_000 });
+            pushToast({ text: 'Snoozed thread for 1 hour', level: 'info' });
+            close();
+          },
+        },
+        {
+          id: 'cur-fork',
+          label: 'Fork Current Thread',
+          detail: title,
+          group: 'Current Thread',
+          icon: <GitFork className="w-4 h-4" />,
+          run: () => {
+            void callHost<{ session?: SessionSummary }>(hId, 'session.fork', { id: sId }).then((res) => {
+              if (res?.session) selectSession(hId, res.session.id);
+            });
+            close();
+          },
+        },
+        {
+          id: 'cur-compact',
+          label: 'Compact Current Thread Context',
+          detail: title,
+          group: 'Current Thread',
+          icon: <Activity className="w-4 h-4" />,
+          run: () => {
+            void callHost(hId, 'session.compact', { id: sId });
+            pushToast({ text: 'Requested context compaction', level: 'info' });
+            close();
+          },
+        },
+        {
+          id: 'cur-terminal',
+          label: 'Continue Current Thread in Terminal',
+          detail: title,
+          group: 'Current Thread',
+          icon: <TerminalSquare className="w-4 h-4" />,
+          run: () => {
+            void callHost<TerminalInfo>(hId, 'session.openInTerminal', { id: sId, cols: 100, rows: 28 }).then((term) => {
+              if (term?.id) {
+                upsertHostTerminal(hId, term);
+                void refreshHostTerminals(hId);
+                openRightTab({
+                  id: `term-${term.id}`,
+                  kind: 'terminal',
+                  title: term.name || `CLI: ${activeSession.agent}`,
+                  termId: term.id,
+                  hostId: hId,
+                });
+              }
+            });
+            close();
+          },
+        },
+        {
+          id: 'cur-archive',
+          label: activeSession.archived ? 'Restore Current Thread' : 'Archive Current Thread',
+          detail: title,
+          group: 'Current Thread',
+          icon: <Archive className="w-4 h-4" />,
+          run: () => {
+            void callHost(hId, 'session.archive', { id: sId, archived: !activeSession.archived });
+            close();
+          },
+        },
+      );
+    }
+
+    list.push(
       { id: 'new-thread', label: 'New Thread', group: 'Actions', icon: <Plus className="w-4 h-4" />, run: () => { openDraft(); close(); } },
       { id: 'add-project', label: 'Add Project (Folder / Init / Clone)', group: 'Actions', icon: <FolderPlus className="w-4 h-4" />, run: () => { setAddProjectModalOpen(true); close(); } },
       { id: 'pair-host', label: 'Pair / Manage Hosts', group: 'Actions', icon: <Server className="w-4 h-4" />, run: () => { setPairModalOpen(true); close(); } },
       { id: 'codex-openrouter', label: 'Configure Codex & OpenRouter', group: 'Actions', icon: <Cpu className="w-4 h-4" />, run: () => { openSettingsTab('providers'); close(); } },
       { id: 'open-diff', label: 'Open Diff Panel', group: 'Panels', icon: <FileDiff className="w-4 h-4" />, run: () => { openRightTab({ id: 'diff', kind: 'diff', title: 'Diff', diffScope: 'uncommitted' }); close(); } },
       { id: 'open-files', label: 'Open Files Explorer', group: 'Panels', icon: <FolderGit2 className="w-4 h-4" />, run: () => { openRightTab({ id: 'files', kind: 'files', title: 'Files' }); close(); } },
+      { id: 'open-notes', label: 'Open Session Notes', group: 'Panels', icon: <StickyNote className="w-4 h-4" />, run: () => { openRightTab({ id: 'notes', kind: 'notes', title: 'Notes' }); close(); } },
       { id: 'open-side', label: 'Open Side Chat (/btw)', group: 'Panels', icon: <MessageSquare className="w-4 h-4" />, run: () => { openRightTab({ id: 'side', kind: 'side', title: 'Side Chat' }); close(); } },
       { id: 'open-git', label: 'Open Source Control & Worktrees', group: 'Panels', icon: <GitBranch className="w-4 h-4" />, run: () => { openRightTab({ id: 'git', kind: 'git', title: 'Source Control' }); close(); } },
       { id: 'open-pr', label: 'Open Pull Requests & Issues', group: 'Panels', icon: <GitBranch className="w-4 h-4" />, run: () => { openRightTab({ id: 'pr', kind: 'pr', title: 'Pull Requests' }); close(); } },
@@ -111,7 +237,7 @@ export const CommandPalette: React.FC = () => {
       { id: 'open-usage', label: 'Usage & Cost Dashboard', group: 'Views', icon: <Activity className="w-4 h-4" />, run: () => { setViewMode('usage'); close(); } },
       { id: 'open-schedules', label: 'Scheduled Tasks', group: 'Views', icon: <Clock className="w-4 h-4" />, run: () => { setViewMode('schedules'); close(); } },
       { id: 'open-settings', label: 'Settings', group: 'Views', icon: <Settings className="w-4 h-4" />, run: () => { openSettingsTab('general'); close(); } },
-    ];
+    );
 
     for (const th of BUILTIN_THEMES) {
       list.push({
@@ -137,7 +263,7 @@ export const CommandPalette: React.FC = () => {
     for (const s of allSessions.slice(0, 40)) {
       list.push({
         id: `sess-${s.hostId}-${s.id}`,
-        label: s.title || 'Untitled session',
+        label: plainInlineTitle(s.title) || 'Untitled session',
         detail: `${s.hostName} · ${s.agent}${s.branch ? ' · ' + s.branch : ''}`,
         group: 'Threads',
         icon: <MessageSquare className="w-4 h-4" />,
@@ -145,10 +271,10 @@ export const CommandPalette: React.FC = () => {
       });
     }
 
-    const q = query.trim().toLowerCase();
+    const q = query.trim();
     const filtered = q
-      ? list.filter((a) => `${a.label} ${a.detail || ''} ${a.group}`.toLowerCase().includes(q))
-      : list.slice(0, 24);
+      ? list.filter((a) => matchesClientSearch(q, a.label, a.detail, a.group))
+      : list.slice(0, 28);
 
     // Append message search hits across all connected daemons
     for (const hit of remoteHits) {
@@ -156,7 +282,7 @@ export const CommandPalette: React.FC = () => {
         const prefix = hostList.length > 1 ? `${hit.hostName} · ` : '';
         filtered.push({
           id: `hit-${hit.hostId}-${hit.sessionId}-${hit.updatedAt}`,
-          label: hit.title || hit.sessionId,
+          label: plainInlineTitle(hit.title) || hit.sessionId,
           detail: `${prefix}${hit.snippet || ''}`,
           group: 'Message Matches',
           icon: <Search className="w-4 h-4 text-[var(--accent)]" />,
@@ -166,13 +292,18 @@ export const CommandPalette: React.FC = () => {
     }
     return filtered;
   }, [
+    activeHost,
+    activeSession,
     allProjects,
     allSessions,
+    callHost,
     hostList.length,
     openDraft,
     openRightTab,
     openSettingsTab,
+    pushToast,
     query,
+    refreshHostTerminals,
     remoteHits,
     selectSession,
     setAddProjectModalOpen,
@@ -181,6 +312,7 @@ export const CommandPalette: React.FC = () => {
     setTerminalDrawerOpen,
     setViewMode,
     updateSettings,
+    upsertHostTerminal,
   ]);
 
   if (!commandPaletteOpen) return null;

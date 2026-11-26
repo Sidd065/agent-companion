@@ -73,7 +73,15 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.runtime.collectAsState
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalUriHandler
+import androidx.compose.ui.text.LinkAnnotation
+import androidx.compose.ui.text.SpanStyle
+import androidx.compose.ui.text.TextLinkStyles
+import androidx.compose.ui.text.buildAnnotatedString
+import androidx.compose.ui.text.style.TextDecoration
+import io.github.sidd065.agentcompanion.graph
 import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
@@ -383,6 +391,30 @@ fun activeAttentionId(items: List<Item>, attention: String?): String? {
 }
 
 private val spaces = Regex("\\s+")
+private val inlineUrlRegex = Regex("(?:https?|file)://[^\\s<>\"]+")
+
+fun linkifyBubbleText(raw: String, linkColor: androidx.compose.ui.graphics.Color, onOpenUri: (String) -> Unit): androidx.compose.ui.text.AnnotatedString = buildAnnotatedString {
+    var pos = 0
+    for (m in inlineUrlRegex.findAll(raw)) {
+        var end = m.range.last + 1
+        while (end > m.range.first && raw[end - 1] in charArrayOf('.', ',', ')', ']', ';', ':')) {
+            end--
+        }
+        val url = raw.substring(m.range.first, end)
+        append(raw.substring(pos, m.range.first))
+        pushLink(
+            LinkAnnotation.Url(
+                url = url,
+                styles = TextLinkStyles(style = SpanStyle(color = linkColor, textDecoration = TextDecoration.Underline)),
+                linkInteractionListener = { onOpenUri(url) },
+            )
+        )
+        append(url)
+        pop()
+        pos = end
+    }
+    if (pos < raw.length) append(raw.substring(pos))
+}
 
 /** Markdown-ish text flattened for one-line previews. */
 fun plainPreview(s: String): String = markdownToPlain(s).replace(spaces, " ").trim()
@@ -426,8 +458,12 @@ fun UserBubble(item: Item, actions: TranscriptActions) {
                     // A pasted log or review can run for screens: show the start until asked.
                     val long = item.text.length > 1500 || item.text.count { it == '\n' } > 24
                     var expanded by rememberSaveable(item.id) { mutableStateOf(false) }
+                    val uriHandler = LocalUriHandler.current
+                    val annotated = remember(item.text, ex.onUserBubble) {
+                        linkifyBubbleText(item.text, ex.onUserBubble) { uriHandler.openUri(it) }
+                    }
                     // Not selectable: a long press opens the message sheet (which has Select text).
-                    Text(item.text, style = MaterialTheme.typography.bodyMedium, color = ex.onUserBubble,
+                    Text(annotated, style = MaterialTheme.typography.bodyMedium, color = ex.onUserBubble,
                         maxLines = if (long && !expanded) 14 else Int.MAX_VALUE, overflow = TextOverflow.Ellipsis)
                     if (long) Text(
                         if (expanded) "Show less" else "Show all ${item.text.length / 1000}k characters",
@@ -475,7 +511,24 @@ fun AgentMessage(item: Item, actions: TranscriptActions) {
             }
             // Long-press opens the message sheet (Copy, Select text, Fork…); inline
             // selection would start at the same time and fight it.
-            if (!item.text.isNullOrBlank()) MarkdownText(item.text.trim(), selectable = false)
+            if (!item.text.isNullOrBlank()) {
+                val trimmed = item.text.trim()
+                if (trimmed.startsWith("⚠")) {
+                    val ex = LocalExtra.current
+                    Surface(
+                        color = ex.danger.copy(alpha = 0.10f),
+                        shape = RoundedCornerShape(12.dp),
+                        border = androidx.compose.foundation.BorderStroke(1.dp, ex.danger.copy(alpha = 0.40f)),
+                        modifier = Modifier.fillMaxWidth().padding(vertical = 2.dp),
+                    ) {
+                        Box(Modifier.padding(12.dp)) {
+                            MarkdownText(trimmed, selectable = false)
+                        }
+                    }
+                } else {
+                    MarkdownText(trimmed, selectable = false)
+                }
+            }
         }
     }
 }
@@ -506,7 +559,8 @@ fun ThoughtBlock(item: Item) {
 @Composable
 fun ToolGroup(items: List<Item>, actions: TranscriptActions, defaultOpen: Boolean, wrap: Boolean, cwd: String) {
     val ex = LocalExtra.current
-    var open by remember { mutableStateOf(defaultOpen) }
+    val expandDefault = LocalContext.current.graph.prefs.flow.collectAsState().value.expandToolCalls
+    var open by remember(expandDefault) { mutableStateOf(defaultOpen || expandDefault) }
     val tools = items.mapNotNull { it.tool }
     val running = tools.any { it.isRunning() }
     val failed = tools.count { it.status == "failed" }
@@ -544,7 +598,8 @@ fun ToolStatusIcon(t: Tool) {
 fun ToolRow(item: Item, actions: TranscriptActions, wrap: Boolean, cwd: String, indent: Boolean) {
     val t = item.tool ?: return
     val ex = LocalExtra.current
-    var open by remember { mutableStateOf(false) }
+    val expandDefault = LocalContext.current.graph.prefs.flow.collectAsState().value.expandToolCalls
+    var open by remember(expandDefault) { mutableStateOf(expandDefault) }
     var full by remember { mutableStateOf<Item?>(null) }
     val scope = rememberCoroutineScope()
     val shown = full?.tool ?: t
@@ -793,6 +848,32 @@ fun PermCard(item: Item, actions: TranscriptActions) {
                             else -> OutlinedButton(onClick = onClick, enabled = !busy) { Text(label) }
                         }
                     }
+                    val allowOnceOpt = p.options.firstOrNull { it.kind.startsWith("allow") }
+                    val isAgyRead = !actions.isClaude && !actions.isCodex &&
+                        (p.toolKind == "read" || p.toolKind == "search") &&
+                        p.options.none { it.kind == "allow_always" } &&
+                        allowOnceOpt != null
+                    if (isAgyRead) {
+                        val appCtx = LocalContext.current
+                        androidx.compose.material3.FilledTonalButton(
+                            enabled = !busy,
+                            onClick = {
+                                busy = true
+                                scope.launch {
+                                    appCtx.graph.prefs.update { st -> st.copy(agyFlags = st.agyFlags.copy(autoAllowReads = true)) }
+                                    runCatching {
+                                        actions.conn.rpc.call("session.permission", params {
+                                            put("id", actions.sessionId)
+                                            put("reqId", p.reqId)
+                                            put("optionId", allowOnceOpt!!.optionId)
+                                            put("autoAllowReads", true)
+                                        })
+                                    }
+                                    busy = false
+                                }
+                            },
+                        ) { Text("Always allow reads") }
+                    }
                     p.options.firstOrNull { it.kind == "reject_once" }?.let {
                         androidx.compose.material3.TextButton(onClick = { denyNote = "" }, enabled = !busy) { Text("Deny with comment") }
                     }
@@ -983,16 +1064,27 @@ fun TodoCard(item: Item) {
 @Composable
 fun NoticeRow(item: Item) {
     val ex = LocalExtra.current
-    val color = when (item.level) {
-        "error" -> ex.danger
-        "warn" -> ex.warning
-        else -> ex.muted
+    val text = item.text.orEmpty().trim()
+    if (text.isEmpty()) return
+    val uriHandler = LocalUriHandler.current
+    if (item.level == "error" || item.level == "warn") {
+        val accent = if (item.level == "error") ex.danger else ex.warning
+        val annotated = remember(text, accent) { linkifyBubbleText(text, accent) { uriHandler.openUri(it) } }
+        Surface(
+            color = accent.copy(alpha = 0.10f),
+            shape = RoundedCornerShape(10.dp),
+            border = androidx.compose.foundation.BorderStroke(1.dp, accent.copy(alpha = 0.35f)),
+            modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp),
+        ) {
+            Text(annotated, style = MaterialTheme.typography.bodySmall, color = accent, modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp))
+        }
+    } else {
+        Text(
+            text, style = MaterialTheme.typography.bodySmall, color = ex.muted,
+            modifier = Modifier.fillMaxWidth().padding(horizontal = 24.dp, vertical = 6.dp),
+            textAlign = androidx.compose.ui.text.style.TextAlign.Center,
+        )
     }
-    Text(
-        item.text.orEmpty(), style = MaterialTheme.typography.bodySmall, color = color,
-        modifier = Modifier.fillMaxWidth().padding(horizontal = 24.dp, vertical = 6.dp),
-        textAlign = androidx.compose.ui.text.style.TextAlign.Center,
-    )
 }
 
 @Composable

@@ -69,6 +69,7 @@ interface BuiltinSlash {
 }
 
 const BUILTIN_SLASH: BuiltinSlash[] = [
+  { name: 'notes', description: 'Open private client-side Session Notes', builtin: true },
   { name: 'btw', description: 'Ask a side question without polluting main context', builtin: true },
   { name: 'side', description: 'Open the Side Chat panel', builtin: true },
   { name: 'diff', description: 'Open the Diff Review panel', builtin: true },
@@ -536,7 +537,13 @@ export const Composer: React.FC<ComposerProps> = ({
 
   // Permission / Question / Plan actions
   const respondPermission = useCallback(
-    async (perm: PermCard, optionId: string, answers?: Record<string, unknown>, message?: string) => {
+    async (
+      perm: PermCard,
+      optionId: string,
+      answers?: Record<string, unknown>,
+      message?: string,
+      extra?: { autoAllowReads?: boolean },
+    ) => {
       if (!session || !hostId) return;
       setPermBusy(perm.reqId);
       try {
@@ -546,6 +553,7 @@ export const Composer: React.FC<ComposerProps> = ({
           optionId,
           ...(answers ? { answers } : {}),
           ...(message ? { message } : {}),
+          ...(extra?.autoAllowReads ? { autoAllowReads: true } : {}),
         });
         if (message) {
           setText('');
@@ -623,6 +631,11 @@ export const Composer: React.FC<ComposerProps> = ({
             pushToast({ text: `Side chat failed: ${(e as Error).message}`, level: 'error' });
           }
         }
+        return;
+      }
+      if (cmd === 'notes') {
+        setText('');
+        openRightTab({ id: 'notes', kind: 'notes', title: 'Notes' });
         return;
       }
       if (cmd === 'side') {
@@ -1316,6 +1329,33 @@ export const Composer: React.FC<ComposerProps> = ({
                   </button>
                 );
               })}
+              {(session?.agent === 'agy' || !session?.agent) &&
+                (perm.toolKind === 'read' ||
+                  perm.toolKind === 'search' ||
+                  /^(read|view|list|glob|grep|search)/i.test(perm.tool || '')) &&
+                !perm.options.some((o) => o.kind === 'allow_always') && (
+                  <button
+                    type="button"
+                    data-testid="perm-always-allow-reads-btn"
+                    disabled={busy}
+                    onClick={() => {
+                      const allowOpt =
+                        perm.options.find((o) => o.kind.startsWith('allow')) ?? perm.options[0];
+                      if (!allowOpt) return;
+                      updateSettings({ agyAutoAllowReads: true });
+                      void respondPermission(perm, allowOpt.optionId, undefined, undefined, {
+                        autoAllowReads: true,
+                      });
+                      pushToast({
+                        text: 'Enabled auto-allow for Antigravity read requests',
+                        level: 'success',
+                      });
+                    }}
+                    className="rounded-lg border border-[var(--accent)]/50 bg-[var(--accent-soft)] px-3 py-1 text-xs font-medium text-[var(--accent)] hover:opacity-90 cursor-pointer"
+                  >
+                    Always allow reads
+                  </button>
+                )}
             </div>
           </div>
         );

@@ -13,7 +13,7 @@ data class LiveState(
     val running: Boolean = false,
 ) {
     val reviewable: List<LiveArtifact> get() = artifacts.filter { it.needsReview }
-    val activeAgents: List<LiveSubagent> get() = subagents.filter { it.alive }
+    val activeAgents: List<LiveSubagent> get() = subagents.filter { it.isWorking(running) }
     val isEmpty: Boolean get() = tasks.isEmpty() && artifacts.isEmpty() && subagents.isEmpty() && messages.isEmpty() && hook.isNullOrBlank()
 }
 
@@ -63,7 +63,21 @@ data class LiveSubagent(
     val spawnStep: Int = 0,
     val updated: Long = 0,
 ) {
-    val alive: Boolean get() = state.equals("ALIVE", true) || state.equals("RUNNING", true)
+    val alive: Boolean get() = isWorking(sessionRunning = true)
+
+    fun isWorking(sessionRunning: Boolean = true, nowMs: Long = System.currentTimeMillis()): Boolean = when {
+        state.equals("RUNNING", true) || state.equals("WORKING", true) -> true
+        state.equals("DONE", true) || state.equals("COMPLETED", true) ||
+            state.equals("STOPPED", true) || state.equals("KILLED", true) || state.equals("FAILED", true) -> false
+        state.equals("ALIVE", true) -> sessionRunning && updated > 0L && (nowMs - updated) in 0L..90_000L
+        else -> false
+    }
+
+    fun displayState(sessionRunning: Boolean = true, nowMs: Long = System.currentTimeMillis()): String = when {
+        isWorking(sessionRunning, nowMs) -> "working"
+        state.equals("ALIVE", true) || state.equals("DONE", true) || state.equals("COMPLETED", true) || state.isBlank() -> "done"
+        else -> state.lowercase()
+    }
 }
 
 @Serializable

@@ -137,7 +137,7 @@ class AppGraph(val app: Application) {
             prefs.flow.collect { s -> syncConnections(s.hosts) }
         }
         scope.launch {
-            prefs.flow.map { it.notificationsEnabled }.distinctUntilChanged().collect {
+            prefs.flow.map { it.notificationsEnabled to it.enabledPushEvents() }.distinctUntilChanged().collect {
                 connections.value.forEach { c -> if (c.rpc.isConnected) push.register(c) }
             }
         }
@@ -183,7 +183,12 @@ class AppGraph(val app: Application) {
                     onNotifySeq = { hostId, seq -> scope.launch { prefs.update { s -> s.copy(lastNotifSeq = s.lastNotifSeq + (hostId to maxOf(seq, s.lastNotifSeq[hostId] ?: 0))) } } },
                     lastNotifSeq = { prefs.value.lastNotifSeq[h.id] ?: 0L },
                     onConnectedHook = { conn -> push.register(conn) },
-                    flagsProvider = { agent -> prefs.value.flagsJson(agent) })
+                    flagsProvider = { agent -> prefs.value.flagsJson(agent) },
+                    onHostUrl = { hostId, url ->
+                        scope.launch {
+                            prefs.update { s -> s.copy(hosts = s.hosts.map { if (it.id == hostId && it.url != url) it.copy(url = url) else it }) }
+                        }
+                    })
                 conns[h.id] = c
                 notifier.watch(c)
                 if (foreground.value || prefs.value.backgroundConnection) c.start()

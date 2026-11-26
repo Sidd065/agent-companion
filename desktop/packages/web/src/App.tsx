@@ -18,6 +18,7 @@ import { DEFAULT_KEYBINDINGS, matchChord } from './state/keybindings.js';
 const Shell: React.FC = () => {
   const {
     settings,
+    updateSettings,
     viewMode,
     setViewMode,
     activeHost,
@@ -34,6 +35,9 @@ const Shell: React.FC = () => {
     setCommandPaletteOpen,
     openSettingsTab,
     openDraft,
+    switchToPreviousThread,
+    jumpToLastNotifiedThread,
+    cycleTerminal,
     callHost,
     toasts,
     dismissToast,
@@ -45,14 +49,22 @@ const Shell: React.FC = () => {
   const [rightWidth, setRightWidth] = useState(520);
   const [termHeight, setTermHeight] = useState(250);
 
-  const dragRef = useRef<{ kind: 'right' | 'term'; startPos: number; startSize: number } | null>(null);
+  const dragRef = useRef<{ kind: 'sidebar' | 'right' | 'term'; startPos: number; startSize: number } | null>(null);
 
-  // Drag resize listeners for right panel and terminal drawer
+  // Drag resize listeners for sidebar (with drag-past-threshold collapse), right panel, and terminal drawer
   useEffect(() => {
     const onMove = (e: MouseEvent) => {
       const d = dragRef.current;
       if (!d) return;
-      if (d.kind === 'right') {
+      if (d.kind === 'sidebar') {
+        const next = d.startSize + (e.clientX - d.startPos);
+        if (next < 130) {
+          dragRef.current = null;
+          setSidebarOpen(false);
+        } else {
+          updateSettings({ sidebarWidth: Math.max(200, Math.min(480, Math.round(next))) });
+        }
+      } else if (d.kind === 'right') {
         const delta = d.startPos - e.clientX;
         setRightWidth(Math.max(320, Math.min(window.innerWidth - 360, d.startSize + delta)));
       } else {
@@ -69,7 +81,7 @@ const Shell: React.FC = () => {
       window.removeEventListener('mousemove', onMove);
       window.removeEventListener('mouseup', onUp);
     };
-  }, []);
+  }, [setSidebarOpen, updateSettings]);
 
   // Global keyboard shortcut dispatcher
   useEffect(() => {
@@ -146,6 +158,31 @@ const Shell: React.FC = () => {
         openRightTab({ id: 'side', kind: 'side', title: 'Side Chat' });
         return;
       }
+      if (matchChord(e, chordOf('openSessionNotes'))) {
+        e.preventDefault();
+        openRightTab({ id: 'notes', kind: 'notes', title: 'Notes' });
+        return;
+      }
+      if (matchChord(e, chordOf('cycleTerminalPrev'))) {
+        e.preventDefault();
+        cycleTerminal(-1);
+        return;
+      }
+      if (matchChord(e, chordOf('cycleTerminalNext'))) {
+        e.preventDefault();
+        cycleTerminal(1);
+        return;
+      }
+      if (matchChord(e, chordOf('switchRecentThread'))) {
+        e.preventDefault();
+        switchToPreviousThread();
+        return;
+      }
+      if (matchChord(e, chordOf('jumpLastNotified'))) {
+        e.preventDefault();
+        jumpToLastNotifiedThread();
+        return;
+      }
       if (matchChord(e, chordOf('openModelPicker'))) {
         e.preventDefault();
         setModelPickerSignal((s) => s + 1);
@@ -189,6 +226,9 @@ const Shell: React.FC = () => {
     setTerminalDrawerOpen,
     reopenClosedTab,
     openDraft,
+    cycleTerminal,
+    switchToPreviousThread,
+    jumpToLastNotifiedThread,
     callHost,
     triggerUndo,
   ]);
@@ -198,7 +238,22 @@ const Shell: React.FC = () => {
       <TitleBar />
 
       <div className="flex-1 flex min-h-0 min-w-0">
-        {sidebarOpen && <Sidebar />}
+        {sidebarOpen && (
+          <>
+            <Sidebar />
+            <div
+              data-testid="sidebar-resize-handle"
+              onMouseDown={(e) => {
+                dragRef.current = {
+                  kind: 'sidebar',
+                  startPos: e.clientX,
+                  startSize: settings.sidebarWidth || 276,
+                };
+              }}
+              className="w-1 bg-[var(--border)] hover:bg-[var(--accent)] cursor-col-resize shrink-0 transition-colors"
+            />
+          </>
+        )}
 
         {/* Center Workspace Column (Stage + Collapsible Bottom Terminal Drawer) */}
         {!(rightPanelOpen && rightPanelMaximized) && (

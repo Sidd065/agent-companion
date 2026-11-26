@@ -58,6 +58,7 @@ class HostConnection(
     private val onConnectedHook: suspend (HostConnection) -> Unit = {},
     val flagsProvider: (agent: String) -> JsonObject? = { null },
     private val keyPairProvider: (HostConfig) -> Noise.KeyPair = DeviceKeys::keyPair,
+    private val onHostUrl: (hostId: String, url: String) -> Unit = { _, _ -> },
 ) {
     val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
     val rpc = RpcClient(config, http, scope, deviceName, keyPairProvider)
@@ -170,6 +171,11 @@ class HostConnection(
                 val n = ev.data.decode(AgentNotification.serializer())
                 onNotifySeq(config.id, n.seq)
                 _notifications.emit(n)
+            }
+            "host.url" -> {
+                val url = ev.data.jsonObject["url"]?.jsonPrimitive?.content
+                    ?.takeIf { it.startsWith("https://") || it.startsWith("http://") }
+                if (url != null) onHostUrl(config.id, url)
             }
             "terms.changed" -> {
                 runCatching { _terms.value = ev.data.decode(ListSerializer(Term.serializer())) }

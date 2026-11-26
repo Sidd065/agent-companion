@@ -1,15 +1,29 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
-import { FileText, MessageSquarePlus, RefreshCw, Send } from 'lucide-react';
+import { Bot, CheckCircle2, FileText, Loader2, MessageSquarePlus, RefreshCw, Send } from 'lucide-react';
 import type { ArtifactInfo } from '@agentc/protocol';
-import { useApp } from '../../state/appStore.js';
+import { useApp, type RightTab } from '../../state/appStore.js';
+import { isSubagentWorking, splitArtifactMarkdownBlocks } from '../../utils/sessionHelpers.js';
 import { MarkdownRenderer } from '../markdown/MarkdownRenderer.js';
 
-export const ArtifactsPanel: React.FC = () => {
-  const { activeHost, activeSession, callHost, addComposerChip, pushToast } = useApp();
+interface LiveSubagent {
+  id: string;
+  role?: string;
+  type?: string;
+  state?: string;
+  updated?: number;
+}
+
+interface LiveState {
+  subagents?: LiveSubagent[];
+}
+
+export const ArtifactsPanel: React.FC<{ tab?: RightTab }> = ({ tab }) => {
+  const { activeHost, activeSession, rightTabFocusSeq, callHost, addComposerChip, pushToast } = useApp();
   const hostId = activeHost?.creds.id ?? '';
   const sessionId = activeSession?.id ?? '';
 
   const [artifacts, setArtifacts] = useState<ArtifactInfo[]>([]);
+  const [subagents, setSubagents] = useState<LiveSubagent[]>([]);
   const [selected, setSelected] = useState<ArtifactInfo | null>(null);
   const [content, setContent] = useState('');
   const [loading, setLoading] = useState(false);
@@ -23,27 +37,46 @@ export const ArtifactsPanel: React.FC = () => {
     const seq = ++reqSeqRef.current;
     setLoading(true);
     try {
-      const list = await callHost<ArtifactInfo[]>(hostId, 'session.artifacts', {
-        id: sessionId,
-      });
+      const [list, live] = await Promise.all([
+        callHost<ArtifactInfo[]>(hostId, 'session.artifacts', { id: sessionId }),
+        callHost<LiveState>(hostId, 'session.live', { id: sessionId }).catch(() => null),
+      ]);
       if (seq !== reqSeqRef.current) return;
       const arr = Array.isArray(list) ? list : [];
+      setSubagents(Array.isArray(live?.subagents) ? live!.subagents! : []);
+      const targetOpen = tab?.openFilePath;
+      if (targetOpen && !arr.some((x) => x.path === targetOpen)) {
+        arr.unshift({
+          name: targetOpen.split('/').pop() || 'Artifact',
+          path: targetOpen,
+          size: 0,
+          mtime: Date.now(),
+        });
+      }
       setArtifacts(arr);
-      setSelected((prev) => (prev && arr.some((x) => x.path === prev.path) ? prev : arr[0] ?? null));
+      setSelected((prev) => {
+        if (targetOpen) {
+          const matched = arr.find((x) => x.path === targetOpen);
+          if (matched) return matched;
+        }
+        return prev && arr.some((x) => x.path === prev.path) ? prev : arr[0] ?? null;
+      });
     } catch {
       if (seq !== reqSeqRef.current) return;
       setArtifacts([]);
+      setSubagents([]);
       setSelected(null);
     } finally {
       if (seq === reqSeqRef.current) {
         setLoading(false);
       }
     }
-  }, [hostId, sessionId, callHost]);
+  }, [hostId, sessionId, tab?.openFilePath, callHost]);
 
   useEffect(() => {
     reqSeqRef.current++;
     setArtifacts([]);
+    setSubagents([]);
     setSelected(null);
     setContent('');
     setCommentBlockIdx(null);
@@ -51,7 +84,7 @@ export const ArtifactsPanel: React.FC = () => {
     if (hostId && sessionId) {
       void loadList();
     }
-  }, [hostId, sessionId, loadList]);
+  }, [hostId, sessionId, rightTabFocusSeq, loadList]);
 
   useEffect(() => {
     if (!hostId || !sessionId || !selected) {
@@ -81,7 +114,7 @@ export const ArtifactsPanel: React.FC = () => {
     );
   }
 
-  const blocks = content ? content.split(/\n\n+/) : [];
+  const blocks = content ? splitArtifactMarkdownBlocks(content) : [];
 
   const sendReviewComment = async (quote: string, sendNow: boolean) => {
     if (!selected || !commentText.trim()) return;
@@ -142,6 +175,62 @@ export const ArtifactsPanel: React.FC = () => {
           <RefreshCw className={`w-3.5 h-3.5 ${loading ? 'animate-spin' : ''}`} />
         </button>
       </div>
+
+      {subagents.length > 0 && (
+        <div
+          data-testid="artifacts-subagents-strip"
+          className="border-b border-[var(--border)] bg-[var(--bg-surface)]/70 px-3 py-2 space-y-1 max-h-36 overflow-y-auto"
+        >
+          <div className="text-[10px] font-semibold uppercase tracking-wider text-[var(--text-muted)]">
+            Subagents ({subagents.length})
+          </div>
+          {subagents.map((sa) => {
+            const working = isSubagentWorking(
+              sa.state,
+              activeSession.state === 'running' || activeSession.state === 'starting',
+              sa.updated,
+            );
+            const stUpper = (sa.state || '').toUpperCase();
+            const statusText = working
+              ? 'working'
+              : stUpper === 'FAILED'
+                ? 'failed'
+                : stUpper === 'STOPPED' || stUpper === 'KILLED'
+                  ? 'stopped'
+                  : 'done';
+            return (
+              <div
+                key={sa.id}
+                className="flex items-center justify-between gap-2 rounded-md border border-[var(--border)] bg-[var(--bg-base)] px-2 py-1 text-[11px]"
+              >
+                <div className="flex items-center gap-1.5 min-w-0">
+                  <Bot className="w-3.5 h-3.5 shrink-0 text-[var(--accent)]" />
+                  <span className="font-medium truncate">{sa.role || sa.type || sa.id}</span>
+                  {sa.type && sa.role && (
+                    <span className="font-mono text-[10px] text-[var(--text-muted)] shrink-0">({sa.type})</span>
+                  )}
+                </div>
+                <span
+                  className={`inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px] font-medium shrink-0 ${
+                    working
+                      ? 'bg-blue-500/15 text-blue-300'
+                      : statusText === 'failed'
+                        ? 'bg-[var(--danger)]/15 text-[var(--danger)]'
+                        : 'bg-[var(--success)]/15 text-[var(--success)]'
+                  }`}
+                >
+                  {working ? (
+                    <Loader2 className="w-2.5 h-2.5 animate-spin" />
+                  ) : (
+                    <CheckCircle2 className="w-2.5 h-2.5" />
+                  )}
+                  {statusText}
+                </span>
+              </div>
+            );
+          })}
+        </div>
+      )}
 
       <div className="flex-1 overflow-y-auto p-4 space-y-3">
         {artifacts.length === 0 ? (

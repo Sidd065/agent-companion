@@ -106,12 +106,28 @@ func (s *Session) onAgyState(msg json.RawMessage) {
 			s.inflight = max(0, s.inflight-1)
 		}
 	}
+	extraNotifyKind, extraNotifyBody := "", ""
+	sid, title, label := s.meta.ID, s.meta.Title, s.agentLabelLocked()
+	if !(end && !quiet) && !running && s.inflight == 0 {
+		if s.agy.fullyIdle && (s.deferredDone || s.pendingTurnProgress) {
+			s.deferredDone, s.pendingTurnProgress = false, false
+			extraNotifyKind = "done"
+			extraNotifyBody = firstNonEmpty(s.meta.LastText, "Turn finished")
+		} else if !s.agy.fullyIdle && s.pendingTurnProgress {
+			s.pendingTurnProgress = false
+			extraNotifyKind = "progress"
+			extraNotifyBody = firstNonEmpty(s.meta.LastText, "Progress update")
+		}
+	}
 	s.mu.Unlock()
 	if begin || quiet {
 		s.emit()
 	}
 	if end && !quiet {
 		s.finishPrompt("", &acp.PromptResult{StopReason: reason}, nil)
+	}
+	if extraNotifyKind != "" {
+		s.m.notify(Notification{SessionID: sid, Kind: extraNotifyKind, Title: firstNonEmpty(title, label+" session"), Body: extraNotifyBody})
 	}
 }
 
@@ -143,4 +159,15 @@ func (s *Session) agyStillRunning() {
 // ended (only known while the state stream is connected).
 func (s *Session) agyBusyLocked() bool {
 	return s.agy.known && !s.agy.fullyIdle
+}
+
+// agyFullyIdleSafe reports whether the session is either not running or its
+// connected language-server state stream has confirmed fullyIdle with no active turn.
+func (s *Session) agyFullyIdleSafe() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.proc == nil {
+		return true
+	}
+	return s.agy.known && !s.agy.running && s.agy.fullyIdle && s.inflight == 0
 }

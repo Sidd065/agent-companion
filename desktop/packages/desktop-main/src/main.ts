@@ -243,6 +243,10 @@ function registerIpc(): void {
   ipcMain.handle('store:settings:save', (_ev, settings: Record<string, unknown>) => {
     stores.settings.write(settings && typeof settings === 'object' ? settings : {});
   });
+  ipcMain.handle('store:notes:load', () => stores.notes.read());
+  ipcMain.handle('store:notes:save', (_ev, notes: Record<string, unknown>) => {
+    stores.notes.write(notes && typeof notes === 'object' ? notes : {});
+  });
   ipcMain.handle('local:detect', () => detectLocalDaemon());
   ipcMain.handle('local:pair', (_ev, customUrl?: string) => requestLocalPairLink(customUrl));
   ipcMain.handle('editors:list', async () => {

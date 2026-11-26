@@ -86,7 +86,8 @@ class PushRegistrar(private val graph: AppGraph) {
     }
 
     suspend fun register(conn: HostConnection) {
-        if (!graph.prefs.value.notificationsEnabled) {
+        val events = graph.prefs.value.enabledPushEvents()
+        if (!graph.prefs.value.notificationsEnabled || events.isEmpty()) {
             unregister(conn)
             return
         }
@@ -96,6 +97,7 @@ class PushRegistrar(private val graph: AppGraph) {
                 put("token", t)
                 put("hostKey", conn.config.id)
                 put("device", graph.deviceName)
+                put("events", kotlinx.serialization.json.JsonArray(events.map { kotlinx.serialization.json.JsonPrimitive(it) }))
             })
             status.value = status.value + (conn.config.id to (res as JsonObject))
         }.onFailure { lastError.value = it.message }

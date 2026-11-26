@@ -302,6 +302,54 @@ test.describe.serial('Agent Companion Linux Desktop — Full Real-Electron E2E',
     await expect(page.getByTestId('schedule-task-card').first()).toContainText('E2E Daily Check');
   });
 
+  test('5b. v0.6.0 Features: Client-side Session Notes checklist, quoted search, Current Thread palette, Usage ranges & Notification/Agy Read settings', async () => {
+    // Switch back to active thread view
+    const firstRow = page.locator('[data-testid^="thread-row-"]').first();
+    await firstRow.click();
+    await expect(page.getByTestId('thread-view')).toBeVisible();
+
+    // Open client-side Session Notes panel from TitleBar
+    await page.getByTestId('open-notes-btn').click();
+    await expect(page.getByTestId('notes-panel')).toBeVisible();
+    await page.getByTestId('notes-textarea').fill('- [ ] Verify Cloudflare static tunnel\n- [ ] Ship v0.6.0 release');
+
+    // Toggle first checklist item -> next unchecked summary becomes "Ship v0.6.0 release"
+    await page.getByTestId('notes-panel').getByRole('button', { name: /Verify Cloudflare static tunnel/i }).click();
+    await expect(firstRow).toContainText('Ship v0.6.0 release');
+
+    // Insert next note item into composer
+    await page.getByTestId('notes-insert-composer-btn').click();
+    await expect(page.getByTestId('composer-textarea')).toHaveValue(/Ship v0\.6\.0 release/);
+    await page.getByTestId('composer-textarea').fill('');
+
+    // Verify quoted exact-phrase search matches client-side note text
+    await page.getByTestId('sidebar-search-input').fill('"Ship v0.6.0"');
+    await expect(page.locator('[data-testid^="thread-row-"]')).toHaveCount(1);
+    await page.getByTestId('sidebar-search-input').fill('');
+
+    // Command Palette shows Current Thread actions
+    await page.keyboard.press('Control+k');
+    await expect(page.getByTestId('command-palette')).toBeVisible();
+    await expect(page.getByTestId('command-palette')).toContainText('Current Thread');
+    await expect(page.getByTestId('command-palette')).toContainText('Settle Current Thread');
+    await page.keyboard.press('Escape');
+
+    // Settings Modal: Notification categories + Auto-allow Antigravity read requests
+    await page.getByTestId('open-settings-btn').click();
+    await expect(page.getByTestId('settings-modal')).toBeVisible();
+    await expect(page.getByTestId('settings-modal')).toContainText('Notification Categories');
+    await expect(page.getByTestId('settings-agy-auto-allow-reads')).toBeVisible();
+    await page.getByTestId('settings-agy-auto-allow-reads').click();
+    await page.getByTestId('settings-close-btn').click();
+
+    // Usage View: 5h and All time windows
+    await page.getByTestId('usage-view-btn').click();
+    await expect(page.getByTestId('usage-view')).toBeVisible();
+    await page.getByTestId('usage-view').getByRole('button', { name: '5h', exact: true }).click();
+    await page.getByTestId('usage-view').getByRole('button', { name: 'All time', exact: true }).click();
+    await firstRow.click();
+  });
+
   test('6. Resilience / Chaos: Kill and restart daemon mid-session -> automatic reconnect & transcript continuity', async () => {
     // Return to our active thread in the sidebar
     await page.locator('[data-testid^="thread-row-"]').first().click();

@@ -49,15 +49,27 @@ type Config struct {
 	IdleHibernateMinutes   int   `json:"idleHibernateMinutes"`
 	MaxLive                int   `json:"maxLive"`
 	DefaultSkipPermissions *bool `json:"defaultSkipPermissions,omitempty"`
+	AgyAutoAllowReads      bool  `json:"agyAutoAllowReads,omitempty"`
 	// Listen is the local address the daemon serves on (cloudflared connects
 	// to it). Default 127.0.0.1:<port>.
 	Listen string `json:"listen,omitempty"`
-	// Tunnel: "quick" (default) runs a Cloudflare quick tunnel; "none" relies
-	// on PublicURL (your own tunnel, reverse proxy or LAN address).
-	Tunnel        string `json:"tunnel,omitempty"`
-	PublicURL     string `json:"publicUrl,omitempty"`
-	Cloudflared   string `json:"cloudflared,omitempty"`
-	TunnelMetrics string `json:"tunnelMetrics,omitempty"`
+	// Tunnel: "auto"/"" (static Cloudflare tunnel if configured, else free quick tunnel),
+	// "static" (Cloudflare Named Tunnel with free quick-tunnel fallback unless CloudflareNoFallback),
+	// "quick" (force free trycloudflare.com quick tunnel), or "none" (manual PublicURL).
+	Tunnel                string   `json:"tunnel,omitempty"`
+	PublicURL             string   `json:"publicUrl,omitempty"`
+	Cloudflared           string   `json:"cloudflared,omitempty"`
+	TunnelMetrics         string   `json:"tunnelMetrics,omitempty"`
+	CloudflareCredsFile   string   `json:"cloudflareCredsFile,omitempty"`
+	CloudflareAPIToken    string   `json:"cloudflareApiToken,omitempty"`
+	CloudflareAccountID   string   `json:"cloudflareAccountId,omitempty"`
+	CloudflareDomain      string   `json:"cloudflareDomain,omitempty"`
+	CloudflareHostname    string   `json:"cloudflareHostname,omitempty"`
+	CloudflareTunnelName  string   `json:"cloudflareTunnelName,omitempty"`
+	CloudflareTunnelToken string   `json:"cloudflareTunnelToken,omitempty"`
+	CloudflareForceDNS    bool     `json:"cloudflareForceDns,omitempty"`
+	CloudflareNoFallback  bool     `json:"cloudflareNoFallback,omitempty"`
+	NotifyEvents          []string `json:"notifyEvents,omitempty"`
 	AgyPath       string `json:"agyPath,omitempty"`
 	// ClaudePath is the Claude Code executable (default ~/.local/bin/claude or PATH).
 	ClaudePath string `json:"claudePath,omitempty"`
@@ -112,7 +124,41 @@ func (p paths) apk() string         { return filepath.Join(p.share, "agent-compa
 func (p paths) identity() string    { return filepath.Join(p.state, "identity.json") }
 func (p paths) devices() string     { return filepath.Join(p.state, "devices.json") }
 func (p paths) tunnelState() string { return filepath.Join(p.state, "tunnel.json") }
+func (p paths) tunnelCache() string { return filepath.Join(p.state, "cloudflare-tunnel.json") }
+func (p paths) tunnelToken() string { return filepath.Join(p.state, "cloudflared.token") }
 func (p paths) tunnelLog() string   { return filepath.Join(p.state, "cloudflared.log") }
+
+func buildStaticTunnelConfig(p paths, cfg Config, listenAddr, hostID string) tunnel.StaticConfig {
+	credsFile := expandHomePath(p.home, cfg.CloudflareCredsFile)
+	if credsFile == "" && (cfg.CloudflareDomain != "" || cfg.CloudflareHostname != "") {
+		def := filepath.Join(p.home, ".cloudflare_creds")
+		if fileExists(def) {
+			credsFile = def
+		}
+	}
+	apiTok := strings.TrimSpace(cfg.CloudflareAPIToken)
+	if apiTok == providers.RedactedSecret {
+		apiTok = ""
+	}
+	tunTok := strings.TrimSpace(cfg.CloudflareTunnelToken)
+	if tunTok == providers.RedactedSecret {
+		tunTok = ""
+	}
+	return tunnel.StaticConfig{
+		CredsFile:   credsFile,
+		APIToken:    apiTok,
+		AccountID:   strings.TrimSpace(cfg.CloudflareAccountID),
+		Domain:      strings.TrimSpace(cfg.CloudflareDomain),
+		Hostname:    strings.TrimSpace(cfg.CloudflareHostname),
+		TunnelName:  strings.TrimSpace(cfg.CloudflareTunnelName),
+		TunnelToken: tunTok,
+		HostID:      hostID,
+		Target:      "http://" + listenAddr,
+		CacheFile:   p.tunnelCache(),
+		ForceDNS:    cfg.CloudflareForceDNS,
+		NoFallback:  cfg.CloudflareNoFallback,
+	}
+}
 
 func (c Config) listenAddr() string {
 	if c.Listen != "" {
@@ -338,8 +384,9 @@ usage:
   agentc install [--port N]          install the binary, the agyr link and the systemd user service
   agentc pair                        show a QR code that pairs a phone (one-time, expires in 10 min)
   agentc status                      show the daemon, tunnel and paired devices
-  agentc devices [revoke ID]         list paired devices, or unpair one
-  agentc tunnel stop                 stop the Cloudflare tunnel process (a new URL is made on restart)
+  agentc devices [revoke ID|revoke-all]  list paired devices, or unpair one / all
+  agentc tunnel [status|auth|quick|clear-auth|reload|stop]
+                                     configure static Cloudflare tunnels (with free quick-tunnel fallback)
   agentc serve [--listen ADDR] [--openrouter-api-key KEY] [--openrouter-api-key-file FILE] [--codex-path PATH]
   agentc config set|get|list         view or update ~/.config/agentc/config.json
   agentc term ls | attach ID | kill ID   manage shared terminals
@@ -434,7 +481,7 @@ func serve(args []string) int {
 		Env:      cfg.Env,
 		StateDir: p.state, ConfigDir: p.config, WorktreeDir: filepath.Join(p.share, "worktrees"), HomeDir: p.home,
 		AgyDataDir: filepath.Join(p.home, ".gemini", "antigravity-cli"), IdleHibernate: time.Duration(cfg.IdleHibernateMinutes) * time.Minute,
-		MaxLive: cfg.MaxLive, DefaultSkip: skip,
+		MaxLive: cfg.MaxLive, DefaultSkip: skip, AgyAutoAllowReads: cfg.AgyAutoAllowReads, NotifyEvents: cfg.NotifyEvents,
 	}, hub)
 	terms := termManager(p, cfg, mgr.AgyEnv)
 	terms.CodexPath = codexBin
@@ -464,43 +511,89 @@ func serve(args []string) int {
 	srv := &server.Server{Mgr: mgr, Terms: terms, CLI: cli, Push: pusher, Identity: identity, Devices: devices,
 		Tokens: secure.NewTokens(), APKPath: *apk, Started: time.Now()}
 
-	// Public URL: a quick tunnel unless the user configured their own.
+	// Public URL: static Cloudflare Named Tunnel when configured, falling back to a free quick tunnel
+	// unless the user explicitly configured "none" / manual PublicURL.
+	var cfgMu sync.Mutex
+	staticCfg := buildStaticTunnelConfig(p, cfg, *listen, identity.ID())
 	var tun *tunnel.Manager
-	mode := cfg.Tunnel
+	mode := strings.ToLower(strings.TrimSpace(cfg.Tunnel))
 	if mode == "" {
-		mode = "quick"
-		if cfg.PublicURL != "" {
+		if staticCfg.Configured() {
+			mode = "static"
+		} else if cfg.PublicURL != "" {
 			mode = "none"
+		} else {
+			mode = "quick"
 		}
 	}
-	if mode == "quick" {
-		tun = &tunnel.Manager{Bin: firstNonEmpty(cfg.Cloudflared, "cloudflared"), Target: "http://" + *listen, MetricsAddr: cfg.metricsAddr(),
-			StateFile: p.tunnelState(), LogFile: p.tunnelLog()}
+	if mode != "none" {
+		tun = &tunnel.Manager{
+			Bin:         firstNonEmpty(cfg.Cloudflared, "cloudflared"),
+			Target:      "http://" + *listen,
+			MetricsAddr: cfg.metricsAddr(),
+			StateFile:   p.tunnelState(),
+			TokenFile:   p.tunnelToken(),
+			LogFile:     p.tunnelLog(),
+			Mode:        cfg.Tunnel,
+			Static:      staticCfg,
+		}
 		tun.OnURL = func(url string) {
 			log.Printf("public URL: %s", url)
 			mgr.Hub().Broadcast("host.url", map[string]any{"url": url})
-			// Phones follow the new address through push (quick tunnel URLs change
-			// whenever cloudflared restarts).
+			// Paired clients follow the updated address seamlessly via WebSocket or push.
 			pusher.Send(push.Message{Kind: "host_url", URL: url, ID: fmt.Sprintf("url-%d", time.Now().UnixNano()), Ts: time.Now().UnixMilli()})
 		}
 		srv.PublicURL = tun.URL
 		srv.Tunnel = tun.Status
+		srv.TunnelReload = func() (map[string]any, error) {
+			cfgMu.Lock()
+			cfg = loadConfig(p)
+			mgr.SetNotifyEvents(cfg.NotifyEvents)
+			sc := buildStaticTunnelConfig(p, cfg, *listen, identity.ID())
+			tmode := cfg.Tunnel
+			cfgMu.Unlock()
+			tun.Reconfigure(tmode, sc)
+			return tun.Status(), nil
+		}
 	} else {
 		pub := strings.TrimRight(cfg.PublicURL, "/")
 		srv.PublicURL = func() string { return pub }
 		srv.Tunnel = func() map[string]any { return map[string]any{"mode": "none", "url": pub} }
 	}
-	var cfgMu sync.Mutex
 	srv.ConfigGet = func() map[string]any {
 		cfgMu.Lock()
 		defer cfgMu.Unlock()
-		return map[string]any{"listen": *listen, "tunnel": mode, "publicUrl": srv.PublicURL(), "idleHibernateMinutes": cfg.IdleHibernateMinutes,
-			"maxLive": cfg.MaxLive, "defaultSkipPermissions": skip, "agyPath": cfg.AgyPath, "claudePath": findClaude(p.home, cfg.ClaudePath),
-			"codexPath": codexBin, "openRouterConfigured": mgr.OpenRouterConfigured(),
-			"pushContent": pusher.Content, "firebaseServiceAccount": saPath}
+		sc := buildStaticTunnelConfig(p, cfg, *listen, identity.ID())
+		res, _ := sc.Resolve()
+		curSkip := skip
+		if cfg.DefaultSkipPermissions != nil {
+			curSkip = *cfg.DefaultSkipPermissions
+		}
+		return map[string]any{
+			"listen":                 *listen,
+			"tunnel":                 firstNonEmpty(cfg.Tunnel, mode),
+			"publicUrl":              srv.PublicURL(),
+			"idleHibernateMinutes":   cfg.IdleHibernateMinutes,
+			"maxLive":                cfg.MaxLive,
+			"defaultSkipPermissions": curSkip,
+			"agyAutoAllowReads":      mgr.AgyAutoAllowReads(),
+			"agyPath":                cfg.AgyPath,
+			"claudePath":             findClaude(p.home, cfg.ClaudePath),
+			"codexPath":              codexBin,
+			"openRouterConfigured":   mgr.OpenRouterConfigured(),
+			"pushContent":            pusher.Content,
+			"firebaseServiceAccount": saPath,
+			"notifyEvents":           mgr.NotifyEvents(),
+			"cloudflareConfigured":   sc.Configured(),
+			"cloudflareDomain":       cfg.CloudflareDomain,
+			"cloudflareHostname":     res.Hostname,
+			"cloudflareCredsFile":    cfg.CloudflareCredsFile,
+			"cloudflareNoFallback":   cfg.CloudflareNoFallback,
+		}
 	}
 	srv.ConfigSet = func(in map[string]any) (map[string]any, error) {
 		cfgMu.Lock()
+		tunnelChanged := false
 		if v, ok := in["idleHibernateMinutes"].(float64); ok && v >= 1 {
 			cfg.IdleHibernateMinutes = int(v)
 		}
@@ -510,12 +603,78 @@ func serve(args []string) int {
 		if v, ok := in["defaultSkipPermissions"].(bool); ok {
 			cfg.DefaultSkipPermissions = &v
 		}
+		if v, ok := in["agyAutoAllowReads"].(bool); ok {
+			cfg.AgyAutoAllowReads = v
+			mgr.SetAgyAutoAllowReads(v)
+		}
 		if v, ok := in["pushContent"].(string); ok && (v == "full" || v == "minimal") {
 			cfg.PushContent = v
 			pusher.Content = v
 		}
+		if rawEv, exists := in["notifyEvents"]; exists {
+			switch v := rawEv.(type) {
+			case nil:
+				cfg.NotifyEvents = nil
+				mgr.SetNotifyEvents(nil)
+			case string:
+				if strings.TrimSpace(v) == "" {
+					cfg.NotifyEvents = nil
+					mgr.SetNotifyEvents(nil)
+				} else {
+					cfg.NotifyEvents = push.NormalizeEvents([]string{v})
+					mgr.SetNotifyEvents(cfg.NotifyEvents)
+				}
+			case []any:
+				var strs []string
+				for _, item := range v {
+					strs = append(strs, fmt.Sprint(item))
+				}
+				cfg.NotifyEvents = push.NormalizeEvents(strs)
+				mgr.SetNotifyEvents(cfg.NotifyEvents)
+			}
+		}
+		if v, ok := in["tunnel"].(string); ok {
+			v = strings.ToLower(strings.TrimSpace(v))
+			if v == "" || v == "auto" || v == "static" || v == "quick" || v == "none" {
+				cfg.Tunnel = v
+				tunnelChanged = true
+			}
+		}
+		if v, ok := in["cloudflareDomain"].(string); ok {
+			cfg.CloudflareDomain = strings.TrimSpace(v)
+			tunnelChanged = true
+		}
+		if v, ok := in["cloudflareHostname"].(string); ok {
+			cfg.CloudflareHostname = strings.TrimSpace(v)
+			tunnelChanged = true
+		}
+		if v, ok := in["cloudflareCredsFile"].(string); ok {
+			cfg.CloudflareCredsFile = strings.TrimSpace(v)
+			tunnelChanged = true
+		}
+		if v, ok := in["cloudflareAccountId"].(string); ok {
+			cfg.CloudflareAccountID = strings.TrimSpace(v)
+			tunnelChanged = true
+		}
+		if v, ok := in["cloudflareApiToken"].(string); ok && v != providers.RedactedSecret {
+			cfg.CloudflareAPIToken = strings.TrimSpace(v)
+			tunnelChanged = true
+		}
+		if v, ok := in["cloudflareTunnelToken"].(string); ok && v != providers.RedactedSecret {
+			cfg.CloudflareTunnelToken = strings.TrimSpace(v)
+			tunnelChanged = true
+		}
+		if v, ok := in["cloudflareNoFallback"].(bool); ok {
+			cfg.CloudflareNoFallback = v
+			tunnelChanged = true
+		}
 		err := saveConfig(p, cfg)
+		sc := buildStaticTunnelConfig(p, cfg, *listen, identity.ID())
+		tmode := cfg.Tunnel
 		cfgMu.Unlock()
+		if err == nil && tunnelChanged && tun != nil {
+			tun.Reconfigure(tmode, sc)
+		}
 		return srv.ConfigGet(), err
 	}
 	ln, err := net.Listen("tcp", *listen)
@@ -845,6 +1004,14 @@ func pairCmd(args []string) int {
 }
 
 func devicesCmd(args []string) int {
+	if len(args) >= 1 && (args[0] == "revoke-all" || args[0] == "clear") {
+		var out map[string]any
+		if _, err := localPost("/local/devices/revoke-others", map[string]any{"keepId": ""}, &out); err != nil {
+			return notRunning(err)
+		}
+		fmt.Printf("unpaired %v device(s)\n", out["removed"])
+		return 0
+	}
 	if len(args) >= 2 && (args[0] == "revoke" || args[0] == "rm" || args[0] == "remove") {
 		var out map[string]any
 		if _, err := localPost("/local/devices/revoke", map[string]any{"id": args[1]}, &out); err != nil {
@@ -878,19 +1045,191 @@ func tunnelCmd(args []string) int {
 	p := getPaths()
 	cfg := loadConfig(p)
 	if len(args) == 0 || args[0] == "status" {
-		return status(true)
+		id, _ := secure.LoadOrCreateIdentity(p.identity())
+		hostID := ""
+		if id != nil {
+			hostID = id.ID()
+		}
+		sc := buildStaticTunnelConfig(p, cfg, cfg.listenAddr(), hostID)
+		res, _ := sc.Resolve()
+		var info map[string]any
+		if err := localGet("/local/status", &info); err == nil {
+			t, _ := info["tunnel"].(map[string]any)
+			fmt.Printf("daemon tunnel: mode=%v status=%v url=%v\n", t["mode"], firstNonEmpty(fmt.Sprint(t["status"]), "up"), firstNonEmpty(fmt.Sprint(info["publicUrl"]), "(starting…)"))
+			if fb := fmt.Sprint(t["fallbackError"]); fb != "" && fb != "<nil>" {
+				fmt.Printf("  fallback:    %s\n", fb)
+			}
+		} else {
+			fmt.Printf("daemon:        not running (%v)\n", err)
+		}
+		fmt.Printf("configured:    tunnel=%s staticAuth=%v\n", firstNonEmpty(cfg.Tunnel, "auto"), sc.Configured())
+		if res.Hostname != "" {
+			fmt.Printf("static host:   https://%s (tunnel name: %s)\n", res.Hostname, res.TunnelName)
+		}
+		if sc.CredsFile != "" {
+			fmt.Printf("creds file:    %s\n", sc.CredsFile)
+		}
+		return 0
 	}
-	if args[0] == "stop" {
-		m := &tunnel.Manager{Target: "http://" + cfg.listenAddr(), MetricsAddr: cfg.metricsAddr(), StateFile: p.tunnelState()}
+	switch args[0] {
+	case "auth", "login", "static":
+		fs := flag.NewFlagSet("tunnel auth", flag.ContinueOnError)
+		credsFile := fs.String("creds-file", cfg.CloudflareCredsFile, "path to Cloudflare credentials file (default ~/.cloudflare_creds if present)")
+		domain := fs.String("domain", cfg.CloudflareDomain, "Cloudflare zone domain (e.g. jdlf.cc); uses agentc-<host>.<domain> by default")
+		hostname := fs.String("hostname", cfg.CloudflareHostname, "explicit public hostname override (e.g. agentc-rpi.jdlf.cc)")
+		apiToken := fs.String("api-token", "", "Cloudflare API token (prefer --creds-file)")
+		accountID := fs.String("account-id", cfg.CloudflareAccountID, "Cloudflare account ID (auto-detected from zone when omitted)")
+		tunnelName := fs.String("tunnel-name", cfg.CloudflareTunnelName, "named tunnel override (default agentc-<host>-<shortHostId>)")
+		tunnelToken := fs.String("tunnel-token", "", "pre-created Cloudflare Tunnel connector token")
+		forceDNS := fs.Bool("force-dns", cfg.CloudflareForceDNS, "overwrite existing non-agentc DNS record on hostname if present")
+		noFallback := fs.Bool("no-fallback", cfg.CloudflareNoFallback, "disable automatic fallback to free quick tunnel if static tunnel fails")
+		verifyOnly := fs.Bool("verify-only", false, "provision/verify against Cloudflare without modifying ~/.config/agentc/config.json")
+		if err := fs.Parse(args[1:]); err != nil {
+			return 2
+		}
+		cfFile := expandHomePath(p.home, *credsFile)
+		if cfFile == "" && *apiToken == "" && *tunnelToken == "" {
+			def := filepath.Join(p.home, ".cloudflare_creds")
+			if fileExists(def) {
+				cfFile = def
+			}
+		}
+		_ = os.MkdirAll(p.state, 0o700)
+		id, err := secure.LoadOrCreateIdentity(p.identity())
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "tunnel auth: identity:", err)
+			return 1
+		}
+		tmpCfg := cfg
+		tmpCfg.CloudflareCredsFile = cfFile
+		tmpCfg.CloudflareDomain = strings.TrimSpace(*domain)
+		tmpCfg.CloudflareHostname = strings.TrimSpace(*hostname)
+		tmpCfg.CloudflareAccountID = strings.TrimSpace(*accountID)
+		tmpCfg.CloudflareTunnelName = strings.TrimSpace(*tunnelName)
+		tmpCfg.CloudflareForceDNS = *forceDNS
+		tmpCfg.CloudflareNoFallback = *noFallback
+		if strings.TrimSpace(*apiToken) != "" {
+			tmpCfg.CloudflareAPIToken = strings.TrimSpace(*apiToken)
+		}
+		if strings.TrimSpace(*tunnelToken) != "" {
+			tmpCfg.CloudflareTunnelToken = strings.TrimSpace(*tunnelToken)
+		}
+		sc := buildStaticTunnelConfig(p, tmpCfg, tmpCfg.listenAddr(), id.ID())
+		ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+		defer cancel()
+		pt, err := tunnel.ProvisionStaticTunnel(ctx, sc)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "tunnel auth:", err)
+			return 1
+		}
+		fmt.Printf("provisioned static Cloudflare tunnel %q (%s)\n", pt.TunnelName, firstNonEmpty(pt.TunnelID, "token-mode"))
+		fmt.Printf("  public URL:  https://%s -> %s\n", pt.Hostname, pt.Target)
+		if pt.ZoneName != "" {
+			fmt.Printf("  shared zone: %s (only %s CNAME is managed by agentc)\n", pt.ZoneName, pt.Hostname)
+		}
+		if *verifyOnly {
+			return 0
+		}
+		tmpCfg.Tunnel = "static"
+		if err := saveConfig(p, tmpCfg); err != nil {
+			fmt.Fprintln(os.Stderr, "save config:", err)
+			return 1
+		}
+		fmt.Printf("saved static tunnel config to %s (fallback to free quick tunnel: %v)\n", p.configFile(), !*noFallback)
+		var reloadOut map[string]any
+		if code, rerr := localPost("/local/tunnel/reload", map[string]any{}, &reloadOut); rerr == nil && code == 200 {
+			fmt.Println("reloading running daemon tunnel…")
+			for deadline := time.Now().Add(25 * time.Second); time.Now().Before(deadline); time.Sleep(750 * time.Millisecond) {
+				var st map[string]any
+				if localGet("/local/status", &st) == nil && fmt.Sprint(st["publicUrl"]) == "https://"+pt.Hostname {
+					fmt.Printf("active public URL: https://%s\n", pt.Hostname)
+					return 0
+				}
+			}
+		}
+		return 0
+	case "quick", "free":
+		cfg.Tunnel = "quick"
+		if err := saveConfig(p, cfg); err != nil {
+			fmt.Fprintln(os.Stderr, "save config:", err)
+			return 1
+		}
+		var out map[string]any
+		if code, err := localPost("/local/tunnel/reload", map[string]any{}, &out); err == nil && code == 200 {
+			fmt.Println("switched running daemon to free Cloudflare quick tunnel")
+		} else {
+			fmt.Println("configured tunnel=quick (will take effect when daemon starts)")
+		}
+		return 0
+	case "clear-auth", "logout":
+		fs := flag.NewFlagSet("tunnel clear-auth", flag.ContinueOnError)
+		deleteRemote := fs.Bool("delete-remote", false, "also delete this host's named tunnel and CNAME record from Cloudflare")
+		if err := fs.Parse(args[1:]); err != nil {
+			return 2
+		}
+		if *deleteRemote {
+			id, _ := secure.LoadOrCreateIdentity(p.identity())
+			hostID := ""
+			if id != nil {
+				hostID = id.ID()
+			}
+			sc := buildStaticTunnelConfig(p, cfg, cfg.listenAddr(), hostID)
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			err := tunnel.DeleteStaticTunnel(ctx, sc)
+			cancel()
+			if err != nil {
+				fmt.Fprintln(os.Stderr, "warning: delete remote tunnel:", err)
+			} else {
+				fmt.Println("deleted remote Cloudflare named tunnel and scoped CNAME record")
+			}
+		}
+		cfg.Tunnel = "quick"
+		cfg.CloudflareCredsFile = ""
+		cfg.CloudflareAPIToken = ""
+		cfg.CloudflareAccountID = ""
+		cfg.CloudflareDomain = ""
+		cfg.CloudflareHostname = ""
+		cfg.CloudflareTunnelName = ""
+		cfg.CloudflareTunnelToken = ""
+		cfg.CloudflareForceDNS = false
+		cfg.CloudflareNoFallback = false
+		_ = os.Remove(p.tunnelCache())
+		_ = os.Remove(p.tunnelToken())
+		if err := saveConfig(p, cfg); err != nil {
+			fmt.Fprintln(os.Stderr, "save config:", err)
+			return 1
+		}
+		var out map[string]any
+		if code, err := localPost("/local/tunnel/reload", map[string]any{}, &out); err == nil && code == 200 {
+			fmt.Println("cleared Cloudflare static tunnel auth; switched running daemon to free quick tunnel")
+		} else {
+			fmt.Println("cleared Cloudflare static tunnel auth (will use free quick tunnel)")
+		}
+		return 0
+	case "reload":
+		var out map[string]any
+		code, err := localPost("/local/tunnel/reload", map[string]any{}, &out)
+		if err != nil {
+			return notRunning(err)
+		}
+		if code != 200 {
+			fmt.Fprintln(os.Stderr, "tunnel reload:", out["error"])
+			return 1
+		}
+		fmt.Println("tunnel reload triggered")
+		return 0
+	case "stop":
+		m := &tunnel.Manager{Target: "http://" + cfg.listenAddr(), MetricsAddr: cfg.metricsAddr(), StateFile: p.tunnelState(), TokenFile: p.tunnelToken()}
 		if err := m.Stop(); err != nil {
 			fmt.Fprintln(os.Stderr, "tunnel:", err)
 			return 1
 		}
-		fmt.Println("tunnel stopped; the daemon starts a new one (with a new URL) within ~15s")
+		fmt.Println("tunnel stopped; the daemon starts a new one within ~15s")
 		return 0
+	default:
+		fmt.Fprintln(os.Stderr, "usage: agentc tunnel [status|auth|quick|clear-auth|reload|stop]")
+		return 2
 	}
-	fmt.Fprintln(os.Stderr, "usage: agentc tunnel [status|stop]")
-	return 2
 }
 
 func toF(v any) float64 {
@@ -1217,7 +1556,7 @@ func tunnelSettled(info map[string]any) bool {
 	t, _ := info["tunnel"].(map[string]any)
 	mode, _ := t["mode"].(string)
 	st, _ := t["status"].(string)
-	return mode != "cloudflare-quick" || strings.HasPrefix(st, "error")
+	return (mode != "cloudflare-quick" && mode != "cloudflare-static") || strings.HasPrefix(st, "error")
 }
 
 // unitSystemPath follows ~/.local/bin in the PATH the systemd unit gives the
@@ -1378,6 +1717,32 @@ func setConfigField(cfg *Config, rawKey, val string) error {
 		cfg.Tunnel = strings.TrimSpace(val)
 	case "public_url", "publicurl":
 		cfg.PublicURL = strings.TrimSpace(val)
+	case "cloudflare_creds_file", "cloudflarecredsfile":
+		cfg.CloudflareCredsFile = strings.TrimSpace(val)
+	case "cloudflare_api_token", "cloudflareapitoken":
+		cfg.CloudflareAPIToken = strings.TrimSpace(val)
+	case "cloudflare_account_id", "cloudflareaccountid":
+		cfg.CloudflareAccountID = strings.TrimSpace(val)
+	case "cloudflare_domain", "cloudflaredomain":
+		cfg.CloudflareDomain = strings.TrimSpace(val)
+	case "cloudflare_hostname", "cloudflarehostname":
+		cfg.CloudflareHostname = strings.TrimSpace(val)
+	case "cloudflare_tunnel_name", "cloudflaretunnelname":
+		cfg.CloudflareTunnelName = strings.TrimSpace(val)
+	case "cloudflare_tunnel_token", "cloudflaretunneltoken":
+		cfg.CloudflareTunnelToken = strings.TrimSpace(val)
+	case "cloudflare_force_dns", "cloudflareforcedns":
+		cfg.CloudflareForceDNS = val == "true" || val == "1"
+	case "cloudflare_no_fallback", "cloudflarenofallback":
+		cfg.CloudflareNoFallback = val == "true" || val == "1"
+	case "agy_auto_allow_reads", "agyautoallowreads":
+		cfg.AgyAutoAllowReads = val == "true" || val == "1"
+	case "notify_events", "notifyevents":
+		if strings.TrimSpace(val) == "" || strings.EqualFold(strings.TrimSpace(val), "default") {
+			cfg.NotifyEvents = nil
+		} else {
+			cfg.NotifyEvents = push.NormalizeEvents([]string{val})
+		}
 	case "port":
 		n, err := strconv.Atoi(strings.TrimSpace(val))
 		if err != nil || n <= 0 || n > 65535 {
@@ -1434,6 +1799,34 @@ func getConfigField(cfg Config, rawKey string) (string, bool) {
 		return cfg.Tunnel, true
 	case "public_url", "publicurl":
 		return cfg.PublicURL, true
+	case "cloudflare_creds_file", "cloudflarecredsfile":
+		return cfg.CloudflareCredsFile, true
+	case "cloudflare_api_token", "cloudflareapitoken":
+		if strings.TrimSpace(cfg.CloudflareAPIToken) != "" {
+			return providers.RedactedSecret, true
+		}
+		return "", true
+	case "cloudflare_account_id", "cloudflareaccountid":
+		return cfg.CloudflareAccountID, true
+	case "cloudflare_domain", "cloudflaredomain":
+		return cfg.CloudflareDomain, true
+	case "cloudflare_hostname", "cloudflarehostname":
+		return cfg.CloudflareHostname, true
+	case "cloudflare_tunnel_name", "cloudflaretunnelname":
+		return cfg.CloudflareTunnelName, true
+	case "cloudflare_tunnel_token", "cloudflaretunneltoken":
+		if strings.TrimSpace(cfg.CloudflareTunnelToken) != "" {
+			return providers.RedactedSecret, true
+		}
+		return "", true
+	case "cloudflare_force_dns", "cloudflareforcedns":
+		return strconv.FormatBool(cfg.CloudflareForceDNS), true
+	case "cloudflare_no_fallback", "cloudflarenofallback":
+		return strconv.FormatBool(cfg.CloudflareNoFallback), true
+	case "agy_auto_allow_reads", "agyautoallowreads":
+		return strconv.FormatBool(cfg.AgyAutoAllowReads), true
+	case "notify_events", "notifyevents":
+		return strings.Join(cfg.NotifyEvents, ","), true
 	case "port":
 		return strconv.Itoa(cfg.Port), true
 	case "idle_hibernate_minutes", "idlehibernateminutes":
@@ -1472,6 +1865,39 @@ func redactedConfigMap(cfg Config) map[string]any {
 	}
 	if strings.TrimSpace(cfg.OpenRouterAPIKey) != "" {
 		m["openRouterApiKey"] = providers.RedactedSecret
+	}
+	if cfg.CloudflareCredsFile != "" {
+		m["cloudflareCredsFile"] = cfg.CloudflareCredsFile
+	}
+	if strings.TrimSpace(cfg.CloudflareAPIToken) != "" {
+		m["cloudflareApiToken"] = providers.RedactedSecret
+	}
+	if cfg.CloudflareAccountID != "" {
+		m["cloudflareAccountId"] = cfg.CloudflareAccountID
+	}
+	if cfg.CloudflareDomain != "" {
+		m["cloudflareDomain"] = cfg.CloudflareDomain
+	}
+	if cfg.CloudflareHostname != "" {
+		m["cloudflareHostname"] = cfg.CloudflareHostname
+	}
+	if cfg.CloudflareTunnelName != "" {
+		m["cloudflareTunnelName"] = cfg.CloudflareTunnelName
+	}
+	if strings.TrimSpace(cfg.CloudflareTunnelToken) != "" {
+		m["cloudflareTunnelToken"] = providers.RedactedSecret
+	}
+	if cfg.CloudflareForceDNS {
+		m["cloudflareForceDns"] = true
+	}
+	if cfg.CloudflareNoFallback {
+		m["cloudflareNoFallback"] = true
+	}
+	if cfg.AgyAutoAllowReads {
+		m["agyAutoAllowReads"] = true
+	}
+	if len(cfg.NotifyEvents) > 0 {
+		m["notifyEvents"] = cfg.NotifyEvents
 	}
 	if len(cfg.Env) > 0 {
 		red := make(map[string]string, len(cfg.Env))

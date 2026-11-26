@@ -79,7 +79,13 @@ fun SettingsScreen() {
             NavRow("Hosts & pairing", "${s.hosts.size} paired · ${s.hosts.joinToString { it.label }}") { nav.navigate("hosts") }
 
             Section("Notifications")
-            SwitchRow("Notifications", "Agent finished, needs permission, asked a question, or failed", s.notificationsEnabled) { v -> upd { it.copy(notificationsEnabled = v) } }
+            SwitchRow("Notifications", "Enable notifications from your paired hosts", s.notificationsEnabled) { v -> upd { it.copy(notificationsEnabled = v) } }
+            if (s.notificationsEnabled) {
+                SwitchRow("Needs input", "Permission requests, agent questions, and plan reviews", s.notifyOnInput) { v -> upd { it.copy(notifyOnInput = v) } }
+                SwitchRow("Task done", "When a session finishes all work (including subagents & background shells)", s.notifyOnDone) { v -> upd { it.copy(notifyOnDone = v) } }
+                SwitchRow("Halted or error", "When an agent stops with an error or permission failure", s.notifyOnHalted) { v -> upd { it.copy(notifyOnHalted = v) } }
+                SwitchRow("Minor progress updates", "Intermediate turn messages while background tasks keep working", s.notifyOnProgress) { v -> upd { it.copy(notifyOnProgress = v) } }
+            }
             val hostPush = conn?.hello?.collectAsState()?.value?.get("push")?.toString()
             Text(
                 buildString {
@@ -130,6 +136,7 @@ fun SettingsScreen() {
             Slider(value = s.textScale, onValueChange = { v -> upd { it.copy(textScale = (v * 20).toInt() / 20f) } }, valueRange = 0.8f..1.4f)
             SwitchRow("Wrap long code lines", null, s.codeWrap) { v -> upd { it.copy(codeWrap = v) } }
             SwitchRow("Show thinking", "Show the agent's thought summaries in the transcript", s.showThoughts) { v -> upd { it.copy(showThoughts = v) } }
+            SwitchRow("Expand tool calls by default", "Start tool call inputs, diffs, and outputs expanded", s.expandToolCalls) { v -> upd { it.copy(expandToolCalls = v) } }
 
             Section("Composer")
             SwitchRow("Enter sends", "Otherwise Enter inserts a new line", s.enterSends) { v -> upd { it.copy(enterSends = v) } }
@@ -141,6 +148,24 @@ fun SettingsScreen() {
             }
 
             Section("New sessions")
+            SwitchRow(
+                "Auto-allow agy read requests",
+                "Automatically approve file read & search requests outside the workspace in agy sessions",
+                s.agyFlags.autoAllowReads,
+            ) { v ->
+                scope.launch {
+                    g.prefs.update { it.copy(agyFlags = it.agyFlags.copy(autoAllowReads = v)) }
+                    g.connections.value.forEach { c ->
+                        if (c.rpc.isConnected) {
+                            runCatching {
+                                c.rpc.call("daemon.config.set", io.github.sidd065.agentcompanion.net.params {
+                                    put("agyAutoAllowReads", kotlinx.serialization.json.JsonPrimitive(v))
+                                })
+                            }
+                        }
+                    }
+                }
+            }
             io.github.sidd065.agentcompanion.ui.components.AgyFlagsCard(kind = "tui", onEdit = { flagsOpen = true })
             Spacer(Modifier.height(8.dp))
             io.github.sidd065.agentcompanion.ui.components.AgentFlagsCard("claude", kind = "tui", onEdit = { claudeFlagsOpen = true })

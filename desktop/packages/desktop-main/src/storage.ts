@@ -38,6 +38,7 @@ export class AtomicJsonStore<T> {
 export interface DesktopStores {
   hosts: AtomicJsonStore<PairedHostCredentials[]>;
   settings: AtomicJsonStore<Record<string, unknown>>;
+  notes: AtomicJsonStore<Record<string, unknown>>;
   bounds: AtomicJsonStore<WindowBounds>;
 }
 
@@ -46,6 +47,7 @@ export function openDesktopStores(baseDir: string): DesktopStores {
   return {
     hosts: new AtomicJsonStore<PairedHostCredentials[]>(path.join(baseDir, 'hosts.json'), []),
     settings: new AtomicJsonStore<Record<string, unknown>>(path.join(baseDir, 'settings.json'), {}),
+    notes: new AtomicJsonStore<Record<string, unknown>>(path.join(baseDir, 'notes.json'), {}),
     bounds: new AtomicJsonStore<WindowBounds>(path.join(baseDir, 'window-bounds.json'), {
       width: 1380,
       height: 860,

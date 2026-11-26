@@ -168,7 +168,7 @@ export class HostSupervisor {
         devicePriv: base64ToBytes(this.creds.devicePriv),
         deviceName: this.opts.deviceName,
         platform: this.opts.platform ?? 'linux-desktop',
-        appVersion: this.opts.appVersion ?? '0.5.0',
+        appVersion: this.opts.appVersion ?? '0.6.0',
         WebSocketImpl: this.opts.WebSocketImpl,
         onEvent: (ev, data) => {
           if (this.client !== client) return;
@@ -215,7 +215,7 @@ export class HostSupervisor {
         }
         const info = await client.call<DaemonInfo>(
           'hello',
-          { device: this.opts.deviceName, app: this.opts.appVersion ?? '0.5.0' },
+          { device: this.opts.deviceName, app: this.opts.appVersion ?? '0.6.0' },
           20_000,
         );
         if (this.client !== client || this.disposed) return;
