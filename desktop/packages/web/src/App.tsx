@@ -6,6 +6,7 @@ import { RightPanel } from './components/panels/RightPanel.js';
 import { TerminalPanel } from './components/panels/TerminalPanel.js';
 import { AddProjectModal } from './components/shell/AddProjectModal.js';
 import { CommandPalette } from './components/shell/CommandPalette.js';
+import { ConfirmDialog } from './components/shell/ConfirmDialog.js';
 import { OnboardingModal } from './components/shell/OnboardingModal.js';
 import { Sidebar } from './components/shell/Sidebar.js';
 import { TitleBar } from './components/shell/TitleBar.js';
@@ -46,8 +47,20 @@ const Shell: React.FC = () => {
 
   const [findSignal, setFindSignal] = useState(0);
   const [modelPickerSignal, setModelPickerSignal] = useState(0);
-  const [rightWidth, setRightWidth] = useState(520);
+  const [rightWidth, setRightWidth] = useState(500);
   const [termHeight, setTermHeight] = useState(250);
+  const [viewportWidth, setViewportWidth] = useState(() => (typeof window !== 'undefined' ? window.innerWidth : 1440));
+
+  useEffect(() => {
+    const onResize = () => setViewportWidth(window.innerWidth);
+    window.addEventListener('resize', onResize);
+    return () => window.removeEventListener('resize', onResize);
+  }, []);
+
+  const showRightPanel = rightPanelOpen && (viewMode === 'thread' || viewMode === 'draft');
+  const sidebarEffectiveW = sidebarOpen ? (settings.sidebarWidth || 276) : 0;
+  const maxAllowedRightW = Math.max(280, Math.floor((viewportWidth - sidebarEffectiveW) * 0.45));
+  const effectiveRightWidth = Math.min(rightWidth, maxAllowedRightW);
 
   const dragRef = useRef<{ kind: 'sidebar' | 'right' | 'term'; startPos: number; startSize: number } | null>(null);
 
@@ -256,7 +269,7 @@ const Shell: React.FC = () => {
         )}
 
         {/* Center Workspace Column (Stage + Collapsible Bottom Terminal Drawer) */}
-        {!(rightPanelOpen && rightPanelMaximized) && (
+        {!(showRightPanel && rightPanelMaximized) && (
           <div className="flex-1 flex flex-col min-w-0 min-h-0">
             <div className="flex-1 flex flex-col min-w-0 min-h-0">
               {viewMode === 'usage' ? (
@@ -287,18 +300,18 @@ const Shell: React.FC = () => {
           </div>
         )}
 
-        {/* Right Workbench Panel */}
-        {rightPanelOpen && (
+        {/* Right Workbench Panel (thread/draft scoped; hidden on full-page Usage/Schedules dashboards) */}
+        {showRightPanel && (
           <>
             {!rightPanelMaximized && (
               <div
                 onMouseDown={(e) => {
-                  dragRef.current = { kind: 'right', startPos: e.clientX, startSize: rightWidth };
+                  dragRef.current = { kind: 'right', startPos: e.clientX, startSize: effectiveRightWidth };
                 }}
                 className="w-1 bg-[var(--border)] hover:bg-[var(--accent)] cursor-col-resize shrink-0 transition-colors"
               />
             )}
-            <RightPanel widthPx={rightWidth} />
+            <RightPanel widthPx={effectiveRightWidth} />
           </>
         )}
       </div>
@@ -308,15 +321,16 @@ const Shell: React.FC = () => {
       <AddProjectModal />
       <CommandPalette />
       <SettingsModal />
+      <ConfirmDialog />
 
-      {/* Toast Stack with 5s Undo Support */}
+      {/* Toast Stack with 5s Undo Support (raised above composer send bar & pointer-events-none wrapper) */}
       {toasts.length > 0 && (
-        <div className="fixed bottom-4 right-4 z-50 flex flex-col gap-2 max-w-sm">
+        <div className="fixed bottom-14 right-4 z-50 flex flex-col gap-2 max-w-sm pointer-events-none">
           {toasts.map((t) => (
             <div
               key={t.id}
               data-testid="toast-notice"
-              className={`flex items-center justify-between gap-3 rounded-xl border px-3.5 py-2.5 text-xs shadow-xl ${
+              className={`pointer-events-auto flex items-center justify-between gap-3 rounded-xl border px-3.5 py-2.5 text-xs shadow-xl ${
                 t.level === 'error'
                   ? 'border-[var(--danger)]/60 bg-[var(--bg-elevated)] text-[var(--danger)]'
                   : t.level === 'success'

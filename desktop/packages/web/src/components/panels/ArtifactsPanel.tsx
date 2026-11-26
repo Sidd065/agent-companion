@@ -13,20 +13,42 @@ interface LiveSubagent {
   updated?: number;
 }
 
+interface LiveArtifactItem {
+  name: string;
+  path?: string;
+  uri?: string;
+  kind?: string;
+  size?: number;
+  updated?: number;
+  summary?: string;
+  requestFeedback?: boolean;
+  answered?: boolean;
+  review?: string;
+}
+
 interface LiveState {
   subagents?: LiveSubagent[];
+  artifacts?: LiveArtifactItem[];
+}
+
+interface RichArtifact extends ArtifactInfo {
+  summary?: string;
+  requestFeedback?: boolean;
+  answered?: boolean;
+  review?: string;
 }
 
 export const ArtifactsPanel: React.FC<{ tab?: RightTab }> = ({ tab }) => {
   const { activeHost, activeSession, rightTabFocusSeq, callHost, addComposerChip, pushToast } = useApp();
-  const hostId = activeHost?.creds.id ?? '';
+  const hostId = tab?.hostId || activeHost?.creds.id || '';
   const sessionId = activeSession?.id ?? '';
 
-  const [artifacts, setArtifacts] = useState<ArtifactInfo[]>([]);
+  const [artifacts, setArtifacts] = useState<RichArtifact[]>([]);
   const [subagents, setSubagents] = useState<LiveSubagent[]>([]);
-  const [selected, setSelected] = useState<ArtifactInfo | null>(null);
+  const [selected, setSelected] = useState<RichArtifact | null>(null);
   const [content, setContent] = useState('');
   const [loading, setLoading] = useState(false);
+  const [submittingProceed, setSubmittingProceed] = useState(false);
 
   const [commentBlockIdx, setCommentBlockIdx] = useState<number | null>(null);
   const [commentText, setCommentText] = useState('');
@@ -38,28 +60,58 @@ export const ArtifactsPanel: React.FC<{ tab?: RightTab }> = ({ tab }) => {
     setLoading(true);
     try {
       const [list, live] = await Promise.all([
-        callHost<ArtifactInfo[]>(hostId, 'session.artifacts', { id: sessionId }),
+        callHost<ArtifactInfo[]>(hostId, 'session.artifacts', { id: sessionId }).catch(() => [] as ArtifactInfo[]),
         callHost<LiveState>(hostId, 'session.live', { id: sessionId }).catch(() => null),
       ]);
       if (seq !== reqSeqRef.current) return;
-      const arr = Array.isArray(list) ? list : [];
+      const baseArr: RichArtifact[] = Array.isArray(list) ? list.filter((a) => !a.name.endsWith('.metadata.json') && !a.name.endsWith('.resolved')).map((a) => ({ ...a })) : [];
+      const liveArts = Array.isArray(live?.artifacts) ? live!.artifacts! : [];
+
+      for (const la of liveArts) {
+        const laPath = la.path || (la.uri?.startsWith('file://') ? la.uri.slice('file://'.length) : '');
+        if (!laPath) continue;
+        const existing = baseArr.find((x) => x.path === laPath || x.name === la.name);
+        if (existing) {
+          existing.summary = la.summary ?? existing.summary;
+          existing.requestFeedback = la.requestFeedback ?? existing.requestFeedback;
+          existing.answered = la.answered ?? existing.answered;
+          existing.review = la.review ?? existing.review;
+          if (la.updated && la.updated > (existing.mtime || 0)) existing.mtime = la.updated;
+        } else {
+          baseArr.push({
+            name: la.name || laPath.split('/').pop() || 'Artifact',
+            path: laPath,
+            size: la.size ?? 0,
+            mtime: la.updated ?? Date.now(),
+            summary: la.summary,
+            requestFeedback: la.requestFeedback,
+            answered: la.answered,
+            review: la.review,
+          });
+        }
+      }
+
       setSubagents(Array.isArray(live?.subagents) ? live!.subagents! : []);
       const targetOpen = tab?.openFilePath;
-      if (targetOpen && !arr.some((x) => x.path === targetOpen)) {
-        arr.unshift({
+      if (targetOpen && !baseArr.some((x) => x.path === targetOpen)) {
+        baseArr.unshift({
           name: targetOpen.split('/').pop() || 'Artifact',
           path: targetOpen,
           size: 0,
           mtime: Date.now(),
         });
       }
-      setArtifacts(arr);
+      setArtifacts(baseArr);
       setSelected((prev) => {
         if (targetOpen) {
-          const matched = arr.find((x) => x.path === targetOpen);
+          const matched = baseArr.find((x) => x.path === targetOpen);
           if (matched) return matched;
         }
-        return prev && arr.some((x) => x.path === prev.path) ? prev : arr[0] ?? null;
+        if (prev) {
+          const refreshed = baseArr.find((x) => x.path === prev.path);
+          if (refreshed) return refreshed;
+        }
+        return baseArr.find((x) => x.requestFeedback && !x.answered) ?? baseArr[0] ?? null;
       });
     } catch {
       if (seq !== reqSeqRef.current) return;
@@ -115,13 +167,36 @@ export const ArtifactsPanel: React.FC<{ tab?: RightTab }> = ({ tab }) => {
   }
 
   const blocks = content ? splitArtifactMarkdownBlocks(content) : [];
+  const selectedBaseDir =
+    selected?.path && selected.path.includes('/')
+      ? selected.path.slice(0, selected.path.lastIndexOf('/'))
+      : undefined;
+  const needsReview = Boolean(selected?.requestFeedback && !selected?.answered);
+
+  const handleProceed = async () => {
+    if (!selected || submittingProceed) return;
+    setSubmittingProceed(true);
+    try {
+      await callHost(hostId, 'session.prompt', {
+        id: sessionId,
+        text: 'Proceed',
+      });
+      setSelected((prev) => (prev ? { ...prev, answered: true } : prev));
+      setArtifacts((prev) => prev.map((a) => (a.path === selected.path ? { ...a, answered: true } : a)));
+      pushToast({ text: 'Approved artifact — sent Proceed to agent', level: 'success' });
+    } catch (e) {
+      pushToast({ text: `Proceed failed: ${(e as Error).message}`, level: 'error' });
+    } finally {
+      setSubmittingProceed(false);
+    }
+  };
 
   const sendReviewComment = async (quote: string, sendNow: boolean) => {
     if (!selected || !commentText.trim()) return;
     if (sendNow) {
       try {
-        await callHost(activeHost.creds.id, 'session.comment', {
-          id: activeSession.id,
+        await callHost(hostId, 'session.comment', {
+          id: sessionId,
           comments: [
             {
               kind: 'artifact',
@@ -150,36 +225,46 @@ export const ArtifactsPanel: React.FC<{ tab?: RightTab }> = ({ tab }) => {
   return (
     <div data-testid="artifacts-panel" className="flex-1 flex flex-col min-h-0 text-xs">
       <div className="flex items-center justify-between gap-2 border-b border-[var(--border)] bg-[var(--bg-sidebar)] px-3 py-1.5">
-        <div className="flex items-center gap-1.5 overflow-x-auto">
+        <div className="flex items-center gap-1.5 overflow-x-auto min-w-0">
           {artifacts.map((a) => (
             <button
               key={a.path}
               type="button"
               onClick={() => setSelected(a)}
-              className={`inline-flex items-center gap-1 rounded-md px-2 py-0.5 whitespace-nowrap cursor-pointer ${
+              className={`inline-flex items-center gap-1 rounded-md px-2 py-1 text-[11px] shrink-0 cursor-pointer ${
                 selected?.path === a.path
                   ? 'bg-[var(--accent-soft)] text-[var(--accent)] font-medium'
                   : 'text-[var(--text-secondary)] hover:bg-[var(--bg-hover)]'
               }`}
             >
               <FileText className="w-3 h-3" />
-              {a.name}
+              <span className="max-w-[140px] truncate">{a.name}</span>
+              {a.requestFeedback && !a.answered && (
+                <span className="h-1.5 w-1.5 rounded-full bg-[var(--warning)] shrink-0" title="Awaiting review" />
+              )}
             </button>
           ))}
         </div>
         <button
           type="button"
           onClick={() => void loadList()}
-          className="rounded p-1 text-[var(--text-muted)] hover:bg-[var(--bg-hover)] cursor-pointer"
+          className="rounded p-1 text-[var(--text-muted)] hover:bg-[var(--bg-hover)] cursor-pointer shrink-0"
+          title="Refresh artifacts"
         >
           <RefreshCw className={`w-3.5 h-3.5 ${loading ? 'animate-spin' : ''}`} />
         </button>
       </div>
 
+      {selected?.summary && (
+        <div className="border-b border-[var(--border)] bg-[var(--bg-surface)]/60 px-3.5 py-1.5 text-[11px] text-[var(--text-secondary)] truncate">
+          {selected.summary}
+        </div>
+      )}
+
       {subagents.length > 0 && (
         <div
-          data-testid="artifacts-subagents-strip"
-          className="border-b border-[var(--border)] bg-[var(--bg-surface)]/70 px-3 py-2 space-y-1 max-h-36 overflow-y-auto"
+          data-testid="artifacts-subagents-section"
+          className="border-b border-[var(--border)] bg-[var(--bg-surface)]/50 px-3 py-2 space-y-1.5"
         >
           <div className="text-[10px] font-semibold uppercase tracking-wider text-[var(--text-muted)]">
             Subagents ({subagents.length})
@@ -247,11 +332,11 @@ export const ArtifactsPanel: React.FC<{ tab?: RightTab }> = ({ tab }) => {
                   setCommentText('');
                 }}
                 title="Comment on this section"
-                className="absolute right-2 top-2 opacity-0 group-hover:opacity-100 rounded-md border border-[var(--border)] bg-[var(--bg-elevated)] p-1 text-[var(--accent)] cursor-pointer"
+                className="absolute right-2 top-2 opacity-0 group-hover:opacity-100 focus:opacity-100 rounded-md border border-[var(--border)] bg-[var(--bg-elevated)] p-1 text-[var(--accent)] cursor-pointer"
               >
                 <MessageSquarePlus className="w-3.5 h-3.5" />
               </button>
-              <MarkdownRenderer text={blk} citable />
+              <MarkdownRenderer text={blk} citable baseDir={selectedBaseDir} hostId={hostId} />
               {commentBlockIdx === bi && (
                 <div className="mt-2 rounded-lg border border-[var(--accent)]/40 bg-[var(--bg-sidebar)] p-2 space-y-2">
                   <textarea
@@ -292,6 +377,39 @@ export const ArtifactsPanel: React.FC<{ tab?: RightTab }> = ({ tab }) => {
           ))
         )}
       </div>
+
+      {needsReview && (
+        <div
+          data-testid="artifact-review-bar"
+          className="flex flex-wrap items-center justify-between gap-2 border-t border-[var(--warning)]/35 bg-[var(--bg-surface)] px-3.5 py-2.5"
+        >
+          <span className="text-xs font-medium text-[var(--text-secondary)]">
+            Agent requested your review on <span className="font-mono text-[var(--text-primary)]">{selected?.name}</span>
+          </span>
+          <div className="flex items-center gap-2 ml-auto">
+            <button
+              type="button"
+              onClick={() => {
+                setCommentBlockIdx(0);
+                setCommentText('');
+              }}
+              className="rounded-lg border border-[var(--border-strong)] bg-[var(--bg-base)] px-3 py-1.5 text-xs font-medium text-[var(--text-primary)] hover:bg-[var(--bg-hover)] cursor-pointer"
+            >
+              Comment
+            </button>
+            <button
+              type="button"
+              data-testid="artifact-proceed-btn"
+              disabled={submittingProceed}
+              onClick={() => void handleProceed()}
+              className="inline-flex items-center gap-1.5 rounded-lg bg-[var(--accent)] px-3.5 py-1.5 text-xs font-semibold text-[var(--accent-fg)] hover:opacity-90 disabled:opacity-50 cursor-pointer"
+            >
+              <CheckCircle2 className="w-3.5 h-3.5" />
+              {submittingProceed ? 'Sending…' : 'Proceed'}
+            </button>
+          </div>
+        </div>
+      )}
     </div>
   );
 };

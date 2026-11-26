@@ -429,13 +429,7 @@ fun FilesScreen(initialPath: String, standalone: Boolean = false) {
         bottomBar = { if (!standalone) BottomTabs(nav) },
     ) { pad ->
         Column(Modifier.padding(pad).fillMaxSize()) {
-            if (allConns.size > 1 && !standalone) {
-                HostSelectorBar(
-                    conns = allConns,
-                    activeHostId = hostId,
-                    onSelect = { id -> selectActiveHost(g.prefs, scope, id) },
-                )
-            }
+            // Host switching is handled cleanly by the TopAppBar dropdown (no duplicate stacked bar).
             ConnectionBanner(conn)
             val activeDownloads by FileTransfer.downloads.collectAsState()
             activeDownloads.firstOrNull { it.hostId == hostId }?.let { dl ->

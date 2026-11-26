@@ -34,6 +34,7 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
@@ -414,7 +415,7 @@ fun WorkbenchV2Section(
             onDismissRequest = { showNewTask = false },
             title = { Text("New Scheduled Task") },
             text = {
-                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Column(Modifier.verticalScroll(androidx.compose.foundation.rememberScrollState()), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     OutlinedTextField(name, { name = it }, label = { Text("Name") }, singleLine = true)
                     OutlinedTextField(cron, { cron = it }, label = { Text("Cron (5-field)") }, singleLine = true)
                     OutlinedTextField(cwd, { cwd = it }, label = { Text("Folder") }, singleLine = true)

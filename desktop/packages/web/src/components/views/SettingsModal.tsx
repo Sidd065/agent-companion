@@ -1,4 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { confirmAction } from '../shell/ConfirmDialog.js';
 import {
   Activity,
   Archive,
@@ -351,7 +352,22 @@ export const SettingsModal: React.FC = () => {
 
   if (!settingsModalOpen) return null;
 
-  const filteredTabs = TABS.filter((t) => !search.trim() || t.label.toLowerCase().includes(search.toLowerCase()));
+  const TAB_KEYWORDS: Record<string, string> = {
+    general: 'notification notifications desktop tray working shelf group threads shortcut enter follow-up steer queue action required completed halted auto-allow antigravity read requests',
+    appearance: 'theme light dark font size obsidian paper tokyo catppuccin solarized custom css chat width math katex',
+    hosts: 'pair host remote daemon devices unpair cloudflare static quick tunnel url',
+    providers: 'providers acp claude codex antigravity openrouter api key custom model slug',
+    chat: 'chat diffs wrap word split unified',
+    keybindings: 'keyboard shortcuts keybindings hotkeys ctrl',
+    projects: 'projects scripts worktree git init clone',
+    health: 'diagnostics health logs memory pid uptime',
+    archive: 'archive archived restore settled threads',
+    about: 'about version license agent companion',
+  };
+  const qLower = search.trim().toLowerCase();
+  const filteredTabs = TABS.filter(
+    (t) => !qLower || t.label.toLowerCase().includes(qLower) || (TAB_KEYWORDS[t.id] || '').includes(qLower),
+  );
   const archivedSessions = allSessions.filter((s) => s.archived);
   const hostProjects: Project[] = targetHost?.projects ?? [];
   const selectedProj = hostProjects.find((p) => p.id === selectedProjId) ?? hostProjects[0] ?? null;
@@ -479,12 +495,21 @@ export const SettingsModal: React.FC = () => {
     setRenameHostValue('');
   };
 
+  const effectiveTab = filteredTabs.some((t) => t.id === tab) ? tab : (filteredTabs[0]?.id ?? tab);
+
   return (
     <div
       data-testid="settings-modal"
+      onClick={() => setSettingsModalOpen(false)}
+      onKeyDown={(e) => {
+        if (e.key === 'Escape') setSettingsModalOpen(false);
+      }}
       className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-xs p-4"
     >
-      <div className="flex w-full max-w-4xl h-[82vh] rounded-2xl border border-[var(--border-strong)] bg-[var(--bg-surface)] shadow-2xl overflow-hidden text-xs">
+      <div
+        onClick={(e) => e.stopPropagation()}
+        className="flex w-full max-w-4xl h-[82vh] rounded-2xl border border-[var(--border-strong)] bg-[var(--bg-surface)] shadow-2xl overflow-hidden text-xs"
+      >
         {/* Left Nav */}
         <div className="w-56 shrink-0 border-r border-[var(--border)] bg-[var(--bg-sidebar)] flex flex-col">
           <div className="p-3 border-b border-[var(--border)]">
@@ -509,7 +534,7 @@ export const SettingsModal: React.FC = () => {
                   data-testid={`settings-tab-${t.id}`}
                   onClick={() => setTab(t.id)}
                   className={`flex w-full items-center gap-2 rounded-lg px-2.5 py-1.5 text-left transition cursor-pointer ${
-                    tab === t.id
+                    effectiveTab === t.id
                       ? 'bg-[var(--accent-soft)] text-[var(--accent)] font-medium'
                       : 'text-[var(--text-secondary)] hover:bg-[var(--bg-hover)] hover:text-[var(--text-primary)]'
                   }`}
@@ -524,7 +549,7 @@ export const SettingsModal: React.FC = () => {
             <button
               type="button"
               onClick={() => {
-                if (window.confirm('Reset all client settings to defaults?')) resetSettings();
+                void confirmAction({ title: 'Reset Settings', message: 'Reset all client settings to their defaults?', confirmLabel: 'Reset' }).then((ok) => { if (ok) resetSettings(); });
               }}
               className="flex w-full items-center justify-center gap-1.5 rounded-lg border border-[var(--border)] py-1.5 text-[11px] text-[var(--text-muted)] hover:text-[var(--danger)] cursor-pointer"
             >
@@ -537,9 +562,9 @@ export const SettingsModal: React.FC = () => {
         {/* Right Content */}
         <div className="flex-1 flex flex-col min-w-0 min-h-0">
           <div className="flex items-center justify-between gap-2 border-b border-[var(--border)] px-5 py-3">
-            <div className="text-sm font-semibold">{TABS.find((t) => t.id === tab)?.label ?? 'Settings'}</div>
+            <div className="text-sm font-semibold">{TABS.find((t) => t.id === effectiveTab)?.label ?? 'Settings'}</div>
             <div className="flex items-center gap-2">
-              {HOST_SCOPED_TABS.has(tab) && hostList.length > 1 && (
+              {HOST_SCOPED_TABS.has(effectiveTab) && hostList.length > 1 && (
                 <div className="inline-flex items-center gap-1.5">
                   <Server className="w-3.5 h-3.5 text-[var(--accent)]" />
                   <select
@@ -572,7 +597,7 @@ export const SettingsModal: React.FC = () => {
 
           <div className="flex-1 overflow-y-auto p-5 space-y-4">
             {/* GENERAL */}
-            {tab === 'general' && (
+            {effectiveTab === 'general' && (
               <div className="space-y-4">
                 <div className="flex items-center justify-between rounded-xl border border-[var(--border)] bg-[var(--bg-base)] p-3">
                   <div>
@@ -699,7 +724,7 @@ export const SettingsModal: React.FC = () => {
             )}
 
             {/* APPEARANCE */}
-            {tab === 'appearance' && (
+            {effectiveTab === 'appearance' && (
               <div className="space-y-4">
                 <div>
                   <div className="font-medium mb-2">Theme Palette</div>
@@ -794,7 +819,7 @@ export const SettingsModal: React.FC = () => {
             )}
 
             {/* HOSTS & DEVICES */}
-            {tab === 'hosts' && (
+            {effectiveTab === 'hosts' && (
               <div className="space-y-4">
                 <div className="flex items-center justify-between">
                   <div className="font-medium">Paired Hosts ({hostList.length})</div>
@@ -959,7 +984,7 @@ export const SettingsModal: React.FC = () => {
             )}
 
             {/* PROVIDERS & ACP */}
-            {tab === 'providers' && (
+            {effectiveTab === 'providers' && (
               <div className="space-y-4">
                 <div className="flex items-center justify-between">
                   <div>
@@ -1318,7 +1343,7 @@ export const SettingsModal: React.FC = () => {
             )}
 
             {/* CHAT & DIFFS */}
-            {tab === 'chat' && (
+            {effectiveTab === 'chat' && (
               <div className="space-y-4">
                 <div className="flex items-center justify-between rounded-xl border border-[var(--border)] bg-[var(--bg-base)] p-3">
                   <div>
@@ -1395,7 +1420,7 @@ export const SettingsModal: React.FC = () => {
             )}
 
             {/* KEYBINDINGS */}
-            {tab === 'keybindings' && (
+            {effectiveTab === 'keybindings' && (
               <div className="space-y-3">
                 <div className="flex items-center justify-between">
                   <div className="text-[11px] text-[var(--text-muted)]">
@@ -1441,7 +1466,7 @@ export const SettingsModal: React.FC = () => {
             )}
 
             {/* PROJECTS & SCRIPTS */}
-            {tab === 'projects' && (
+            {effectiveTab === 'projects' && (
               <div className="space-y-4">
                 {hostProjects.length === 0 ? (
                   <div className="py-8 text-center text-[var(--text-muted)]">No projects registered on this host yet.</div>
@@ -1530,7 +1555,7 @@ export const SettingsModal: React.FC = () => {
             )}
 
             {/* DIAGNOSTICS & HOST HEALTH (Linux PSI) */}
-            {tab === 'health' && (
+            {effectiveTab === 'health' && (
               <div className="space-y-4">
                 <div className="flex items-center justify-between">
                   <div className="font-medium">Linux Daemon Host Health &amp; Memory Pressure (PSI)</div>
@@ -1610,7 +1635,7 @@ export const SettingsModal: React.FC = () => {
             )}
 
             {/* ARCHIVE */}
-            {tab === 'archive' && (
+            {effectiveTab === 'archive' && (
               <div className="space-y-2">
                 {archivedSessions.length === 0 ? (
                   <div className="py-10 text-center text-[var(--text-muted)]">No archived threads.</div>
@@ -1660,7 +1685,7 @@ export const SettingsModal: React.FC = () => {
             )}
 
             {/* ABOUT */}
-            {tab === 'about' && (
+            {effectiveTab === 'about' && (
               <div className="space-y-3 text-xs text-[var(--text-secondary)]">
                 <div className="text-base font-semibold text-[var(--text-primary)]">Agent Companion Desktop</div>
                 <p>
@@ -1669,7 +1694,7 @@ export const SettingsModal: React.FC = () => {
                   hosts.
                 </p>
                 <div className="rounded-xl border border-[var(--border)] bg-[var(--bg-base)] p-3 font-mono text-[11px] space-y-1">
-                  <div>Desktop Version: {window.agentcDesktop?.version || '0.6.0'}</div>
+                  <div>Desktop Version: {window.agentcDesktop?.version || '0.6.1'}</div>
                   <div>Protocol Version: v{targetHost?.info?.protocolVersion ?? 2}</div>
                   <div>Active Daemon: {targetHost?.info?.version ?? 'not connected'}</div>
                   <div>OpenRouter Configured: {targetHost?.info?.openRouterConfigured ? 'yes' : 'no'}</div>

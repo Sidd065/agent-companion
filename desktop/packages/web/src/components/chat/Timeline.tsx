@@ -489,13 +489,19 @@ export const Timeline: React.FC<Props> = ({
     setAtBottom(dist < 64);
   };
 
-  // Detect stalled turn (> 10 minutes with no updates while running)
+  // Detect stalled turn (> 10 minutes with no updates while running), updating every 30s
   const isRunning = session.state === 'running' || session.state === 'waiting';
+  const [stalledNow, setStalledNow] = useState(() => Date.now());
+  useEffect(() => {
+    if (!isRunning) return;
+    const timer = setInterval(() => setStalledNow(Date.now()), 30_000);
+    return () => clearInterval(timer);
+  }, [isRunning]);
   const lastActivityTs = useMemo(() => {
     const last = items[items.length - 1];
     return last?.ts || session.turnStart || session.updatedAt || Date.now();
   }, [items, session.turnStart, session.updatedAt]);
-  const isStalled = isRunning && Date.now() - lastActivityTs > 10 * 60 * 1000;
+  const isStalled = isRunning && stalledNow - lastActivityTs > 10 * 60 * 1000;
 
   // Actions
   const handleCopy = (id: string, text: string) => {
@@ -829,7 +835,7 @@ export const Timeline: React.FC<Props> = ({
                       key={a.id}
                       id={`msg-${a.id}`}
                       data-testid="agent-message"
-                      className={`rounded-xl ${
+                      className={`group/agent relative rounded-xl ${
                         isHaltedAlert
                           ? 'border border-[var(--danger)]/45 bg-[var(--danger)]/10 px-3.5 py-2.5 text-[var(--text-primary)]'
                           : 'px-1 py-0.5 text-[var(--text-primary)]'
@@ -838,6 +844,24 @@ export const Timeline: React.FC<Props> = ({
                       }`}
                     >
                       {a.text && <MarkdownRenderer text={a.text} citable />}
+                      {a.text && (
+                        <div className="mt-1 flex items-center justify-end gap-1 opacity-0 group-hover/agent:opacity-100 group-focus-within/agent:opacity-100 transition-opacity">
+                          <button
+                            type="button"
+                            onClick={() => handleCopy(a.id, a.text || '')}
+                            className="inline-flex items-center gap-1 rounded border border-[var(--border)] bg-[var(--bg-surface)] px-1.5 py-0.5 text-[10.5px] text-[var(--text-muted)] hover:text-[var(--text-primary)] cursor-pointer"
+                          >
+                            {copiedId === a.id ? 'Copied' : 'Copy'}
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => void handleFork(a.id)}
+                            className="inline-flex items-center gap-1 rounded border border-[var(--border)] bg-[var(--bg-surface)] px-1.5 py-0.5 text-[10.5px] text-[var(--text-muted)] hover:text-[var(--text-primary)] cursor-pointer"
+                          >
+                            Fork
+                          </button>
+                        </div>
+                      )}
                     </div>
                   );
                 })}

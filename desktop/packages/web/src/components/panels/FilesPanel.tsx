@@ -1,4 +1,5 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
+import { formatHostDisplayName } from '../../utils/multiHost.js';
 import {
   ChevronUp,
   Download,
@@ -249,6 +250,7 @@ export const FilesPanel: React.FC<{ tab: RightTab }> = ({ tab }) => {
   const openFileRef = useRef<ReadResult | null>(openFile);
   openFileRef.current = openFile;
   const [videoUrl, setVideoUrl] = useState<string | null>(null);
+  const [imageUrl, setImageUrl] = useState<string | null>(null);
   const viewerScrollRef = useRef<HTMLDivElement | null>(null);
   const [editMode, setEditMode] = useState(false);
   const [editText, setEditText] = useState('');
@@ -702,6 +704,57 @@ export const FilesPanel: React.FC<{ tab: RightTab }> = ({ tab }) => {
   }, [openFile?.path, tab.line, rightTabFocusSeq]);
 
   // Stream video preview when openFile is an mp4/webm/mov file
+  const isImageFile = Boolean(
+    openFile &&
+      (openFile.mime?.startsWith('image/') || /\.(png|jpe?g|gif|webp|bmp|svg|ico)$/i.test(openFile.path)),
+  );
+  useEffect(() => {
+    if (!isImageFile || !openFile || !hostId || (!openFile.truncated && openFile.base64)) {
+      setImageUrl((prev) => {
+        if (prev) URL.revokeObjectURL(prev);
+        return null;
+      });
+      return;
+    }
+    let cancelled = false;
+    let createdUrl = '';
+    (async () => {
+      try {
+        const chunks: Uint8Array[] = [];
+        let offset = 0;
+        let mime = openFile.mime || 'image/png';
+        while (!cancelled && offset < 32 * 1024 * 1024) {
+          const res = await callHost<DownloadChunkResult>(hostId, 'fs.download', {
+            path: openFile.path,
+            offset,
+            length: UPLOAD_CHUNK_BYTES,
+          });
+          const bytes = res.data ? base64ToBytes(res.data) : new Uint8Array(0);
+          if (bytes.length > 0) chunks.push(bytes);
+          offset += bytes.length;
+          if (res.mime) mime = res.mime;
+          if (res.eof || bytes.length === 0) break;
+        }
+        if (cancelled || chunks.length === 0) return;
+        const total = chunks.reduce((acc, c) => acc + c.length, 0);
+        const merged = new Uint8Array(total);
+        let pos = 0;
+        for (const c of chunks) {
+          merged.set(c, pos);
+          pos += c.length;
+        }
+        createdUrl = URL.createObjectURL(new Blob([merged], { type: mime }));
+        setImageUrl(createdUrl);
+      } catch {
+        // ignore image stream error
+      }
+    })();
+    return () => {
+      cancelled = true;
+      if (createdUrl) URL.revokeObjectURL(createdUrl);
+    };
+  }, [isImageFile, openFile?.path, openFile?.truncated, openFile?.base64, hostId, callHost]);
+
   const isVideo = Boolean(
     openFile &&
       (openFile.mime?.startsWith('video/') || /\.(mp4|webm|mov|m4v)$/i.test(openFile.path)),
@@ -754,7 +807,7 @@ export const FilesPanel: React.FC<{ tab: RightTab }> = ({ tab }) => {
   }, [isVideo, openFile?.path, hostId, callHost]);
 
   const listToDisplay = searchResults ?? entries;
-  const isImage = Boolean(openFile?.mime?.startsWith('image/') && openFile?.base64);
+  const resolvedImageSrc = isImageFile ? (openFile && !openFile.truncated && openFile.base64 ? `data:${openFile.mime || 'image/png'};base64,${openFile.base64}` : imageUrl) : null;
   const isMarkdown = Boolean(openFile?.path.toLowerCase().endsWith('.md') && (!tab.line || tab.line <= 0));
 
   return (
@@ -773,7 +826,7 @@ export const FilesPanel: React.FC<{ tab: RightTab }> = ({ tab }) => {
               >
                 {hostList.map((h) => (
                   <option key={h.creds.id} value={h.creds.id}>
-                    {h.creds.name} ({h.state})
+                    {formatHostDisplayName(h, hostList)} ({h.state})
                   </option>
                 ))}
               </select>
@@ -1057,8 +1110,14 @@ export const FilesPanel: React.FC<{ tab: RightTab }> = ({ tab }) => {
         ) : (
           <>
             <div className="flex items-center justify-between gap-2 border-b border-[var(--border)] bg-[var(--bg-surface)] px-3 py-1.5">
-              <div className="font-mono text-[11.5px] truncate text-[var(--text-primary)]">
-                {openFile.path} {dirty && <span className="text-[var(--warning)]">●</span>}
+              <div className="min-w-0 flex items-baseline gap-1.5 truncate" title={openFile.path}>
+                <span className="font-mono text-[11.5px] font-semibold text-[var(--text-primary)] shrink-0">
+                  {openFile.path.split('/').pop() || openFile.path}
+                </span>
+                <span className="font-mono text-[10.5px] text-[var(--text-muted)] truncate">
+                  {openFile.path}
+                </span>
+                {dirty && <span className="text-[var(--warning)] shrink-0">●</span>}
               </div>
               <div className="flex items-center gap-1.5 shrink-0">
                 <button
@@ -1120,7 +1179,7 @@ export const FilesPanel: React.FC<{ tab: RightTab }> = ({ tab }) => {
               </div>
             </div>
 
-            {openFile.truncated && (
+            {openFile.truncated && !openFile.binary && !isImageFile && !isVideo && (
               <div
                 data-testid="files-truncated-banner"
                 className="flex items-center justify-between gap-2 border-b border-[var(--warning)]/40 bg-[var(--warning)]/10 px-3 py-1.5 text-[11px] text-[var(--warning)]"
@@ -1133,13 +1192,17 @@ export const FilesPanel: React.FC<{ tab: RightTab }> = ({ tab }) => {
             )}
 
             <div ref={viewerScrollRef} className="flex-1 overflow-auto min-h-0">
-              {isImage ? (
+              {isImageFile ? (
                 <div className="p-4 flex items-center justify-center">
-                  <img
-                    src={`data:${openFile.mime};base64,${openFile.base64}`}
-                    alt={openFile.path}
-                    className="max-w-full max-h-[70vh] rounded-lg border border-[var(--border)]"
-                  />
+                  {resolvedImageSrc ? (
+                    <img
+                      src={resolvedImageSrc}
+                      alt={openFile.path.split('/').pop() || openFile.path}
+                      className="max-w-full max-h-[70vh] rounded-lg border border-[var(--border)] object-contain"
+                    />
+                  ) : (
+                    <div className="py-12 text-xs text-[var(--text-muted)] animate-pulse">Loading full-resolution image…</div>
+                  )}
                 </div>
               ) : isVideo && videoUrl ? (
                 <div className="p-4 flex items-center justify-center">
@@ -1173,7 +1236,7 @@ export const FilesPanel: React.FC<{ tab: RightTab }> = ({ tab }) => {
                 />
               ) : isMarkdown ? (
                 <div className="p-4">
-                  <MarkdownRenderer text={openFile.text ?? ''} citable />
+                  <MarkdownRenderer text={openFile.text ?? ''} citable baseDir={openFile.path.slice(0, Math.max(0, openFile.path.lastIndexOf('/'))) || undefined} hostId={hostId} />
                 </div>
               ) : (
                 <div className="font-mono text-[12px] leading-[1.55] p-2">

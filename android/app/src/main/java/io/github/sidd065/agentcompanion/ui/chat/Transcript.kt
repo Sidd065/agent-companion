@@ -10,6 +10,8 @@ import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -294,8 +296,11 @@ fun buildRows(items: List<Item>, showThoughts: Boolean): List<Row> {
     for (it in items) {
         if (it.kind == "thought" && !showThoughts) continue
         if (it.kind == "tool" && it.tool?.callId in carded) continue
-        val groupable = it.kind == "tool" && it.tool != null && it.tool.name != "ask_question" && !it.tool.isPlanArtifact() &&
-            it.tool.name != "AskUserQuestion" && it.tool.name != "ExitPlanMode" && it.tool.name != "Agent" && it.tool.name != "Task"
+        val isAnsweredToolPerm = it.kind == "perm" && it.state != "pending" && it.perm != null &&
+            (it.perm.kind.isNullOrBlank() || it.perm.kind == "tool")
+        val groupable = (it.kind == "tool" && it.tool != null && it.tool.name != "ask_question" && !it.tool.isPlanArtifact() &&
+            it.tool.name != "AskUserQuestion" && it.tool.name != "ExitPlanMode" && it.tool.name != "Agent" && it.tool.name != "Task") ||
+            isAnsweredToolPerm
         if (groupable) run.add(it) else {
             flush()
             out.add(Row.Single(it))
@@ -578,7 +583,9 @@ fun ToolGroup(items: List<Item>, actions: TranscriptActions, defaultOpen: Boolea
         }
         AnimatedVisibility(open) {
             Column {
-                items.forEach { ToolRow(it, actions, wrap, cwd, indent = true) }
+                items.forEach {
+                    if (it.kind == "perm") PermCard(it, actions) else ToolRow(it, actions, wrap, cwd, indent = true)
+                }
             }
         }
     }
@@ -668,8 +675,8 @@ fun ToolDetails(t: Tool, actions: TranscriptActions, wrap: Boolean) {
         }
         t.name == "ExitPlanMode" -> {
             t.input.str("plan")?.let { plan ->
-                Box(Modifier.fillMaxWidth().heightIn(max = 480.dp).clip(RoundedCornerShape(8.dp)).border(1.dp, ex.cardBorder, RoundedCornerShape(8.dp)).padding(10.dp)) {
-                    MarkdownText(plan)
+                Box(Modifier.fillMaxWidth().heightIn(max = 420.dp).clip(RoundedCornerShape(8.dp)).border(1.dp, ex.cardBorder, RoundedCornerShape(8.dp)).verticalScroll(rememberScrollState()).padding(10.dp)) {
+                    MarkdownText(plan, immediate = true)
                 }
             }
             t.input.str("planFilePath")?.let { p -> TextButton(onClick = { actions.onOpenFile(p) }) { Text("Open plan") } }
@@ -794,7 +801,16 @@ fun PermCard(item: Item, actions: TranscriptActions) {
                 Spacer(Modifier.width(6.dp))
                 Text(status, style = MaterialTheme.typography.labelMedium, color = tint)
                 Spacer(Modifier.width(8.dp))
-                Text(p.title.orEmpty(), style = MaterialTheme.typography.labelSmall, fontFamily = FontFamily.Monospace, color = ex.muted,
+                val compactTitle = remember(p.title) {
+                    val raw = p.title.orEmpty().trim()
+                    if (raw.startsWith("File ") && raw.contains('/')) {
+                        val fp = raw.removePrefix("File ").trim()
+                        val fname = fp.substringAfterLast('/')
+                        val parent = fp.substringBeforeLast('/', "").substringAfterLast('/')
+                        if (parent.isNotBlank()) "$fname · …/$parent" else fname
+                    } else raw
+                }
+                Text(compactTitle, style = MaterialTheme.typography.labelSmall, fontFamily = FontFamily.Monospace, color = ex.muted,
                     maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
             }
             if (open) CommandBox(permCommand(p, actions) ?: p.title ?: "tool call")
@@ -816,8 +832,28 @@ fun PermCard(item: Item, actions: TranscriptActions) {
                 Spacer(Modifier.width(8.dp))
                 Text(verb, style = MaterialTheme.typography.titleSmall)
             }
-            // A shell request shows the whole command (the title is only its first line).
-            CommandBox(permCommand(p, actions) ?: p.title ?: "tool call")
+            // A shell request shows the whole command; a file read/write request highlights basename + directory.
+            val cmdStr = permCommand(p, actions)
+            val rawTitle = p.title?.trim().orEmpty()
+            if (cmdStr == null && rawTitle.startsWith("File ") && rawTitle.contains('/')) {
+                val fp = rawTitle.removePrefix("File ").trim()
+                val fname = fp.substringAfterLast('/')
+                val dir = fp.substringBeforeLast('/', "")
+                Surface(
+                    Modifier.fillMaxWidth(),
+                    shape = RoundedCornerShape(8.dp),
+                    color = MaterialTheme.colorScheme.surfaceContainerHighest,
+                ) {
+                    Column(Modifier.padding(horizontal = 10.dp, vertical = 8.dp), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                        Text(fname, style = MaterialTheme.typography.bodyMedium, fontFamily = FontFamily.Monospace, fontWeight = FontWeight.SemiBold)
+                        if (dir.isNotBlank()) {
+                            Text(dir, style = MaterialTheme.typography.labelSmall, fontFamily = FontFamily.Monospace, color = ex.muted)
+                        }
+                    }
+                }
+            } else {
+                CommandBox(cmdStr ?: p.title ?: "tool call")
+            }
             // An edit shows what it would change, not just the file name.
             p.callId?.let(actions.toolFor)?.let { t ->
                 val patch = t.patchLines()
@@ -849,8 +885,10 @@ fun PermCard(item: Item, actions: TranscriptActions) {
                         }
                     }
                     val allowOnceOpt = p.options.firstOrNull { it.kind.startsWith("allow") }
+                    val isReadLikeTool = p.toolKind == "read" || p.toolKind == "search" ||
+                        p.tool?.lowercase() in setOf("read_file", "readfile", "view_file", "grep_search", "find_by_name", "list_dir")
                     val isAgyRead = !actions.isClaude && !actions.isCodex &&
-                        (p.toolKind == "read" || p.toolKind == "search") &&
+                        isReadLikeTool &&
                         p.options.none { it.kind == "allow_always" } &&
                         allowOnceOpt != null
                     if (isAgyRead) {
@@ -921,10 +959,16 @@ data class Question(val text: String, val options: List<String>, val multi: Bool
 
 fun Tool.questions(): List<Question> = input.obj()?.get("questions").arr()?.mapNotNull { q ->
     val o = q.obj() ?: return@mapNotNull null
+    val opts = o["options"].arr()?.mapNotNull { el ->
+        (el as? JsonPrimitive)?.contentOrNull
+            ?: el.obj()?.let { obj -> obj.str("label") ?: obj.str("name") ?: obj.str("value") }
+    } ?: emptyList()
+    val multi = (o["is_multi_select"] as? JsonPrimitive)?.booleanOrNull == true ||
+        (o["multiSelect"] as? JsonPrimitive)?.booleanOrNull == true
     Question(
         o.str("question") ?: return@mapNotNull null,
-        o["options"].arr()?.mapNotNull { (it as? JsonPrimitive)?.contentOrNull } ?: emptyList(),
-        (o["is_multi_select"] as? JsonPrimitive)?.booleanOrNull == true,
+        opts,
+        multi,
     )
 } ?: emptyList()
 
@@ -976,7 +1020,17 @@ fun QuestionCard(item: Item, active: Boolean, actions: TranscriptActions) {
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
                 if (idx > 0) TextButton(onClick = { idx-- }) { Text("Previous") }
                 Spacer(Modifier.weight(1f))
-                TextButton(onClick = { if (idx < qs.size - 1) idx++ }) { Text("Skip") }
+                TextButton(onClick = {
+                    if (idx < qs.size - 1) {
+                        idx++
+                    } else {
+                        val text = qs.mapIndexed { i, qq ->
+                            val parts = answers[i].orEmpty() + listOfNotNull(other[i]?.takeIf { it.isNotBlank() })
+                            "${qq.text}: ${if (parts.isEmpty()) "(skipped)" else parts.joinToString(", ")}"
+                        }.joinToString("\n")
+                        actions.onSendText(text)
+                    }
+                }) { Text("Skip") }
                 val answered = !answers[idx].isNullOrEmpty() || !other[idx].isNullOrBlank()
                 if (idx < qs.size - 1) {
                     Button(onClick = { idx++ }, enabled = answered) { Text("Next") }
@@ -1019,8 +1073,8 @@ fun PlanReviewCard(item: Item, active: Boolean, actions: TranscriptActions) {
                 Icon(if (expanded) Icons.Outlined.ExpandLess else Icons.Outlined.ExpandMore, null)
             }
             if (expanded && content.isNotBlank()) {
-                Box(Modifier.fillMaxWidth().heightIn(max = 420.dp).clip(RoundedCornerShape(8.dp)).border(1.dp, ex.cardBorder, RoundedCornerShape(8.dp)).padding(10.dp)) {
-                    MarkdownText(content)
+                Box(Modifier.fillMaxWidth().heightIn(max = 420.dp).clip(RoundedCornerShape(8.dp)).border(1.dp, ex.cardBorder, RoundedCornerShape(8.dp)).verticalScroll(rememberScrollState()).padding(10.dp)) {
+                    MarkdownText(content, immediate = true)
                 }
             }
             if (path != null) {

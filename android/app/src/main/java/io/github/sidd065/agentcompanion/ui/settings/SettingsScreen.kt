@@ -179,7 +179,7 @@ fun SettingsScreen() {
             Section("About")
             Text("Agent Companion ${BuildConfig.VERSION_NAME}", style = MaterialTheme.typography.bodyMedium)
             Text(
-                "Connects to agentc daemons through Cloudflare quick tunnels with end-to-end encryption (Noise IK, X25519 + ChaCha20-Poly1305): " +
+                "Connects to agentc daemons over static or ephemeral Cloudflare tunnels and direct LAN/Tailscale links with end-to-end encryption (Noise IK, X25519 + ChaCha20-Poly1305): " +
                     "only phones paired with a one-time QR code can connect, and the tunnel only relays ciphertext. Notifications use Firebase Cloud Messaging.\n" +
                     "Terminal emulation: Termux terminal-emulator and terminal-view (Apache License 2.0).",
                 style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,

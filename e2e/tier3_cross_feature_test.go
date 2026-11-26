@@ -797,7 +797,12 @@ func TestTier3_11_ScheduledCodexTaskWithCustomOpenRouterSlug_RunNow(t *testing.T
 func TestTier3_12_CombinedHttp402RetryAndNonOpenAIApplyPatchBridge(t *testing.T) {
 	suiteMockOR.ResetOverrides()
 	suiteMockOR.ClearRequests()
-	td := sharedDaemon(t)
+	td := StartIsolatedDaemon(t, DaemonOpts{
+		EnableFakeACP: true,
+		Env: map[string]string{
+			"OPENROUTER_API_KEY": hermeticSharedSecret,
+		},
+	})
 	cli := td.PairAndConnect(t, "T3-12", "linux")
 	repo := newTempGitRepo(t, nil)
 	ctx := context.Background()

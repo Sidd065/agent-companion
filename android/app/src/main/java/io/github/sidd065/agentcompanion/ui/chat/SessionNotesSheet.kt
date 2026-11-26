@@ -195,7 +195,7 @@ fun SessionNotesSheet(
                 )
             }
 
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            androidx.compose.foundation.layout.FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
                 AssistChip(
                     onClick = {
                         val prefix = if (draft.isBlank() || draft.endsWith("\n")) "" else "\n"

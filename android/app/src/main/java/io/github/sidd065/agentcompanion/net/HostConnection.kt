@@ -201,18 +201,18 @@ class HostConnection(
 
     suspend fun refreshSessions(force: Boolean) {
         val res = rpc.call("sessions.list", params { put("force", force) })
-        _sessions.value = res.decode(ListSerializer(SessionSummary.serializer()))
+        _sessions.value = if (res is JsonNull) emptyList() else res.decode(ListSerializer(SessionSummary.serializer()))
         sessionsLoaded.value = true
     }
 
     suspend fun refreshTerms() {
         val res = rpc.call("term.list")
-        _terms.value = res.decode(ListSerializer(Term.serializer()))
+        _terms.value = if (res is JsonNull) emptyList() else res.decode(ListSerializer(Term.serializer()))
     }
 
     suspend fun refreshProjects() {
         val res = rpc.call("projects.list")
-        _projects.value = res.decode(ListSerializer(Project.serializer()))
+        _projects.value = if (res is JsonNull) emptyList() else res.decode(ListSerializer(Project.serializer()))
     }
 
     val protocolVersion: Int

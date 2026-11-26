@@ -45,8 +45,9 @@ func (s *Session) watchAgyState(p *agyproc.Proc) {
 			})
 		s.mu.Lock()
 		s.agy.known = false
+		closing := s.closing
 		s.mu.Unlock()
-		if ctx.Err() != nil {
+		if ctx.Err() != nil || closing || !p.Alive() {
 			return
 		}
 		if err != nil {

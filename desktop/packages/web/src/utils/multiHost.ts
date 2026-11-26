@@ -360,3 +360,41 @@ export function isProtectedDeletePath(entryPath: string, hostHome?: string): boo
   }
   return false;
 }
+
+
+export interface HostDisplayCandidate {
+  creds: {
+    id: string;
+    name: string;
+    url?: string;
+    localUrl?: string;
+  };
+}
+
+/**
+ * Disambiguates hosts that report identical `creds.name` values (e.g. two daemons on `dev-box`
+ * or local vs remote tunnel) by appending `(local)` or `(:port / authority)`.
+ */
+export function formatHostDisplayName(
+  host: HostDisplayCandidate,
+  allHosts: ReadonlyArray<HostDisplayCandidate>,
+): string {
+  const baseName = (host.creds.name || 'host').trim() || 'host';
+  const sameName = allHosts.filter((h) => ((h.creds.name || 'host').trim() || 'host') === baseName);
+  if (sameName.length <= 1) return baseName;
+
+  if (host.creds.localUrl) {
+    const othersHaveLocal = sameName.some((h) => h.creds.id !== host.creds.id && Boolean(h.creds.localUrl));
+    if (!othersHaveLocal) return `${baseName} (local)`;
+  }
+
+  const rawUrl = host.creds.url || host.creds.localUrl || '';
+  try {
+    const u = new URL(rawUrl);
+    if (u.port) return `${baseName} (:${u.port})`;
+    if (u.hostname && u.hostname !== baseName) return `${baseName} (${u.hostname})`;
+  } catch {
+    // ignore URL parse error
+  }
+  return `${baseName} (${host.creds.id.slice(0, 6)})`;
+}

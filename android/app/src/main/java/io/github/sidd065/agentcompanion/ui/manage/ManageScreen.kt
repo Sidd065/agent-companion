@@ -208,13 +208,7 @@ fun ManageScreen() {
         bottomBar = { BottomTabs(nav) },
     ) { pad ->
         Column(Modifier.padding(pad).fillMaxSize()) {
-            if (allConns.size > 1) {
-                HostSelectorBar(
-                    conns = allConns,
-                    activeHostId = conn.config.id,
-                    onSelect = { id -> selectActiveHost(g.prefs, scope, id) },
-                )
-            }
+            // Single clean host switcher lives in TopAppBar.
             Column(Modifier.weight(1f).fillMaxWidth().verticalScroll(rememberScrollState()).padding(horizontal = 12.dp)) {
             ConnectionBanner(conn)
             busy?.let { Text("$it…", style = MaterialTheme.typography.labelMedium, color = LocalExtra.current.muted, modifier = Modifier.padding(4.dp)) }
@@ -273,17 +267,30 @@ fun ManageScreen() {
                         TextButton(onClick = { revoking = o }) { Text("Unpair") }
                     }
                 }
+                var confirmRevokeOthers by remember { mutableStateOf(false) }
                 if (list != null && list.size > 1) {
                     OutlinedButton(
-                        onClick = {
-                            scope.launch {
-                                runCatching { conn.rpc.call("devices.revokeOthers") }
-                                    .onSuccess { snack.showSnackbar("Unpaired all other devices"); reload++ }
-                                    .onFailure { snack.showSnackbar("Revoke failed: ${it.message}") }
-                            }
-                        },
+                        onClick = { confirmRevokeOthers = true },
                         modifier = Modifier.padding(top = 6.dp),
                     ) { Text("Unpair all other devices") }
+                }
+                if (confirmRevokeOthers) {
+                    AlertDialog(
+                        onDismissRequest = { confirmRevokeOthers = false },
+                        title = { Text("Unpair all other devices?") },
+                        text = { Text("Every paired phone and desktop except this device will need to re-pair.") },
+                        confirmButton = {
+                            TextButton(onClick = {
+                                confirmRevokeOthers = false
+                                scope.launch {
+                                    runCatching { conn.rpc.call("devices.revokeOthers") }
+                                        .onSuccess { snack.showSnackbar("Unpaired all other devices"); reload++ }
+                                        .onFailure { snack.showSnackbar("Revoke failed: ${it.message}") }
+                                }
+                            }) { Text("Unpair others", color = LocalExtra.current.danger) }
+                        },
+                        dismissButton = { TextButton(onClick = { confirmRevokeOthers = false }) { Text("Cancel") } },
+                    )
                 }
                 Text("Pair another phone with `agentc pair` on ${conn.config.label}.", style = MaterialTheme.typography.labelSmall, color = LocalExtra.current.muted)
             }

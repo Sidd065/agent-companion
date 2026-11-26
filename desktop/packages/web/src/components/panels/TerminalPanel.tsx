@@ -13,6 +13,7 @@ import {
   Trash2,
 } from 'lucide-react';
 import { useApp, type RightTab } from '../../state/appStore.js';
+import { confirmAction } from '../shell/ConfirmDialog.js';
 import { resolveHostScopedCwd } from '../../utils/multiHost.js';
 
 interface Props {
@@ -375,7 +376,15 @@ export const TerminalPanel: React.FC<Props> = ({ tab, initialTermId, onCloseDraw
                 </button>
                 <button
                   type="button"
-                  onClick={() => void killTerminal(t.id)}
+                  onClick={() => {
+                    void confirmAction({
+                      title: 'Kill Terminal Session',
+                      message: `Terminate tmux session "${t.name || t.id}" on the host?`,
+                      confirmLabel: 'Kill Session',
+                    }).then((ok) => {
+                      if (ok) void killTerminal(t.id);
+                    });
+                  }}
                   title="Kill terminal"
                   className="opacity-50 group-hover:opacity-100 hover:text-[var(--danger)] cursor-pointer"
                 >

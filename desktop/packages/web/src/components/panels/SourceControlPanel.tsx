@@ -22,6 +22,7 @@ import type {
   WorktreeInfo,
 } from '@agentc/protocol';
 import { useApp } from '../../state/appStore.js';
+import { confirmAction } from '../shell/ConfirmDialog.js';
 import { resolveHostScopedCwd } from '../../utils/multiHost.js';
 
 interface CommitEntry {
@@ -146,8 +147,8 @@ export const SourceControlPanel: React.FC = () => {
   return (
     <div data-testid="source-control-panel" className="flex-1 flex flex-col min-h-0 text-xs">
       {/* Header + Subtabs */}
-      <div className="border-b border-[var(--border)] bg-[var(--bg-sidebar)] px-3 py-1.5 flex items-center justify-between gap-2">
-        <div className="flex items-center gap-1">
+      <div className="border-b border-[var(--border)] bg-[var(--bg-sidebar)] px-2.5 py-1.5 flex flex-wrap items-center justify-between gap-1.5">
+        <div className="flex flex-wrap items-center gap-1">
           {(
             [
               ['changes', `Changes (${status?.files?.length ?? 0})`],
@@ -192,11 +193,18 @@ export const SourceControlPanel: React.FC = () => {
           <button
             type="button"
             onClick={() => {
-              const allowDefault = status?.isDefaultBranch
-                ? window.confirm(`Push directly to default branch "${status.branch}"?`)
-                : false;
-              if (status?.isDefaultBranch && !allowDefault) return;
-              void runGit('git.push', { setUpstream: true, allowDefault }, 'Pushed branch');
+              void (async () => {
+                const allowDefault = status?.isDefaultBranch
+                  ? await confirmAction({
+                      title: 'Push to Default Branch',
+                      message: `Push commits directly to "${status.branch}"?`,
+                      confirmLabel: 'Push',
+                      danger: false,
+                    })
+                  : false;
+                if (status?.isDefaultBranch && !allowDefault) return;
+                await runGit('git.push', { setUpstream: true, allowDefault }, 'Pushed branch');
+              })();
             }}
             title="Push"
             className="inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-[11px] text-[var(--text-secondary)] hover:bg-[var(--bg-hover)] cursor-pointer"

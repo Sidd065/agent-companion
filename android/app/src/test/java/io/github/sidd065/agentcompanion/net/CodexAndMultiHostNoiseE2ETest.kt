@@ -104,11 +104,16 @@ class CodexAndMultiHostNoiseE2ETest {
                 .firstOrNull { File(it, "daemon/go.mod").isFile }
                 ?: error("Could not locate daemon/go.mod above $startDir")
             val daemonDir = File(repoRoot, "daemon")
-            val goBin = listOf(
+            val pathCandidates = System.getenv("PATH").orEmpty()
+                .split(File.pathSeparatorChar)
+                .filter { it.isNotBlank() }
+                .map { File(it, "go") }
+            val goBin = (listOf(
+                File(userHome, "tools/go-dl/go/bin/go"),
                 File(userHome, ".local/go/bin/go"),
                 File("/usr/local/go/bin/go"),
                 File("/usr/bin/go"),
-            ).firstOrNull { it.canExecute() } ?: error("Go toolchain not found")
+            ) + pathCandidates).firstOrNull { it.canExecute() } ?: error("Go toolchain not found")
 
             val agentcBin = File(scratch, "agentc")
             val build = ProcessBuilder(goBin.absolutePath, "build", "-o", agentcBin.absolutePath, ".")

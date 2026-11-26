@@ -1,4 +1,5 @@
 import React, { useEffect, useMemo, useState } from 'react';
+import { formatHostDisplayName } from '../../utils/multiHost.js';
 import {
   Folder,
   FolderGit2,
@@ -241,7 +242,7 @@ export const DraftView: React.FC<{ openModelPickerSignal?: number }> = ({ openMo
                     >
                       {hostList.map((h) => (
                         <option key={h.creds.id} value={h.creds.id}>
-                          {h.creds.name} ({h.state})
+                          {formatHostDisplayName(h, hostList)} ({h.state})
                         </option>
                       ))}
                     </select>
@@ -262,7 +263,7 @@ export const DraftView: React.FC<{ openModelPickerSignal?: number }> = ({ openMo
                     Add Project
                   </button>
                 </div>
-                <div className="flex gap-2">
+                <div className="flex flex-col gap-2">
                   {projects.length > 0 && (
                     <select
                       data-testid="draft-project-select"

@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import {
   FileCode2,
   FileDiff,
@@ -50,6 +50,25 @@ export const RightPanel: React.FC<{ widthPx: number }> = ({ widthPx }) => {
   } = useApp();
 
   const [pickerOpen, setPickerOpen] = useState(false);
+  const pickerRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!pickerOpen) return;
+    const onDocMouseDown = (e: MouseEvent) => {
+      if (pickerRef.current && !pickerRef.current.contains(e.target as Node)) {
+        setPickerOpen(false);
+      }
+    };
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setPickerOpen(false);
+    };
+    document.addEventListener('mousedown', onDocMouseDown);
+    window.addEventListener('keydown', onKeyDown);
+    return () => {
+      document.removeEventListener('mousedown', onDocMouseDown);
+      window.removeEventListener('keydown', onKeyDown);
+    };
+  }, [pickerOpen]);
 
   const activeTab = rightTabs.find((t) => t.id === activeRightTabId) ?? rightTabs[0] ?? null;
 
@@ -57,59 +76,68 @@ export const RightPanel: React.FC<{ widthPx: number }> = ({ widthPx }) => {
     <div
       data-testid="right-panel"
       style={rightPanelMaximized ? undefined : { width: widthPx }}
-      className={`flex flex-col min-h-0 border-l border-[var(--border)] bg-[var(--bg-base)] ${
+      className={`flex flex-col min-h-0 min-w-0 border-l border-[var(--border)] bg-[var(--bg-base)] ${
         rightPanelMaximized ? 'flex-1' : 'shrink-0'
       }`}
     >
-      {/* Multi-Tab Bar */}
+      {/* Multi-Tab Bar — keep + picker OUTSIDE overflow-x-auto so top-full popover is never clipped! */}
       <div className="flex items-center justify-between gap-1 border-b border-[var(--border)] bg-[var(--bg-sidebar)] px-2 py-1">
-        <div className="flex items-center gap-1 overflow-x-auto min-w-0">
-          {rightTabs.map((t) => {
-            const active = t.id === activeTab?.id;
-            const meta = TAB_CHOICES.find((c) => c.kind === t.kind);
-            const Icon = meta?.icon ?? FileDiff;
-            return (
-              <div
-                key={t.id}
-                className={`group inline-flex items-center gap-1.5 rounded-lg px-2 py-1 text-xs shrink-0 ${
-                  active
-                    ? 'bg-[var(--bg-surface)] text-[var(--text-primary)] font-medium border border-[var(--border)]'
-                    : 'text-[var(--text-secondary)] hover:bg-[var(--bg-hover)]'
-                }`}
-              >
-                <button
-                  type="button"
-                  onClick={() => setActiveRightTabId(t.id)}
-                  className="inline-flex items-center gap-1.5 cursor-pointer"
+        <div className="flex items-center gap-1 min-w-0 flex-1">
+          <div className="flex items-center gap-1 overflow-x-auto min-w-0 py-0.5">
+            {rightTabs.map((t) => {
+              const active = t.id === activeTab?.id;
+              const meta = TAB_CHOICES.find((c) => c.kind === t.kind);
+              const Icon = meta?.icon ?? FileDiff;
+              return (
+                <div
+                  key={t.id}
+                  className={`group inline-flex items-center gap-1.5 rounded-lg px-2 py-1 text-xs shrink-0 ${
+                    active
+                      ? 'bg-[var(--bg-surface)] text-[var(--text-primary)] font-medium border border-[var(--border)]'
+                      : 'text-[var(--text-secondary)] hover:bg-[var(--bg-hover)]'
+                  }`}
                 >
-                  <Icon className="w-3.5 h-3.5 text-[var(--accent)]" />
-                  <span className="max-w-[120px] truncate">{t.title}</span>
-                </button>
-                <button
-                  type="button"
-                  onClick={() => closeRightTab(t.id)}
-                  title="Close tab (Ctrl+W)"
-                  className="opacity-50 group-hover:opacity-100 hover:text-[var(--danger)] cursor-pointer"
-                >
-                  <X className="w-3 h-3" />
-                </button>
-              </div>
-            );
-          })}
+                  <button
+                    type="button"
+                    onClick={() => setActiveRightTabId(t.id)}
+                    className="inline-flex items-center gap-1.5 cursor-pointer"
+                  >
+                    <Icon className="w-3.5 h-3.5 text-[var(--accent)]" />
+                    <span className="max-w-[116px] truncate">{t.title}</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => closeRightTab(t.id)}
+                    title="Close tab (Ctrl+W)"
+                    className="opacity-60 group-hover:opacity-100 focus:opacity-100 hover:text-[var(--danger)] cursor-pointer"
+                  >
+                    <X className="w-3 h-3" />
+                  </button>
+                </div>
+              );
+            })}
+          </div>
 
-          {/* + Tab Picker */}
-          <div className="relative">
+          {/* + Tab Picker positioned outside the scroll container so dropdown renders freely */}
+          <div className="relative shrink-0" ref={pickerRef}>
             <button
               type="button"
               data-testid="right-panel-add-tab"
               onClick={() => setPickerOpen((v) => !v)}
               title="Open panel tab"
-              className="rounded-md p-1 text-[var(--text-muted)] hover:bg-[var(--bg-hover)] hover:text-[var(--text-primary)] cursor-pointer"
+              className={`rounded-md p-1 transition cursor-pointer ${
+                pickerOpen
+                  ? 'bg-[var(--accent-soft)] text-[var(--accent)]'
+                  : 'text-[var(--text-muted)] hover:bg-[var(--bg-hover)] hover:text-[var(--text-primary)]'
+              }`}
             >
               <Plus className="w-3.5 h-3.5" />
             </button>
             {pickerOpen && (
-              <div className="absolute left-0 top-full mt-1 z-40 w-44 rounded-xl border border-[var(--border-strong)] bg-[var(--bg-surface)] p-1 shadow-xl">
+              <div
+                data-testid="right-panel-tab-menu"
+                className="absolute right-0 sm:left-0 sm:right-auto top-full mt-1.5 z-50 w-48 rounded-xl border border-[var(--border-strong)] bg-[var(--bg-surface)] p-1 shadow-2xl"
+              >
                 {TAB_CHOICES.map((ch) => {
                   const Icon = ch.icon;
                   return (
@@ -118,11 +146,15 @@ export const RightPanel: React.FC<{ widthPx: number }> = ({ widthPx }) => {
                       type="button"
                       onClick={() => {
                         setPickerOpen(false);
-                        openRightTab({ ...(ch.kind === 'terminal' ? {} : { id: ch.kind }), kind: ch.kind, title: ch.title });
+                        openRightTab({
+                          ...(ch.kind === 'terminal' ? {} : { id: ch.kind }),
+                          kind: ch.kind,
+                          title: ch.title,
+                        });
                       }}
                       className="flex w-full items-center gap-2 rounded-lg px-2.5 py-1.5 text-left text-xs text-[var(--text-secondary)] hover:bg-[var(--bg-hover)] hover:text-[var(--text-primary)] cursor-pointer"
                     >
-                      <Icon className="w-3.5 h-3.5 text-[var(--accent)]" />
+                      <Icon className="w-3.5 h-3.5 text-[var(--accent)] shrink-0" />
                       <span>{ch.title}</span>
                     </button>
                   );
@@ -156,7 +188,7 @@ export const RightPanel: React.FC<{ widthPx: number }> = ({ widthPx }) => {
       </div>
 
       {/* Active Tab Content */}
-      <div className="flex-1 flex flex-col min-h-0">
+      <div className="flex-1 flex flex-col min-h-0 min-w-0">
         {!activeTab ? (
           <div className="flex-1 flex flex-col items-center justify-center gap-3 p-6 text-xs text-[var(--text-muted)]">
             <div>Choose a workbench panel:</div>
@@ -165,7 +197,13 @@ export const RightPanel: React.FC<{ widthPx: number }> = ({ widthPx }) => {
                 <button
                   key={ch.kind}
                   type="button"
-                  onClick={() => openRightTab({ ...(ch.kind === 'terminal' ? {} : { id: ch.kind }), kind: ch.kind, title: ch.title })}
+                  onClick={() =>
+                    openRightTab({
+                      ...(ch.kind === 'terminal' ? {} : { id: ch.kind }),
+                      kind: ch.kind,
+                      title: ch.title,
+                    })
+                  }
                   className="rounded-lg border border-[var(--border)] bg-[var(--bg-surface)] px-2.5 py-1.5 text-xs hover:bg-[var(--bg-hover)] cursor-pointer"
                 >
                   {ch.title}

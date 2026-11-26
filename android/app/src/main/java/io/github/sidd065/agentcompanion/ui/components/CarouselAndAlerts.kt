@@ -4,11 +4,13 @@ import android.widget.MediaController
 import android.widget.VideoView
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
@@ -165,11 +167,15 @@ fun isVideoPath(path: String): Boolean {
     return clean.substringAfterLast('.', "").lowercase() in videoExts
 }
 
-fun resolveArtifactMediaPath(src: String, baseDir: String = ""): String = when {
-    src.startsWith("file://") -> src.removePrefix("file://")
-    src.startsWith("/") || src.startsWith("http://") || src.startsWith("https://") -> src
-    baseDir.isNotBlank() -> baseDir.trimEnd('/') + "/" + src
-    else -> src
+fun resolveArtifactMediaPath(src: String, baseDir: String = ""): String {
+    val raw = when {
+        src.startsWith("file://") -> android.net.Uri.decode(src.removePrefix("file://").substringBefore('#'))
+        src.startsWith("http://") || src.startsWith("https://") -> return src
+        src.startsWith("/") -> android.net.Uri.decode(src.substringBefore('#'))
+        baseDir.isNotBlank() -> baseDir.trimEnd('/') + "/" + android.net.Uri.decode(src.substringBefore('#').removePrefix("./"))
+        else -> android.net.Uri.decode(src)
+    }
+    return raw
 }
 
 @Composable
@@ -414,15 +420,56 @@ private fun CarouselSlideBody(
         if (isVideoPath(resolved) && !resolved.startsWith("http")) {
             RemoteVideoPlayerCard(hostId = hostId, remotePath = resolved, caption = caption)
         } else {
+            var zoomOpen by remember { mutableStateOf(false) }
+            val imgModel: Any = if (resolved.startsWith("http") || hostId == null) resolved else RemoteImage(hostId, path = resolved)
             Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                AsyncImage(
-                    model = if (resolved.startsWith("http") || hostId == null) resolved else RemoteImage(hostId, path = resolved),
+                coil3.compose.SubcomposeAsyncImage(
+                    model = imgModel,
                     contentDescription = caption,
                     contentScale = ContentScale.FillWidth,
-                    modifier = Modifier.fillMaxWidth().heightIn(max = 420.dp).clip(RoundedCornerShape(8.dp)),
+                    loading = {
+                        Box(
+                            Modifier.fillMaxWidth().height(160.dp).clip(RoundedCornerShape(8.dp)).background(LocalExtra.current.codeBg),
+                            contentAlignment = Alignment.Center,
+                        ) {
+                            CircularProgressIndicator(Modifier.size(24.dp), strokeWidth = 2.dp)
+                        }
+                    },
+                    error = {
+                        Box(
+                            Modifier.fillMaxWidth().height(96.dp).clip(RoundedCornerShape(8.dp)).background(LocalExtra.current.codeBg).padding(12.dp),
+                            contentAlignment = Alignment.Center,
+                        ) {
+                            Text(
+                                "Media unavailable: ${caption.ifBlank { resolved.substringAfterLast('/') }}",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = LocalExtra.current.muted,
+                                maxLines = 2,
+                                overflow = TextOverflow.Ellipsis,
+                            )
+                        }
+                    },
+                    modifier = Modifier.fillMaxWidth().heightIn(max = 420.dp).clip(RoundedCornerShape(8.dp)).clickable { zoomOpen = true },
                 )
                 if (caption.isNotBlank()) {
                     Text(caption, style = MaterialTheme.typography.labelMedium, color = LocalExtra.current.muted)
+                }
+            }
+            if (zoomOpen) {
+                androidx.compose.ui.window.Dialog(
+                    onDismissRequest = { zoomOpen = false },
+                    properties = androidx.compose.ui.window.DialogProperties(usePlatformDefaultWidth = false),
+                ) {
+                    Surface(Modifier.fillMaxSize().clickable { zoomOpen = false }, color = androidx.compose.ui.graphics.Color.Black.copy(alpha = 0.92f)) {
+                        Box(Modifier.fillMaxSize().padding(16.dp), contentAlignment = Alignment.Center) {
+                            AsyncImage(
+                                model = imgModel,
+                                contentDescription = caption,
+                                contentScale = ContentScale.Fit,
+                                modifier = Modifier.fillMaxSize(),
+                            )
+                        }
+                    }
                 }
             }
         }

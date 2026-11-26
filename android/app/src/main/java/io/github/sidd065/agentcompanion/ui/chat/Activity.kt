@@ -12,6 +12,7 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -163,11 +164,16 @@ fun ActivitySheet(
                                 "artifacts" -> live.artifacts.size
                                 else -> live.messages.size
                             }
-                            // The count goes on its own line: "Messages (14)" doesn't fit a quarter of a phone.
                             Tab(selected = tab == i, onClick = { tab = i }, text = {
-                                Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                                    Text(l, maxLines = 1, softWrap = false)
-                                    if (n > 0) Text("$n", style = MaterialTheme.typography.labelSmall)
+                                Column(
+                                    modifier = Modifier.height(36.dp),
+                                    verticalArrangement = Arrangement.Center,
+                                    horizontalAlignment = Alignment.CenterHorizontally,
+                                ) {
+                                    Text(l, style = MaterialTheme.typography.labelMedium, maxLines = 1, softWrap = false)
+                                    if (n > 0) {
+                                        Text("$n", style = MaterialTheme.typography.labelSmall, color = if (tab == i) MaterialTheme.colorScheme.primary else LocalExtra.current.muted)
+                                    }
                                 }
                             })
                         }

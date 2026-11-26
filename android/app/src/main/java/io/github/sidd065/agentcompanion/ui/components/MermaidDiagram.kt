@@ -17,6 +17,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
@@ -794,8 +795,18 @@ fun MermaidDiagram(source: String, modifier: Modifier = Modifier) {
                 }
             } else {
                 val hs = rememberScrollState()
-                Box(Modifier.fillMaxWidth().horizontalScroll(hs).padding(bottom = 8.dp)) {
-                    MermaidCanvas(ast)
+                Column(Modifier.fillMaxWidth()) {
+                    Box(Modifier.fillMaxWidth().horizontalScroll(hs).padding(bottom = 6.dp)) {
+                        MermaidCanvas(ast)
+                    }
+                    if (hs.maxValue > 24) {
+                        Text(
+                            "Swipe diagram horizontally or tap ⛶ to expand →",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = LocalExtra.current.muted,
+                            modifier = Modifier.padding(horizontal = 12.dp, vertical = 4.dp),
+                        )
+                    }
                 }
             }
         }
@@ -829,7 +840,7 @@ fun MermaidDiagram(source: String, modifier: Modifier = Modifier) {
                     }
                     IconButton(
                         onClick = { fullscreen = false },
-                        modifier = Modifier.align(Alignment.TopEnd).padding(16.dp),
+                        modifier = Modifier.align(Alignment.TopEnd).statusBarsPadding().padding(16.dp),
                     ) {
                         Icon(Icons.Outlined.Close, "Close")
                     }

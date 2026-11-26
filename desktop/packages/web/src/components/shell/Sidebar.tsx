@@ -1,4 +1,6 @@
 import React, { useMemo, useState } from 'react';
+import { formatHostDisplayName } from '../../utils/multiHost.js';
+import { confirmAction } from './ConfirmDialog.js';
 import {
   Archive,
   CheckCircle2,
@@ -189,7 +191,7 @@ export const Sidebar: React.FC = () => {
   };
 
   const handleDelete = async (s: RowSession) => {
-    if (!confirm(`Permanently delete thread "${s.title}"?`)) return;
+    if (!(await confirmAction({ title: 'Delete Thread', message: `Permanently delete thread "${s.title}"?`, confirmLabel: 'Delete' }))) return;
     try {
       await callHost(s.hostId, 'session.delete', { id: s.id });
       pushToast({ text: 'Thread deleted', level: 'info' });
@@ -263,7 +265,7 @@ export const Sidebar: React.FC = () => {
 
         {/* Hover quick actions */}
         <div
-          className="hidden group-hover:flex items-center gap-0.5 absolute right-2 bottom-2 bg-[var(--bg-elevated)] border border-[var(--border)] rounded-md p-0.5 shadow"
+          className="hidden group-hover:flex group-focus-within:flex items-center gap-0.5 absolute right-2 top-1.5 bg-[var(--bg-elevated)] border border-[var(--border)] rounded-md p-0.5 shadow"
           onClick={(e) => e.stopPropagation()}
         >
           <button
@@ -400,7 +402,7 @@ export const Sidebar: React.FC = () => {
                         : 'bg-[var(--danger)]'
                   }`}
                 />
-                {h.creds.name}
+                {formatHostDisplayName(h, hostList)}
                 {(h.state === 'error' || h.state === 'reconnecting') && (
                   <RefreshCw
                     className="w-2.5 h-2.5 ml-0.5 opacity-80 hover:opacity-100"
@@ -433,7 +435,7 @@ export const Sidebar: React.FC = () => {
               </button>
             )}
           </div>
-          {allProjects.map((p) => {
+          {allProjects.filter((p) => selectedHostFilter === 'all' || p.hostId === selectedHostFilter).map((p) => {
             const filterKey = `${p.hostId}:${p.id}`;
             const active = selectedProjectFilter === filterKey || selectedProjectFilter === p.id;
             return (

@@ -8,6 +8,8 @@ import {
   resolveHostScopedCwd,
   upsertRightTab,
   type DraftLike,
+  formatHostDisplayName,
+  type HostDisplayCandidate,
   type HostLike,
   type RightTab,
 } from './multiHost.js';
@@ -253,5 +255,40 @@ describe('multiHost utilities', () => {
     expect(isProtectedDeletePath('sub/file.txt', '/home/user')).toBe(false);
     expect(isProtectedDeletePath('/home/user/.env', '/home/user')).toBe(false);
     expect(isProtectedDeletePath('/home/user/archive..tar.gz', '/home/user')).toBe(false);
+  });
+});
+
+describe('formatHostDisplayName', () => {
+  const localHost: HostDisplayCandidate = {
+    creds: {
+      id: 'local-id',
+      name: 'dev-box',
+      localUrl: 'http://127.0.0.1:8787',
+    },
+  };
+  const remoteSameName: HostDisplayCandidate = {
+    creds: {
+      id: 'remote-1',
+      name: 'dev-box',
+      url: 'http://127.0.0.1:44887',
+    },
+  };
+  const remoteCloudflare: HostDisplayCandidate = {
+    creds: {
+      id: 'remote-2',
+      name: 'rpi',
+      url: 'https://rpi-agentc.jdlf.cc',
+    },
+  };
+
+  it('returns plain name when host names are unique', () => {
+    expect(formatHostDisplayName(localHost, [localHost, remoteCloudflare])).toBe('dev-box');
+    expect(formatHostDisplayName(remoteCloudflare, [localHost, remoteCloudflare])).toBe('rpi');
+  });
+
+  it('disambiguates duplicate host names by localUrl, port, or hostname', () => {
+    const hosts = [localHost, remoteSameName];
+    expect(formatHostDisplayName(localHost, hosts)).toBe('dev-box (local)');
+    expect(formatHostDisplayName(remoteSameName, hosts)).toBe('dev-box (:44887)');
   });
 });

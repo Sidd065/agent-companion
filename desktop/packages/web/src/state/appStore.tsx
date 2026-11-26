@@ -929,7 +929,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
             ? `Desktop (${window.agentcDesktop.hostname})`
             : 'Agent Companion Web',
           platform: window.agentcDesktop ? 'linux-desktop' : 'web',
-          appVersion: window.agentcDesktop?.version ?? '0.6.0',
+          appVersion: window.agentcDesktop?.version ?? '0.6.1',
         },
       );
       supervisorsRef.current.set(creds.id, sup);
@@ -1082,7 +1082,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           ? `Desktop (${window.agentcDesktop.hostname})`
           : 'Agent Companion Web',
         platform: window.agentcDesktop ? 'linux-desktop' : 'web',
-        appVersion: window.agentcDesktop?.version ?? '0.6.0',
+        appVersion: window.agentcDesktop?.version ?? '0.6.1',
         isLocal,
       });
       mountSupervisor(credentials);

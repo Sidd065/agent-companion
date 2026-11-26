@@ -12,6 +12,8 @@ import {
 } from 'lucide-react';
 import type { ScheduledTask, ScheduleRunRecord } from '@agentc/protocol';
 import { useApp } from '../../state/appStore.js';
+import { formatHostDisplayName } from '../../utils/multiHost.js';
+import { confirmAction } from '../shell/ConfirmDialog.js';
 
 export interface ScheduleEditFormInit {
   editId: string;
@@ -205,7 +207,7 @@ export const SchedulesView: React.FC = () => {
   };
 
   const deleteTask = async (t: ScheduledTask) => {
-    if (!window.confirm(`Delete schedule "${t.name}"?`)) return;
+    if (!(await confirmAction({ title: 'Delete Schedule', message: `Delete scheduled task "${t.name}"?`, confirmLabel: 'Delete' }))) return;
     try {
       await callHost(hostId, 'schedules.delete', { id: t.id });
       pushToast({ text: `Deleted "${t.name}"`, level: 'info' });
@@ -241,7 +243,7 @@ export const SchedulesView: React.FC = () => {
               >
                 {hostList.map((h) => (
                   <option key={h.creds.id} value={h.creds.id}>
-                    {h.creds.name}
+                    {formatHostDisplayName(h, hostList)}
                   </option>
                 ))}
               </select>

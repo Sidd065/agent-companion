@@ -70,8 +70,11 @@ fun parseClaudeQuestions(input: kotlinx.serialization.json.JsonElement?): List<C
         ClaudeQuestion(
             o.str("question") ?: return@mapNotNull null,
             o.str("header").orEmpty(),
-            o["options"].arr()?.mapNotNull { op -> op.obj()?.let { (it.str("label") ?: return@mapNotNull null) to it.str("description").orEmpty() } } ?: emptyList(),
-            (o["multiSelect"] as? JsonPrimitive)?.booleanOrNull == true,
+            o["options"].arr()?.mapNotNull { op ->
+                (op as? JsonPrimitive)?.contentOrNull?.let { it to "" }
+                    ?: op.obj()?.let { (it.str("label") ?: it.str("name") ?: return@mapNotNull null) to it.str("description").orEmpty() }
+            } ?: emptyList(),
+            (o["multiSelect"] as? JsonPrimitive)?.booleanOrNull == true || (o["is_multi_select"] as? JsonPrimitive)?.booleanOrNull == true,
         )
     } ?: emptyList()
 
@@ -243,7 +246,7 @@ fun ClaudePlanCard(item: Item, actions: TranscriptActions) {
             if (expanded && plan.isNotBlank()) {
                 Box(Modifier.fillMaxWidth().heightIn(max = 460.dp).clip(RoundedCornerShape(8.dp)).border(1.dp, ex.cardBorder, RoundedCornerShape(8.dp))
                     .verticalScroll(rememberScrollState()).padding(10.dp)) {
-                    MarkdownText(plan)
+                    MarkdownText(plan, immediate = true)
                 }
             }
             if (!pending) {

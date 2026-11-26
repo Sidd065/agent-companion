@@ -70,6 +70,7 @@ interface BuiltinSlash {
 
 const BUILTIN_SLASH: BuiltinSlash[] = [
   { name: 'notes', description: 'Open private client-side Session Notes', builtin: true },
+  { name: 'artifacts', description: 'Open session Artifacts & Plans panel', builtin: true },
   { name: 'btw', description: 'Ask a side question without polluting main context', builtin: true },
   { name: 'side', description: 'Open the Side Chat panel', builtin: true },
   { name: 'diff', description: 'Open the Diff Review panel', builtin: true },
@@ -112,11 +113,34 @@ interface QuestionSpec {
 }
 
 function extractQuestions(perm: PermCard): QuestionSpec[] {
-  const inp = perm.input as { questions?: QuestionSpec[] } | undefined;
-  if (inp && Array.isArray(inp.questions) && inp.questions.length > 0) {
-    return inp.questions;
+  const inp = perm.input as { questions?: Array<Record<string, unknown>> } | undefined;
+  if (!inp || !Array.isArray(inp.questions) || inp.questions.length === 0) {
+    return [];
   }
-  return [];
+  return inp.questions.map((raw, qIdx) => {
+    const rawOpts = Array.isArray(raw.options) ? raw.options : [];
+    const options = rawOpts
+      .map((opt) => {
+        if (typeof opt === 'string') {
+          return { label: opt };
+        }
+        if (opt && typeof opt === 'object') {
+          const o = opt as Record<string, unknown>;
+          const label = String(o.label ?? o.name ?? o.value ?? o.text ?? '').trim();
+          const description = typeof o.description === 'string' ? o.description : undefined;
+          return label ? { label, description } : null;
+        }
+        return null;
+      })
+      .filter((x): x is { label: string; description?: string } => Boolean(x));
+    return {
+      id: typeof raw.id === 'string' ? raw.id : `q_${qIdx}`,
+      question: String(raw.question ?? raw.prompt ?? ''),
+      header: typeof raw.header === 'string' ? raw.header : undefined,
+      multiSelect: Boolean(raw.multiSelect ?? raw.is_multi_select),
+      options,
+    };
+  });
 }
 
 function isQuestionPerm(perm: PermCard): boolean {
@@ -633,7 +657,12 @@ export const Composer: React.FC<ComposerProps> = ({
         }
         return;
       }
-      if (cmd === 'notes') {
+      if (cmd === 'artifacts') {
+          openRightTab({ id: 'artifacts', kind: 'artifacts', title: 'Artifacts' });
+          setText('');
+          return;
+        }
+        if (cmd === 'notes') {
         setText('');
         openRightTab({ id: 'notes', kind: 'notes', title: 'Notes' });
         return;
@@ -1559,8 +1588,8 @@ export const Composer: React.FC<ComposerProps> = ({
         />
 
         {/* Bottom Toolbar */}
-        <div className="flex items-center justify-between gap-2 px-2.5 pb-2 pt-0.5">
-          <div className="flex items-center gap-1.5 flex-wrap">
+        <div className="flex flex-wrap items-center justify-between gap-2 px-2.5 pb-2 pt-0.5">
+          <div className="flex items-center gap-1.5 flex-wrap min-w-0">
             {/* Model & Provider Picker */}
             <div className="relative" ref={modelPickerRef}>
               <button
@@ -1580,7 +1609,7 @@ export const Composer: React.FC<ComposerProps> = ({
               </button>
 
               {modelPickerOpen && (
-                <div className="absolute bottom-full left-0 mb-2 z-40 w-[490px] max-w-[94vw] rounded-xl border border-[var(--border-strong)] bg-[var(--bg-surface)] shadow-2xl overflow-hidden">
+                <div className="absolute bottom-full left-0 mb-2 z-40 w-[min(490px,calc(100vw-32px))] max-h-[min(480px,74vh)] overflow-y-auto rounded-xl border border-[var(--border-strong)] bg-[var(--bg-surface)] shadow-2xl">
                   <div className="grid grid-cols-[136px_1fr] min-h-[290px]">
                     {/* Provider Rail */}
                     <div className="border-r border-[var(--border)] bg-[var(--bg-sidebar)] p-2 space-y-1">
@@ -1904,7 +1933,7 @@ export const Composer: React.FC<ComposerProps> = ({
             )}
           </div>
 
-          <div className="flex items-center gap-1.5">
+          <div className="flex items-center gap-1.5 shrink-0 ml-auto">
             {isBusy && (
               <button
                 type="button"

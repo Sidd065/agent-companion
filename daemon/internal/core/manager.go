@@ -884,7 +884,7 @@ func (m *Manager) List(ctx context.Context, force bool) []Summary {
 			}
 		}
 	}
-	var out []Summary
+	out := []Summary{}
 	seen := map[string]bool{}
 	for _, s := range m.all() {
 		sum := s.Summary()

@@ -14,6 +14,7 @@ import {
   TerminalSquare,
 } from 'lucide-react';
 import { useApp } from '../../state/appStore.js';
+import { formatHostDisplayName } from '../../utils/multiHost.js';
 import { plainInlineTitle } from '../../utils/sessionHelpers.js';
 
 export const TitleBar: React.FC = () => {
@@ -47,7 +48,7 @@ export const TitleBar: React.FC = () => {
       className="app-drag h-[38px] shrink-0 flex items-center justify-between px-3 border-b border-[var(--border)] bg-[var(--bg-sidebar)] select-none"
       style={{ paddingRight: window.agentcDesktop ? '138px' : '12px' }}
     >
-      <div className="app-no-drag flex items-center gap-1.5 min-w-0">
+      <div className="app-no-drag flex items-center gap-1.5 min-w-0 flex-1 mr-2 overflow-hidden">
         <button
           type="button"
           data-testid="toggle-sidebar-btn"
@@ -79,7 +80,7 @@ export const TitleBar: React.FC = () => {
                 >
                   {hostList.map((h) => (
                     <option key={h.creds.id} value={h.creds.id}>
-                      {h.creds.name}
+                      {formatHostDisplayName(h, hostList)}
                     </option>
                   ))}
                 </select>
@@ -118,7 +119,7 @@ export const TitleBar: React.FC = () => {
         </div>
       </div>
 
-      <div className="app-no-drag flex items-center gap-1">
+      <div className="app-no-drag flex items-center gap-1 shrink-0">
         <button
           type="button"
           data-testid="command-palette-btn"

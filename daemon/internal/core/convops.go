@@ -561,29 +561,29 @@ func (m *Manager) Artifacts(id string) ([]Artifact, error) {
 		return nil, errors.New("bad id")
 	}
 	if s := m.Get(id); s != nil && s.isClaudeSafe() {
-		var out []Artifact
+		out := []Artifact{}
 		for _, a := range m.claudeArtifacts(s) {
 			out = append(out, Artifact{Name: a.Name, Path: a.Path, Size: a.Size, Mtime: a.Updated})
 		}
 		return out, nil
 	}
-	if !m.isAgyID(id) {
+	root := filepath.Join(m.cfg.AgyDataDir, "brain", id)
+	if _, err := os.Stat(root); err != nil && !m.isAgyID(id) {
 		return []Artifact{}, nil
 	}
-	root := filepath.Join(m.cfg.AgyDataDir, "brain", id)
-	var out []Artifact
+	out := []Artifact{}
 	_ = filepath.WalkDir(root, func(p string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return nil
 		}
 		name := d.Name()
-		if strings.HasPrefix(name, ".") && p != root {
+		if p != root && (strings.HasPrefix(name, ".") || (d.IsDir() && name == "scratch")) {
 			if d.IsDir() {
 				return filepath.SkipDir
 			}
 			return nil
 		}
-		if d.IsDir() {
+		if d.IsDir() || strings.HasSuffix(name, ".metadata.json") || strings.HasSuffix(name, ".resolved") || strings.Contains(name, ".resolved.") {
 			return nil
 		}
 		info, err := d.Info()

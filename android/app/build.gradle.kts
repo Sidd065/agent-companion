@@ -4,8 +4,8 @@ plugins {
     alias(libs.plugins.kotlin.serialization)
 }
 
-val appVersionCode = 13
-val appVersionName = "0.6.0"
+val appVersionCode = 14
+val appVersionName = "0.6.1"
 
 android {
     namespace = "io.github.sidd065.agentcompanion"
@@ -98,6 +98,8 @@ dependencies {
     testImplementation(libs.kotlinx.coroutines.test)
     testImplementation(libs.robolectric)
     testImplementation(libs.androidx.test.core)
+    testImplementation("androidx.compose.ui:ui-test-junit4")
+    debugImplementation("androidx.compose.ui:ui-test-manifest")
     // Support JDK 25 bytecode (major version 69) in Robolectric instrumentation.
     testImplementation("org.ow2.asm:asm:9.9")
     testImplementation("org.ow2.asm:asm-commons:9.9")

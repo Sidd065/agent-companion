@@ -24,6 +24,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.outlined.Shield
 import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.outlined.Add
 import androidx.compose.material.icons.outlined.AlternateEmail
@@ -219,10 +220,27 @@ fun Composer(
                 Modifier.horizontalScroll(rememberScrollState()).padding(horizontal = 10.dp, vertical = 4.dp),
                 horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically,
             ) {
-                MiniChip(Icons.Outlined.Bolt, modelLabel ?: "Model", onModel)
+                val conciseModel = if (modelLabel != null && thoughtLabel != null && modelLabel.endsWith(" ($thoughtLabel)", ignoreCase = true)) {
+                    modelLabel.dropLast(thoughtLabel.length + 3).trim()
+                } else {
+                    modelLabel ?: "Model"
+                }
+                MiniChip(Icons.Outlined.Bolt, conciseModel, onModel)
                 if (thoughtLabel != null) MiniChip(Icons.Outlined.Psychology, thoughtLabel, onThinking)
                 MiniChip(Icons.Outlined.Tune, modeLabel ?: "Mode", onMode)
-                if (skipPerms) Text("skip-permissions", style = MaterialTheme.typography.labelSmall, color = ex.warning, fontFamily = FontFamily.Monospace)
+                if (skipPerms) {
+                    Surface(
+                        color = ex.warning.copy(alpha = 0.14f),
+                        shape = RoundedCornerShape(50),
+                        border = androidx.compose.foundation.BorderStroke(1.dp, ex.warning.copy(alpha = 0.4f)),
+                    ) {
+                        Row(Modifier.padding(horizontal = 7.dp, vertical = 4.dp), verticalAlignment = Alignment.CenterVertically) {
+                            Icon(Icons.Outlined.Shield, null, Modifier.size(12.dp), tint = ex.warning)
+                            Spacer(Modifier.width(3.dp))
+                            Text("Bypass", style = MaterialTheme.typography.labelSmall, color = ex.warning, maxLines = 1)
+                        }
+                    }
+                }
             }
             Row(Modifier.padding(start = 4.dp, end = 8.dp, bottom = 6.dp), verticalAlignment = Alignment.Bottom) {
                 Box {
@@ -302,7 +320,7 @@ private fun SuggestionRow(icon: ImageVector, title: String, sub: String?, onClic
 private fun MiniChip(icon: ImageVector, label: String, onClick: () -> Unit) {
     Row(
         Modifier.clip(RoundedCornerShape(50)).background(MaterialTheme.colorScheme.surfaceContainerHigh).clickable(onClick = onClick)
-            .padding(horizontal = 10.dp, vertical = 5.dp),
+            .padding(horizontal = 8.dp, vertical = 5.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Icon(icon, null, Modifier.size(14.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)

@@ -368,6 +368,12 @@ fun TerminalScreen(termId: String) {
         contentWindowInsets = androidx.compose.foundation.layout.WindowInsets(0, 0, 0, 0),
         topBar = {
             TopAppBar(
+                colors = androidx.compose.material3.TopAppBarDefaults.topAppBarColors(
+                    containerColor = bg,
+                    titleContentColor = Color(0xFFE6E8EE),
+                    navigationIconContentColor = Color(0xFFE6E8EE),
+                    actionIconContentColor = Color(0xFFE6E8EE),
+                ),
                 title = {
                     Column {
                         Text(term?.name ?: termName.ifBlank { "Terminal" }, maxLines = 1, overflow = TextOverflow.Ellipsis)

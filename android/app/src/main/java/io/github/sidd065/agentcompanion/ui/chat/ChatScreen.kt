@@ -426,7 +426,7 @@ fun ChatScreen(sessionId: String, prefill: String) {
                         Icon(
                             Icons.AutoMirrored.Outlined.StickyNote2,
                             "Session notes",
-                            tint = if (sessionNote != null) MaterialTheme.colorScheme.primary else androidx.compose.ui.graphics.Color.Unspecified,
+                            tint = if (sessionNote != null) MaterialTheme.colorScheme.primary else androidx.compose.material3.LocalContentColor.current,
                         )
                     }
                     IconButton(onClick = { nav.navigate(Routes.diff(sessionId, host = conn.config.id)) }) { Icon(Icons.Outlined.Difference, "Changes") }
@@ -600,7 +600,7 @@ fun ChatScreen(sessionId: String, prefill: String) {
             },
             onDismiss = { sheet = null },
         )
-        "artifacts" -> activityTab = "artifacts"
+        "artifacts" -> { sheet = null; activityTab = "artifacts" }
         "tasks" -> { sheet = null; activityTab = if (live?.tasks.isNullOrEmpty() && live?.subagents?.isNotEmpty() == true) "agents" else "tasks" }
         "status" -> StatusSheet(s, extras, agents.firstOrNull { it.id == s?.agent }?.version, conn.config.label, onDismiss = { sheet = null }, codexCatalog = codexCatalog)
         "permissions" -> PermissionRulesSheet(conn, sessionId, onDismiss = { sheet = null })
@@ -698,7 +698,7 @@ private fun StateBanner(s: SessionSummary?) {
 
 @Composable
 private fun ContextRing(s: SessionSummary?, onClick: () -> Unit) {
-    if (s == null || s.contextSize <= 0) return
+    if (s == null || s.contextSize <= 0 || s.contextUsed <= 0) return
     val frac = (s.contextUsed.toFloat() / s.contextSize).coerceIn(0f, 1f)
     Box(Modifier.size(40.dp).clickable(onClick = onClick), contentAlignment = Alignment.Center) {
         CircularProgressIndicator(progress = { maxOf(frac, 0.02f) }, modifier = Modifier.size(22.dp), strokeWidth = 3.dp,

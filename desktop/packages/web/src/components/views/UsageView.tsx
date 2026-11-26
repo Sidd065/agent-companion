@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { Activity, Coins, Cpu, RefreshCw } from 'lucide-react';
 import type { UsageBucket, UsageSummary } from '@agentc/protocol';
 import { useApp } from '../../state/appStore.js';
+import { formatHostDisplayName } from '../../utils/multiHost.js';
 
 interface UsageRangeSpec {
   id: string;
@@ -28,7 +29,7 @@ function fmtTokens(n: number): string {
 
 export const UsageView: React.FC = () => {
   const { activeHost, setActiveHostId, hostList, callHost, pushToast } = useApp();
-  const [hostId, setHostId] = useState(activeHost?.creds.id || hostList[0]?.creds.id || '');
+  const [hostId, setHostId] = useState<string>('all');
   const [rangeId, setRangeId] = useState('30d');
   const activeRange = RANGES.find((r) => r.id === rangeId) ?? RANGES[4];
   const [metric, setMetric] = useState<'cost' | 'tokens'>('tokens');
@@ -39,23 +40,66 @@ export const UsageView: React.FC = () => {
   const reqSeqRef = useRef(0);
 
   useEffect(() => {
-    if (activeHost?.creds.id && activeHost.creds.id !== hostId) {
-      setHostId(activeHost.creds.id);
-    } else if (hostId && !hostList.some((h) => h.creds.id === hostId)) {
-      setHostId(activeHost?.creds.id || hostList[0]?.creds.id || '');
+    if (hostId !== 'all' && hostId && !hostList.some((h) => h.creds.id === hostId)) {
+      setHostId('all');
     }
-  }, [activeHost?.creds.id, hostList]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [hostId, hostList]);
 
   const load = useCallback(async () => {
     if (!hostId) return;
     const seq = ++reqSeqRef.current;
     setLoading(true);
     try {
-      const [u, cl, aq] = await Promise.all([
-        callHost<UsageSummary>(hostId, 'usage.summary', activeRange.params),
-        callHost<Record<string, unknown>>(hostId, 'claude.usage', {}).catch(() => null),
-        callHost<Record<string, unknown>>(hostId, 'agy.quota', {}).catch(() => null),
+      const targetHosts =
+        hostId === 'all'
+          ? hostList.filter((h) => h.state === 'connected').map((h) => h.creds.id)
+          : [hostId];
+      if (targetHosts.length === 0) {
+        setLoading(false);
+        return;
+      }
+      const primaryHost = targetHosts[0]!;
+      const [summaries, cl, aq] = await Promise.all([
+        Promise.all(
+          targetHosts.map((hid) => callHost<UsageSummary>(hid, 'usage.summary', activeRange.params).catch(() => null)),
+        ),
+        callHost<Record<string, unknown>>(primaryHost, 'claude.usage', {}).catch(() => null),
+        callHost<Record<string, unknown>>(primaryHost, 'agy.quota', {}).catch(() => null),
       ]);
+      const mergeBuckets = (lists: UsageBucket[][]): UsageBucket[] => {
+        const map = new Map<string, UsageBucket>();
+        for (const arr of lists) {
+          for (const b of arr || []) {
+            const cur = map.get(b.key);
+            if (!cur) map.set(b.key, { ...b });
+            else {
+              cur.turns += b.turns;
+              cur.inputTokens += b.inputTokens;
+              cur.outputTokens += b.outputTokens;
+              cur.cachedTokens += b.cachedTokens;
+              cur.totalTokens += b.totalTokens;
+              cur.costUsd += b.costUsd;
+            }
+          }
+        }
+        return Array.from(map.values()).sort((a, b) => b.totalTokens - a.totalTokens);
+      };
+      const valid = summaries.filter((x): x is UsageSummary => Boolean(x));
+      const u: UsageSummary = valid.length === 1
+        ? valid[0]!
+        : {
+            days: valid[0]?.days ?? 30,
+            turns: valid.reduce((s, x) => s + (x.turns || 0), 0),
+            inputTokens: valid.reduce((s, x) => s + (x.inputTokens || 0), 0),
+            outputTokens: valid.reduce((s, x) => s + (x.outputTokens || 0), 0),
+            cachedTokens: valid.reduce((s, x) => s + (x.cachedTokens || 0), 0),
+            totalTokens: valid.reduce((s, x) => s + (x.totalTokens || 0), 0),
+            costUsd: valid.reduce((s, x) => s + (x.costUsd || 0), 0),
+            byDay: mergeBuckets(valid.map((x) => x.byDay)).sort((a, b) => a.key.localeCompare(b.key)),
+            byAgent: mergeBuckets(valid.map((x) => x.byAgent)),
+            byModel: mergeBuckets(valid.map((x) => x.byModel)),
+            byProject: mergeBuckets(valid.map((x) => x.byProject)),
+          };
       if (seq !== reqSeqRef.current) return;
       setSummary(u);
       setClaudeLimits(cl);
@@ -130,20 +174,22 @@ export const UsageView: React.FC = () => {
               Local 92-day token, turn, and cost telemetry captured directly by your daemon.
             </p>
           </div>
-          <div className="flex items-center gap-2">
+          <div className="flex flex-wrap items-center gap-2">
             {hostList.length > 1 && (
               <select
                 data-testid="usage-host-select"
                 value={hostId}
                 onChange={(e) => {
-                  setHostId(e.target.value);
-                  setActiveHostId(e.target.value);
+                  const v = e.target.value;
+                  setHostId(v);
+                  if (v !== 'all') setActiveHostId(v);
                 }}
                 className="rounded-lg border border-[var(--border)] bg-[var(--bg-surface)] px-2.5 py-1 text-xs"
               >
+                <option value="all">All Connected Hosts ({hostList.filter((h) => h.state === 'connected').length})</option>
                 {hostList.map((h) => (
                   <option key={h.creds.id} value={h.creds.id}>
-                    {h.creds.name}
+                    {formatHostDisplayName(h, hostList)}
                   </option>
                 ))}
               </select>

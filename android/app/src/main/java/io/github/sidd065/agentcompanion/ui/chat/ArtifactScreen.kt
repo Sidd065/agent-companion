@@ -246,7 +246,7 @@ fun ArtifactScreen(sessionId: String, path: String) {
         val effectiveKind = kindFor(fetchedInfo)
         if (effectiveKind == "markdown" || effectiveKind == "text") {
             runCatching { conn.rpc.call("session.artifact", params { put("id", sessionId); put("path", path) }).jsonObject }
-                .onSuccess { r -> content = r["content"]?.jsonPrimitive?.content; loadedAt = r["mtime"]?.jsonPrimitive?.longOrNull ?: System.currentTimeMillis(); error = null }
+                .onSuccess { r -> content = r["content"]?.jsonPrimitive?.content; loadedAt = maxOf(r["mtime"]?.jsonPrimitive?.longOrNull ?: 0L, fetchedInfo?.updated ?: 0L, System.currentTimeMillis()); error = null }
                 .onFailure { error = it.message }
         }
     }
@@ -263,7 +263,7 @@ fun ArtifactScreen(sessionId: String, path: String) {
             val nextKind = kindFor(updated)
             if ((nextKind == "markdown" || nextKind == "text") && prevKind != nextKind && content == null) {
                 runCatching { conn.rpc.call("session.artifact", params { put("id", sessionId); put("path", path) }).jsonObject }
-                    .onSuccess { r -> content = r["content"]?.jsonPrimitive?.content; loadedAt = r["mtime"]?.jsonPrimitive?.longOrNull ?: System.currentTimeMillis(); error = null }
+                    .onSuccess { r -> content = r["content"]?.jsonPrimitive?.content; loadedAt = maxOf(r["mtime"]?.jsonPrimitive?.longOrNull ?: 0L, updated.updated, System.currentTimeMillis()); error = null }
                     .onFailure { error = it.message }
             }
         }
@@ -364,16 +364,21 @@ fun ArtifactScreen(sessionId: String, path: String) {
                         }
                     }
                     info?.needsReview == true -> Surface(color = ex.warning.copy(alpha = 0.12f)) {
-                        Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 10.dp), verticalAlignment = Alignment.CenterVertically) {
-                            Text("$agentName asked for your review", style = MaterialTheme.typography.bodyMedium, modifier = Modifier.weight(1f))
-                            OutlinedButton(onClick = { commenting = true }) { Text("Comment") }
-                            Spacer(Modifier.width(8.dp))
-                            Button(enabled = !sending, onClick = {
-                                send(listOf(DraftComment(kind = "artifact", uri = uri, approve = true)), "This looks good. Please proceed.")
-                            }) {
-                                Icon(Icons.Outlined.CheckCircle, null, Modifier.size(18.dp))
-                                Spacer(Modifier.width(6.dp))
-                                Text("Proceed")
+                        Column(Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 10.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                            Text("$agentName requested your review on $name", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp), verticalAlignment = Alignment.CenterVertically) {
+                                OutlinedButton(onClick = { commenting = true }, modifier = Modifier.weight(1f)) { Text("Comment", maxLines = 1) }
+                                Button(
+                                    enabled = !sending,
+                                    modifier = Modifier.weight(1.25f),
+                                    onClick = {
+                                        send(listOf(DraftComment(kind = "artifact", uri = uri, approve = true)), "This looks good. Please proceed.")
+                                    },
+                                ) {
+                                    Icon(Icons.Outlined.CheckCircle, null, Modifier.size(18.dp))
+                                    Spacer(Modifier.width(6.dp))
+                                    Text("Proceed", maxLines = 1)
+                                }
                             }
                         }
                     }

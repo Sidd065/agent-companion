@@ -373,6 +373,7 @@ var (
 	realBashRe = regexp.MustCompile(`\[realbash:([^\]]+)\]`)
 	slowRe     = regexp.MustCompile(`\[slow:(\d+)\]`)
 	errRe      = regexp.MustCompile(`\[error:([^\]]+)\]`)
+	gate1Re    = regexp.MustCompile(`\[gate1:([^\]]+)\]`)
 )
 
 func (s *server) runPrompt(reqID json.RawMessage, params json.RawMessage) {
@@ -514,6 +515,93 @@ func (s *server) runPrompt(reqID json.RawMessage, params json.RawMessage) {
 			}
 			replyBuf.WriteString(msg + "\n")
 		}
+	}
+
+
+	// [agyquestion] — Antigravity string-array options + is_multi_select
+	if strings.Contains(promptText, "[agyquestion]") {
+		cid := nextCall("agyask")
+		qInput := map[string]any{
+			"questions": []map[string]any{
+				{
+					"question":        "Which Cloudflare tunnel auth mode should we configure for jdlf.cc?",
+					"is_multi_select": false,
+					"options": []string{
+						"(Recommended) Static named tunnel per host",
+						"Quick ephemeral trycloudflare tunnel",
+						"Custom external reverse proxy",
+					},
+				},
+			},
+		}
+		resp, err := s.callClient("session/request_permission", map[string]any{
+			"sessionId": st.ID,
+			"toolCall":  map[string]any{"toolCallId": cid, "name": "ask_question", "kind": "other", "title": "Clarify tunnel mode", "rawInput": qInput},
+			"options": []map[string]any{
+				{"optionId": "allow", "name": "Submit answers", "kind": "allow_once"},
+				{"optionId": "deny", "name": "Skip", "kind": "reject_once"},
+			},
+			"_meta": map[string]any{"agentc": map[string]any{"kind": "question", "tool": "ask_question"}},
+		}, cancelCh)
+		if err != nil {
+			s.reply(reqID, map[string]any{"stopReason": "cancelled"})
+			return
+		}
+		ansStr := extractAnswers(resp.Result)
+		replyBuf.WriteString("Agy question answered: " + ansStr + "\n")
+	}
+
+	// [gate1:dir] — Rich Gate 1 Markdown (alerts, LR Mermaid, 4-col table, carousel w/ %20 PNG & MP4, KaTeX)
+	if mm := gate1Re.FindStringSubmatch(promptText); mm != nil {
+		dir := strings.TrimSpace(mm[1])
+		replyBuf.WriteString(fmt.Sprintf(`# Gate 1 Review & Engineering Architecture
+
+> [!IMPORTANT]
+> **GPU Budget & Hygiene Status**: Vast.ai Blender instance `+"`62509883`"+` (RTX 3060 @ `+"`$0.0816/hr`"+`) was spun up exclusively for headless Blender 4.2 OptiX rendering and **immediately destroyed** (`+"`$0.04`"+` spent out of `+"`$100.00`"+` budget).
+
+> [!WARNING]
+> Ensure static tunnel hostnames under `+"`jdlf.cc`"+` do not collide with existing services.
+
+## 1. End-to-End 3D-Guided Hub-and-Spoke Architecture
+
+`+"```mermaid"+`
+flowchart LR
+  Ref["ref.mp4 (360x640)"] --> CleanRefs["Curated Clean Frames"]
+  CleanRefs --> Anchor16["Master Anchor 16:9 (2560x1440)"]
+  CleanRefs --> Anchor9["Master Anchor 9:16 (1440x2560)"]
+  Anchor16 & Anchor9 --> Calib["3D Pinhole Calibration (Z=0 Pond)"]
+  Calib --> Blender["Headless Blender 4.2 (362f @ 24fps)"]
+  Blender --> Mod01["Modules 01..12 (RGB + Depth)"]
+  Anchor16 & Mod01 --> H3["MiniMax H3 ControlNet"]
+  H3 --> QA["qa_check.py (Seam SSIM + Drift)"]
+`+"```"+`
+
+## 2. Module Verification Matrix
+
+Inline grid constraint $17k + 5 = 362$ and perceptual root-mean-square error:
+
+$$
+\text{RMSE} = \sqrt{\frac{1}{N}\sum_{i=1}^{N} (\hat{y}_i - y_i)^2}
+$$
+
+| Module | Aspect Ratios | Frame Grid | QA Metrics & Notes |
+|---|---|---|---|
+| `+"`01_dive`"+` | `+"`2560x1440`"+` + `+"`1440x2560`"+` | `+"`362f @ 24fps`"+` | Seam SSIM `+"`0.994`"+`, zero corner optical flow |
+| `+"`02_huddle`"+` | `+"`2560x1440`"+` + `+"`1440x2560`"+` | `+"`362f @ 24fps`"+` | Pairwise repulsion verified across all 6 ducklings |
+
+`+"````carousel"+`
+![Storyboard 2K Render](file://%s/assets/storyboard%%202k.png)
+<!-- slide -->
+![Blockout Motion Pass](file://%s/assets/blockout.mp4)
+<!-- slide -->
+`+"```python"+`
+def validate_grid(frames: int) -> bool:
+    return (frames - 5) %% 17 == 0
+`+"```"+`
+`+"````"+`
+
+Inspect [pipeline.ts](file://%s/src/pipeline.ts#L1-L10) or halted diagnostic URL: https://agentc-dev-box.jdlf.cc/diagnostics/very-long-path-segment-alpha-bravo-charlie-delta-echo-foxtrot-golf-hotel-india-juliet-kilo-lima-mike-november-oscar-papa-quebec-romeo-sierra-tango-uniform-victor-whiskey-xray-yankee-zulu?token=redacted_verify_wrap
+`, dir, dir, dir))
 	}
 
 	// [question]

@@ -7,8 +7,8 @@ Client Protocol) agent**. Manage projects, isolated Git worktrees, per-turn chec
 PRs & Issues, scripts, scheduled tasks, usage/cost telemetry, and real interactive terminals — across any
 number of local or remote hosts, all end-to-end encrypted.
 
-**[Download Linux Desktop (.deb)](https://github.com/Sidd065/agent-companion/releases/latest/download/agent-companion_0.6.0_amd64.deb)**
-· **[Linux AppImage](https://github.com/Sidd065/agent-companion/releases/latest/download/Agent-Companion-0.6.0-x86_64.AppImage)**
+**[Download Linux Desktop (.deb)](https://github.com/Sidd065/agent-companion/releases/latest/download/agent-companion_0.6.1_amd64.deb)**
+· **[Linux AppImage](https://github.com/Sidd065/agent-companion/releases/latest/download/Agent-Companion-0.6.1-x86_64.AppImage)**
 · **[Android APK](https://github.com/Sidd065/agent-companion/releases/latest/download/agent-companion.apk)**
 · [Releases](https://github.com/Sidd065/agent-companion/releases) · [Install](#install)
 

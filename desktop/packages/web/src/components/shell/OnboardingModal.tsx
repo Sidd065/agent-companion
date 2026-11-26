@@ -2,6 +2,8 @@ import React, { useEffect, useState } from 'react';
 import { parsePairLink } from '@agentc/client-core';
 import { Check, Laptop, Link2, Loader2, RefreshCw, Server, ShieldCheck, Trash2, X } from 'lucide-react';
 import { useApp } from '../../state/appStore.js';
+import { formatHostDisplayName } from '../../utils/multiHost.js';
+import { confirmAction } from './ConfirmDialog.js';
 
 export const OnboardingModal: React.FC = () => {
   const {
@@ -172,7 +174,7 @@ export const OnboardingModal: React.FC = () => {
                   <div className="min-w-0">
                     <div className="flex items-center gap-2">
                       <Server className="w-3.5 h-3.5 text-[var(--text-muted)]" />
-                      <span className="text-xs font-semibold truncate">{h.creds.name}</span>
+                      <span className="text-xs font-semibold truncate">{formatHostDisplayName(h, hostList)}</span>
                       <span
                         className={`text-[10px] px-1.5 py-0.5 rounded font-medium ${
                           h.state === 'connected'
@@ -202,7 +204,15 @@ export const OnboardingModal: React.FC = () => {
                     <button
                       type="button"
                       title="Remove host"
-                      onClick={() => void removeHost(h.creds.id)}
+                      onClick={() => {
+                        void confirmAction({
+                          title: 'Remove Paired Host',
+                          message: `Disconnect and forget "${formatHostDisplayName(h, hostList)}" from this desktop client?`,
+                          confirmLabel: 'Remove Host',
+                        }).then((ok) => {
+                          if (ok) void removeHost(h.creds.id);
+                        });
+                      }}
                       className="p-1.5 rounded hover:bg-[var(--bg-hover)] text-[var(--danger)] cursor-pointer"
                     >
                       <Trash2 className="w-3.5 h-3.5" />

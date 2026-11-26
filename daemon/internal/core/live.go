@@ -394,7 +394,11 @@ func (m *Manager) LiveState(ctx context.Context, id string) (*Live, error) {
 		return m.claudeLive(s), nil
 	}
 	if !m.isAgyID(id) {
-		return &Live{Tasks: []Task{}, Artifacts: []ArtifactInfo{}, Subagents: []Subagent{}, Messages: []AgentMessage{}}, nil
+		if bdir, berr := m.brainDir(id); berr != nil {
+			return &Live{Tasks: []Task{}, Artifacts: []ArtifactInfo{}, Subagents: []Subagent{}, Messages: []AgentMessage{}}, nil
+		} else if st, serr := os.Stat(bdir); serr != nil || !st.IsDir() {
+			return &Live{Tasks: []Task{}, Artifacts: []ArtifactInfo{}, Subagents: []Subagent{}, Messages: []AgentMessage{}}, nil
+		}
 	}
 	live, err := m.ComputeLive(ctx, id, m.liveLS(ctx, id))
 	if err == nil {
@@ -656,7 +660,7 @@ func (m *Manager) watchLive(ctx context.Context, id string, w *liveWatch) {
 			}
 			return nil
 		})
-		if err != nil && ctx.Err() == nil {
+		if err != nil && ctx.Err() == nil && !strings.Contains(err.Error(), "connection refused") {
 			log.Printf("session %s: agent state stream: %v (falling back to polling)", id, err)
 		}
 	}()

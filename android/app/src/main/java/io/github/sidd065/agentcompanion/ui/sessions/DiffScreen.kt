@@ -145,9 +145,15 @@ fun DiffScreen(sessionId: String?, path: String) {
     ) { pad ->
         Column(Modifier.padding(pad).fillMaxSize()) {
             val tabs = if (sessionId != null) listOf("Uncommitted", "Agent edits", "Commits", "Git") else listOf("Uncommitted", "Commits", "Git")
-            PrimaryTabRow(selectedTabIndex = tab.coerceAtMost(tabs.size - 1)) {
+            androidx.compose.material3.SecondaryScrollableTabRow(selectedTabIndex = tab.coerceAtMost(tabs.size - 1), edgePadding = 12.dp) {
                 tabs.forEachIndexed { i, name ->
-                    Tab(tab == i, { tab = i }, text = { Text(if (name == "Agent edits") "Agent edits${agent?.size?.let { " · $it" } ?: ""}" else name) })
+                    Tab(tab == i, { tab = i }, text = {
+                        Text(
+                            if (name == "Agent edits") "Agent edits${agent?.size?.let { " · $it" } ?: ""}" else name,
+                            maxLines = 1,
+                            softWrap = false,
+                        )
+                    })
                 }
             }
             err?.let { ErrorBox(it) { reload++ } }

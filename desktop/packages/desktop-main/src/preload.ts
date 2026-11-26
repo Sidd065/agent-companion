@@ -37,7 +37,7 @@ export interface DesktopBridge {
 const bridge: DesktopBridge = {
   isDesktop: true,
   platform: process.platform,
-  version: process.env.AGENTC_DESKTOP_VERSION || '0.6.0',
+  version: process.env.AGENTC_DESKTOP_VERSION || '0.6.1',
   hostname: process.env.HOSTNAME || 'linux-desktop',
   loadHosts: () => ipcRenderer.invoke('store:hosts:load'),
   saveHosts: (hosts) => ipcRenderer.invoke('store:hosts:save', hosts),
